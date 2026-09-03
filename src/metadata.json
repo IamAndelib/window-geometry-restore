@@ -3,7 +3,7 @@
     "KPlugin": {
         "Authors": [
             {
-                "Name": "thesriz"
+                "Name": "IamAndelib"
             }
         ],
         "Name": "Window Geometry Restore",
@@ -12,7 +12,7 @@
         "Id": "windowgeometryrestore",
         "Version": "1.0.0",
         "License": "GPLv3",
-        "Website": "https://github.com/thesriz"
+        "Website": "https://github.com/IamAndelib/window-geometry-restore"
     },
     "X-Plasma-API": "declarativescript",
     "X-Plasma-MainScript": "ui/main.qml",

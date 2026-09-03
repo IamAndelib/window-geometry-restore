@@ -1,5 +1,7 @@
 # Window Geometry Restore
 
+Source: [github.com/IamAndelib/window-geometry-restore](https://github.com/IamAndelib/window-geometry-restore)
+
 A KWin script for KDE Plasma 6 that remembers how you left your application windows - position, size, screen, virtual desktop, minimized and keep-above/below state - and puts them back when the app reopens.
 
 It is a **lightweight assistant to KWin's native window management**: it only fills the gap where geometry restore fails, and never fights the window manager.
