@@ -1,5 +1,13 @@
 # Window Geometry Restore
 
+<p align="center">
+  <img src="assets/icon.svg" width="120" alt="Window Geometry Restore logo">
+</p>
+
+![Release](https://img.shields.io/github/v/release/IamAndelib/window-geometry-restore)
+![License](https://img.shields.io/github/license/IamAndelib/window-geometry-restore)
+![KDE Plasma](https://img.shields.io/badge/Plasma-6.4%2B-1d99f3)
+
 Source: [github.com/IamAndelib/window-geometry-restore](https://github.com/IamAndelib/window-geometry-restore)
 
 A KWin script for KDE Plasma 6 that remembers how you left your application windows - position, size and screen - and puts them back when the app reopens.
