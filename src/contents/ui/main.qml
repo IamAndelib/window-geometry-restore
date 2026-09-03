@@ -18,7 +18,7 @@ Item {
     property var tracked: ({})
     property var retries: []
 
-    property string defaultBlacklist: [
+    readonly property string defaultBlacklist: [
         'org.kde.spectacle',
         'org.kde.polkit-kde-authentication-agent-1',
         'steam*',
@@ -61,7 +61,7 @@ Item {
     }
 
     function loadPersisted() {
-        var result = Engine.decodeState(settings.windowgeometryrestore_windows)
+        var result = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
         if (result.error) log('saved window data unreadable (' + result.error + ') - starting fresh')
         state = result.state
         var removed = Engine.pruneExpired(state, Date.now())
@@ -75,7 +75,10 @@ Item {
     function persist() {
         try {
             Engine.pruneExpired(state, Date.now())
-            settings.windowgeometryrestore_windows = Engine.encodeState(state)
+            var disk = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
+            if (!disk.error) Engine.mergeDiskApps(state, disk.state)
+            settings.setValue('windowgeometryrestore_windows', Engine.encodeState(state))
+            settings.sync()
         } catch (e) {
             log('failed to persist: ' + e)
         }
@@ -88,7 +91,6 @@ Item {
         if (!Array.isArray(app.saves)) app.saves = []
         if (!Array.isArray(app.open)) app.open = []
         if (!Array.isArray(app.buffer)) app.buffer = []
-        if (app.finalizeAt === undefined) app.finalizeAt = null
         if (app.session === undefined) app.session = null
         return app
     }
@@ -155,8 +157,11 @@ Item {
                 unwatchCaption(id)
             }
             var snap = snapshotWindow(w)
-            if (snap) app.buffer.push({ closeTime: Date.now(), snap: snap })
-            if (app.open.length === 0 && !app.finalizeAt) app.finalizeAt = Date.now() + Engine.BURST_MS
+            if (snap) {
+                app.buffer.push({ closeTime: Date.now(), snap: snap })
+                while (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
+            }
+            if (app.open.length === 0) finalizeApp(entry.cls)
             ensureTick()
         } catch (e) {
             dbg('close handling failed: ' + e)
@@ -165,7 +170,7 @@ Item {
 
     function finalizeApp(cls) {
         var app = state.apps[cls]
-        app.finalizeAt = null
+        if (!app) return
         if (!app.buffer.length) return
         app.buffer.sort(function (a, b) { return a.closeTime - b.closeTime })
         var saves = []
@@ -220,6 +225,14 @@ Item {
         }
     }
 
+    function bestMatchForWindow(w, saves) {
+        return Engine.bestMatch(saves, {
+            caption: String(w.caption || ''),
+            width: Math.round(w.width),
+            height: Math.round(w.height)
+        })
+    }
+
     function tryAssign(id) {
         var entry = tracked[id]
         if (!entry || entry.assigned) return
@@ -227,30 +240,25 @@ Item {
         if (!app || !app.session) return
         var w = entry.w
         if (!w || w.deleted) return
-        var match = Engine.bestMatch(app.session.saves, {
-            caption: String(w.caption || ''),
-            width: Math.round(w.width),
-            height: Math.round(w.height)
-        })
+        var match = bestMatchForWindow(w, app.session.saves)
         if (!match) return
         // Only unambiguous matches apply instantly; the rest wait for the set to arrive.
         var immediate = match.tier === 1 || app.session.saves.length === 1
         if (!immediate) return
-        assignSave(entry.cls, id, match.index, match.score)
+        assignSave(entry.cls, id, app.session, match, false)
     }
 
-    function assignSave(cls, id, index, score) {
-        var app = state.apps[cls]
-        var session = app.session
+    function assignSave(cls, id, session, match, bestEffort) {
         var entry = tracked[id]
-        if (!session || !entry) return
-        var save = session.saves[index]
+        if (!entry) return
+        var save = session.saves[match.index]
         save.matched = true
         entry.assigned = true
         unwatchCaption(id)
         removeFromArray(session.pending, id)
         var changes = applySnapshot(entry.w, save, cls)
-        log(cls + ': restored window to saved state' + (changes.length ? ' (' + changes.join(', ') + ')' : ' (already correct)') + ', caption match ' + score + '%')
+        var mode = bestEffort ? 'best effort' : (changes.length ? changes.join(', ') : 'already correct')
+        log(cls + ': restored window to saved state (' + mode + '), caption match ' + match.score + '%')
         for (var i = 0; i < session.saves.length; i++) {
             if (!session.saves[i].matched) return
         }
@@ -270,17 +278,8 @@ Item {
             if (!entry) continue
             var w = entry.w
             if (!w || w.deleted) continue
-            var match = Engine.bestMatch(session.saves, {
-                caption: String(w.caption || ''),
-                width: Math.round(w.width),
-                height: Math.round(w.height)
-            })
-            if (match) {
-                session.saves[match.index].matched = true
-                entry.assigned = true
-                applySnapshot(w, session.saves[match.index], cls)
-                log(cls + ': restored window to saved state (' + 'best effort, caption match ' + match.score + '%)')
-            }
+            var match = bestMatchForWindow(w, session.saves)
+            if (match) assignSave(cls, id, session, match, true)
         }
         if (app.saves === session.saves) app.saves = []
         persist()
@@ -421,7 +420,6 @@ Item {
     function sweepSessions(now) {
         for (var cls in state.apps) {
             var app = state.apps[cls]
-            if (app.finalizeAt && now >= app.finalizeAt) finalizeApp(cls)
             if (app.session && now >= app.session.deadline) endSession(cls)
         }
     }
@@ -429,8 +427,7 @@ Item {
     function stopTickIfIdle() {
         if (retries.length > 0) return
         for (var cls in state.apps) {
-            var app = state.apps[cls]
-            if (app.finalizeAt || app.session) return
+            if (state.apps[cls].session) return
         }
         tickTimer.stop()
     }
@@ -448,7 +445,7 @@ Item {
 
     Timer {
         id: tickTimer
-        interval: 250
+        interval: Engine.TICK_MS
         repeat: true
         running: false
         onTriggered: root.onTick()
@@ -456,7 +453,6 @@ Item {
 
     Settings {
         id: settings
-        property string windowgeometryrestore_windows: '{}'
     }
 
     Connections {
@@ -467,6 +463,7 @@ Item {
         }
 
         function onWindowRemoved(window) {
+            // Safety net: fires even for windows whose closed signal was missed.
             onWindowClosed(window)
         }
     }

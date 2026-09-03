@@ -15,6 +15,8 @@ var BURST_MS = 1500
 var RESTORE_TIMEOUT_MS = 10000
 var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
+var TICK_MS = 250
+var MAX_BUFFER = 64
 var EXPIRY_MS = 30 * 24 * 60 * 60 * 1000
 var MAX_APPS = 500
 
@@ -224,4 +226,19 @@ function pruneExpired(state, now) {
         }
     }
     return removed
+}
+
+// Re-adopt apps that exist on disk but are missing from the in-memory state.
+// Memory wins for every app it already knows; disk-only apps are preserved.
+function mergeDiskApps(state, diskState) {
+    var adopted = 0
+    if (!diskState || !diskState.apps) return adopted
+    for (var cls in diskState.apps) {
+        var app = diskState.apps[cls]
+        if (app && Array.isArray(app.saves) && app.saves.length > 0 && !state.apps[cls]) {
+            state.apps[cls] = app
+            adopted++
+        }
+    }
+    return adopted
 }
