@@ -61,7 +61,7 @@ Item {
     }
 
     function loadPersisted() {
-        var result = Engine.decodeState(settings.windowgeometryrestore_windows)
+        var result = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
         if (result.error) log('saved window data unreadable (' + result.error + ') - starting fresh')
         state = result.state
         var removed = Engine.pruneExpired(state, Date.now())
@@ -75,7 +75,10 @@ Item {
     function persist() {
         try {
             Engine.pruneExpired(state, Date.now())
-            settings.windowgeometryrestore_windows = Engine.encodeState(state)
+            var disk = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
+            if (!disk.error) Engine.mergeDiskApps(state, disk.state)
+            settings.setValue('windowgeometryrestore_windows', Engine.encodeState(state))
+            settings.sync()
         } catch (e) {
             log('failed to persist: ' + e)
         }
@@ -88,7 +91,6 @@ Item {
         if (!Array.isArray(app.saves)) app.saves = []
         if (!Array.isArray(app.open)) app.open = []
         if (!Array.isArray(app.buffer)) app.buffer = []
-        if (app.finalizeAt === undefined) app.finalizeAt = null
         if (app.session === undefined) app.session = null
         return app
     }
@@ -159,7 +161,7 @@ Item {
                 app.buffer.push({ closeTime: Date.now(), snap: snap })
                 while (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
             }
-            if (app.open.length === 0 && !app.finalizeAt) app.finalizeAt = Date.now() + Engine.BURST_MS
+            if (app.open.length === 0) finalizeApp(entry.cls)
             ensureTick()
         } catch (e) {
             dbg('close handling failed: ' + e)
@@ -168,7 +170,7 @@ Item {
 
     function finalizeApp(cls) {
         var app = state.apps[cls]
-        app.finalizeAt = null
+        if (!app) return
         if (!app.buffer.length) return
         app.buffer.sort(function (a, b) { return a.closeTime - b.closeTime })
         var saves = []
@@ -418,7 +420,6 @@ Item {
     function sweepSessions(now) {
         for (var cls in state.apps) {
             var app = state.apps[cls]
-            if (app.finalizeAt && now >= app.finalizeAt) finalizeApp(cls)
             if (app.session && now >= app.session.deadline) endSession(cls)
         }
     }
@@ -426,8 +427,7 @@ Item {
     function stopTickIfIdle() {
         if (retries.length > 0) return
         for (var cls in state.apps) {
-            var app = state.apps[cls]
-            if (app.finalizeAt || app.session) return
+            if (state.apps[cls].session) return
         }
         tickTimer.stop()
     }
@@ -453,7 +453,6 @@ Item {
 
     Settings {
         id: settings
-        property string windowgeometryrestore_windows: '{}'
     }
 
     Connections {

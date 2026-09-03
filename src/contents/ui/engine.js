@@ -227,3 +227,18 @@ function pruneExpired(state, now) {
     }
     return removed
 }
+
+// Re-adopt apps that exist on disk but are missing from the in-memory state.
+// Memory wins for every app it already knows; disk-only apps are preserved.
+function mergeDiskApps(state, diskState) {
+    var adopted = 0
+    if (!diskState || !diskState.apps) return adopted
+    for (var cls in diskState.apps) {
+        var app = diskState.apps[cls]
+        if (app && Array.isArray(app.saves) && app.saves.length > 0 && !state.apps[cls]) {
+            state.apps[cls] = app
+            adopted++
+        }
+    }
+    return adopted
+}

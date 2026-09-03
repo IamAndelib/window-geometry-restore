@@ -10,7 +10,7 @@ const engine = new Function(`
     return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
              MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
              parseList, isListed, captionScore, bestMatch, makeSave, newState,
-             decodeState, encodeState, pruneExpired };
+             decodeState, encodeState, pruneExpired, mergeDiskApps };
 `)()
 
 function save(overrides = {}) {
@@ -199,4 +199,18 @@ test('burst window and retry constants are sane', () => {
     assert.ok(engine.BURST_MS >= 1000 && engine.BURST_MS <= 3000)
     assert.ok(engine.RESTORE_TIMEOUT_MS >= 5000 && engine.RESTORE_TIMEOUT_MS <= 15000)
     assert.ok(engine.MAX_GEOMETRY_TRIES >= 2 && engine.MAX_GEOMETRY_TRIES <= 5)
+})
+
+test('mergeDiskApps: adopts disk-only apps, memory wins for known apps', () => {
+    const memory = engine.newState()
+    memory.apps['known'] = { lastAccess: 5, saves: [save()] }
+    const disk = engine.newState()
+    disk.apps['known'] = { lastAccess: 1, saves: [save({ caption: 'stale on disk' })] }
+    disk.apps['lost'] = { lastAccess: 2, saves: [save({ caption: 'lost' })] }
+    disk.apps['broken'] = null
+
+    const adopted = engine.mergeDiskApps(memory, disk)
+    assert.equal(adopted, 1)
+    assert.equal(memory.apps['known'].saves[0].caption, 'Window', 'memory wins for known apps')
+    assert.equal(memory.apps['lost'].saves[0].caption, 'lost', 'disk-only app re-adopted')
 })

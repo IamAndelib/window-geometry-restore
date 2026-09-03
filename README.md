@@ -28,7 +28,8 @@ This script does the remembering on the compositor side, per window:
 - **Never touches focus, stacking or z-order.** KWin owns those. This avoids the focus-stealing bugs that plague heavier scripts.
 - **Respects window states.** Tiled, maximized, fullscreen, splash, modal and transient windows are left to KWin.
 - **Never restores off-screen.** Geometry is clamped to the current screen area, so monitor changes can't strand windows.
-- **Crash-proof storage.** Corrupt saved data is discarded safely instead of breaking the session.
+- **Save timing.** Saves are written the instant an app's last window closes and flushed to disk immediately. One boundary: apps still *open* at logout keep their previous save, because KWin delivers no close events during session teardown - Plasma's session manager relaunches them, this script restores the geometry from the last clean close.
+- **Crash-proof storage.** Corrupt saved data is discarded safely instead of breaking the session, and apps already on disk are never erased by a stale reload.
 
 ## Installation
 

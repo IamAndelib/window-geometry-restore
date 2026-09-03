@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, bestMatch, makeSave, decodeState, encodeState, pruneExpired, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -160,11 +160,12 @@ function buildRuntime(initialBlob = '{}') {
     const KWin = fakeKWin
 
     let storedBlob = initialBlob
-    const settings = {}
-    Object.defineProperty(settings, 'windowgeometryrestore_windows', {
-        get: () => storedBlob,
-        set: (v) => { storedBlob = v }
-    })
+    const settings = {
+        value: (_key, fallback) => (storedBlob === '' ? fallback : storedBlob),
+        setValue: (_key, v) => { storedBlob = v },
+        sync: () => {},
+        rawSet: (v) => { storedBlob = v }
+    }
 
     const tickTimer = {
         running: false,
@@ -187,7 +188,7 @@ function buildRuntime(initialBlob = '{}') {
             const fn = extracted[name]
             return `function ${name}(${fn.params}) ${fn.body}`
         }).join('\n')}
-        return { ${Object.keys(extracted).join(', ')}, trackedRef: () => tracked, stateRef: () => state, retriesRef: () => retries, blobRef: () => settings.windowgeometryrestore_windows, getLogs: () => logs, nowRef: () => now, setNow: (n) => { now = n }, tick: onTick, tickRef: () => tickTimer };
+        return { ${Object.keys(extracted).join(', ')}, trackedRef: () => tracked, stateRef: () => state, retriesRef: () => retries, blobRef: () => settings.value('windowgeometryrestore_windows', '{}'), rawSetRef: settings.rawSet, getLogs: () => logs, nowRef: () => now, setNow: (n) => { now = n }, tick: onTick, tickRef: () => tickTimer };
     `
 
     const runtime = new Function('Engine', 'Workspace', 'KWin', 'Qt', 'settings', 'tickTimer', `
@@ -208,8 +209,6 @@ test('single-window app (chrome PWA): close, relaunch, geometry restored', () =>
     rt.trackWindow(w)
 
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const blob = JSON.parse(rt.blobRef())
     assert.ok(blob.apps['whatsapp'], 'app saved to settings')
@@ -238,8 +237,6 @@ test('multi-window app: windows restored to their own slots regardless of launch
     rt.trackWindow(b)
     b.emitClosed()
     a.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const saved = JSON.parse(rt.blobRef()).apps['firefox']
     assert.equal(saved.w.length, 2)
@@ -270,8 +267,6 @@ test('ambiguous caption in a multi-save set is deferred, then best-effort assign
     rt.trackWindow(two)
     one.emitClosed()
     two.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const reopened = makeWindow({ cls: 'konsole', caption: 'Window On', x: 500, y: 500, width: 640, height: 480 })
     rt.trackWindow(reopened)
@@ -289,8 +284,6 @@ test('window already at saved geometry is not touched (native-first no-op)', () 
     const w = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 100, width: 800, height: 600 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const reopened = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 100, width: 800, height: 600 })
     rt.trackWindow(reopened)
@@ -319,8 +312,6 @@ test('corrupt persisted data is discarded safely, saving still works afterwards'
     const w = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 500, height: 400 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const blob = JSON.parse(rt.blobRef())
     assert.ok(blob.apps['app'], 'next save round-trips through valid JSON')
@@ -332,8 +323,6 @@ test('restore is clamped to the virtual screen (never off-screen)', () => {
     const w = makeWindow({ cls: 'app', caption: 'App', x: 5000, y: 5000, width: 1000, height: 800 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 1000, height: 800 })
     rt.trackWindow(reopened)
@@ -347,8 +336,6 @@ test('user moving the window during retries cancels further restore attempts', (
     const w = makeWindow({ cls: 'app', caption: 'App', x: 50, y: 50, width: 700, height: 500 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 600, height: 400 })
     reopened._ignoreGeometry = true
@@ -370,8 +357,6 @@ test('minimized and keepAbove/keepBelow are never restored - window opens in fro
     w.keepBelow = true
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const blob = JSON.parse(rt.blobRef())
     assert.equal(blob.apps['app'].w[0].m, undefined, 'window states are not persisted anymore')
@@ -391,8 +376,6 @@ test('single monitor: restore works even when the connector name changed', () =>
     const w = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 100, width: 800, height: 600, outputIndex: 0 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     const renamed = makeOutput('HDMI-A-0', 'SER-CHANGED', 0, 0, 1920, 1080)
     fakeWorkspace.screens = [renamed]
@@ -418,8 +401,6 @@ test('multi-monitor: saved screen missing -> lands on the cursor screen with siz
     const w = makeWindow({ cls: 'app', caption: 'App', x: 2400, y: 100, width: 2400, height: 1600, outputIndex: 2 })
     rt.trackWindow(w)
     w.emitClosed()
-    sleepTick(rt, Engine.BURST_MS + 500)
-    rt.tick()
 
     fakeWorkspace.screens = [outputs[0], outputs[1]]
     try {
@@ -448,6 +429,38 @@ test('close buffer is capped while an app keeps a window open (no unbounded memo
 
     const app = rt.stateRef().apps['chatty']
     assert.equal(app.open.length, 1, 'main window still open')
-    assert.equal(app.finalizeAt, null, 'no finalize armed while a window is open')
     assert.equal(app.buffer.length, Engine.MAX_BUFFER, 'buffer capped at MAX_BUFFER')
+})
+
+test('saves hit disk synchronously when the last window closes (no timers involved)', () => {
+    const rt = buildRuntime()
+
+    const a = makeWindow({ cls: 'app', caption: 'One', x: 5, y: 5, width: 600, height: 400 })
+    const b = makeWindow({ cls: 'app', caption: 'Two', x: 50, y: 60, width: 700, height: 500 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    b.emitClosed()
+    a.emitClosed()
+
+    const blob = JSON.parse(rt.blobRef())
+    assert.equal(blob.apps['app'].w.length, 2, 'save written inside the close event itself')
+    assert.equal(blob.apps['app'].w[0].c, 'Two')
+    assert.equal(blob.apps['app'].w[1].c, 'One')
+})
+
+test('persist re-adopts apps present on disk but missing from memory (self-healing merge)', () => {
+    const rt = buildRuntime()
+    rt.rawSetRef(JSON.stringify({
+        version: 2,
+        apps: { 'lost-app': { t: 1, w: [{ c: 'Lost window', x: 1, y: 2, w: 300, h: 200, o: null }] } }
+    }))
+
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 500, height: 400 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const blob = JSON.parse(rt.blobRef())
+    assert.ok(blob.apps['app'], 'own save written')
+    assert.ok(blob.apps['lost-app'], 'disk-only app rescued instead of erased')
+    assert.equal(blob.apps['lost-app'].w[0].c, 'Lost window')
 })
