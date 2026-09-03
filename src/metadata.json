@@ -10,7 +10,7 @@
         "Description": "Remember and restore window geometry for apps that don't do it themselves. A lightweight assistant to KWin's native window management.",
         "Icon": "preferences-desktop-virtual",
         "Id": "windowgeometryrestore",
-        "Version": "1.0.0",
+        "Version": "1.1.0",
         "License": "GPLv3",
         "Website": "https://github.com/IamAndelib/window-geometry-restore"
     },
