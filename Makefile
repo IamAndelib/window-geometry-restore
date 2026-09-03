@@ -2,7 +2,7 @@ SCRIPT_NAME := windowgeometryrestore
 PKGFILE := $(SCRIPT_NAME).kwinscript
 SRC_DIR := src
 
-.PHONY: all build install uninstall clean enable disable restart-kwin logs load unload reload test
+.PHONY: all build install uninstall clean enable disable restart-kwin logs load unload reload refresh test
 
 all: install clean
 
@@ -61,3 +61,11 @@ unload:
 	bin/unload.sh "$(SCRIPT_NAME)-test"
 
 reload: unload load
+
+refresh: build install
+	@echo "Reloading installed script..."
+	@kwriteconfig6 --file kwinrc --group Plugins --key $(SCRIPT_NAME)Enabled false
+	@qdbus org.kde.KWin /KWin reconfigure
+	@sleep 1
+	@kwriteconfig6 --file kwinrc --group Plugins --key $(SCRIPT_NAME)Enabled true
+	@qdbus org.kde.KWin /KWin reconfigure

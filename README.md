@@ -81,10 +81,11 @@ qdbus org.kde.KWin /KWin reconfigure
 ## Development
 
 ```
-make test    # unit tests for the matching engine (node)
-make build   # package into .kwinscript
-make install # install via kpackagetool6
-make load    # live-load from source dir without packaging (test instance)
-make reload  # reload the test instance
-make logs    # follow the script's log output
+make test     # unit tests for the matching engine + lifecycle simulation (node)
+make build    # package into .kwinscript
+make install  # install via kpackagetool6
+make refresh  # build + install + reload the installed script in the live session
+make load     # live-load from source dir without packaging (test instance)
+make reload   # reload the test instance
+make logs     # follow the script's log output
 ```
