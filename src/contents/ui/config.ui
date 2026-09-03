@@ -14,7 +14,7 @@
    <item>
     <widget class="QLabel" name="introLabel">
      <property name="text">
-      <string>Window Geometry Restore remembers how you left your application windows (position, size, screen, virtual desktop) and puts them back when the app reopens - for apps that don't do it themselves, like Chrome web apps on Wayland.
+      <string>Window Geometry Restore remembers how you left your application windows (position, size and screen) and puts them back when the app reopens - for apps that don't do it themselves, like Chrome web apps on Wayland. Windows always open on your current desktop, in front of you.
 
 Everything works out of the box. The only thing you may ever need to change is the exclusion list below.</string>
      </property>
