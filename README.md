@@ -2,9 +2,11 @@
 
 Source: [github.com/IamAndelib/window-geometry-restore](https://github.com/IamAndelib/window-geometry-restore)
 
-A KWin script for KDE Plasma 6 that remembers how you left your application windows - position, size, screen, virtual desktop, minimized and keep-above/below state - and puts them back when the app reopens.
+A KWin script for KDE Plasma 6 that remembers how you left your application windows - position, size and screen - and puts them back when the app reopens.
 
 It is a **lightweight assistant to KWin's native window management**: it only fills the gap where geometry restore fails, and never fights the window manager.
+
+It restores **geometry only**: windows always open on the current virtual desktop, in front of you, never minimized, never forced above or below other windows. Desktop, focus and stacking stay 100% native KWin.
 
 Based on [Remember Window Positions](https://github.com/rxappdev/RememberWindowPositions) by rxappdev, rebuilt as a lean, deterministic rewrite. GPLv3 (see LICENSE).
 
@@ -20,6 +22,8 @@ This script does the remembering on the compositor side, per window:
 ## Design principles
 
 - **Install and forget.** Two settings total; sane defaults for everything else.
+- **Geometry only.** Position, size and screen - nothing else. Virtual desktop, minimized state, keep-above/below, activities and focus are all left to KWin's native behavior.
+- **Monitor-aware automatically.** Single monitor: geometry is restored directly, even if the connector name changed. Multi-monitor: the saved screen is matched by serial number (then name) and the position is mapped screen-relatively. If the saved screen is missing (unplugged dock, laptop mode), the window lands on the screen under your cursor at the same relative position, with its size clamped to that screen.
 - **Native-first.** If a window is already where it should be (app self-restore, KWin window rules, Plasma session restore), the script does nothing. If a restore doesn't stick (e.g. a forced window rule owns the window), the script gives up silently instead of retrying forever.
 - **Never touches focus, stacking or z-order.** KWin owns those. This avoids the focus-stealing bugs that plague heavier scripts.
 - **Respects window states.** Tiled, maximized, fullscreen, splash, modal and transient windows are left to KWin.

@@ -3,12 +3,13 @@
 // Persisted key legend (compact on purpose - the blob lives in a single KConfig entry):
 //   app:  { t: lastAccessTime, w: [saves] }
 //   save: { c: caption, x: globalX, y: globalY, w: width, h: height,
-//           d: desktopNumber (-1 = all desktops), a: [activityId],
-//           m: minimized, v: keepAbove, b: keepBelow,
-//           o: { x, y, s: outputSerial, n: outputName }  output-relative position,
+//           o: { x, y, s: outputSerial, n: outputName }  output-relative position }
+//   Only geometry is saved and restored; everything else is left to KWin.
 //   Runtime save objects use long names plus a `matched` flag (never persisted).
+//   v1 blobs (which also stored desktop/activities/state flags) decode fine - those
+//   fields are simply ignored.
 
-var SCHEMA_VERSION = 1
+var SCHEMA_VERSION = 2
 var CAPTION_FALLBACK = 80
 var BURST_MS = 1500
 var RESTORE_TIMEOUT_MS = 10000
@@ -118,11 +119,6 @@ function makeSave(fields) {
         y: fields.y,
         width: fields.width,
         height: fields.height,
-        desktopNumber: fields.desktopNumber,
-        activities: fields.activities ? fields.activities.slice() : [],
-        minimized: !!fields.minimized,
-        keepAbove: !!fields.keepAbove,
-        keepBelow: !!fields.keepBelow,
         output: fields.output || null,
         matched: false
     }
@@ -141,11 +137,6 @@ function encodeSave(s) {
         y: s.y,
         w: s.width,
         h: s.height,
-        d: s.desktopNumber,
-        a: s.activities,
-        m: s.minimized ? 1 : 0,
-        v: s.keepAbove ? 1 : 0,
-        b: s.keepBelow ? 1 : 0,
         o: o
     }
 }
@@ -170,11 +161,6 @@ function decodeSave(s) {
         y: numberOr(s.y, 0),
         width: width,
         height: height,
-        desktopNumber: numberOr(s.d, 1),
-        activities: Array.isArray(s.a) ? s.a.filter(function (a) { return typeof a === 'string' }) : [],
-        minimized: !!s.m,
-        keepAbove: !!s.v,
-        keepBelow: !!s.b,
         output: output,
         matched: false
     }

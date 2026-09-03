@@ -50,14 +50,19 @@ const outputs = [
     makeOutput('DP-1', 'SER-1', 0, 0, 1920, 1080),
     makeOutput('HDMI-A-1', 'SER-2', 2000, 0, 1280, 1024)
 ]
+outputs.push(makeOutput('DP-3', 'SER-3', 2000, 0, 1280, 1024))
 
 const fakeWorkspace = {
-    screens: outputs,
+    screens: [outputs[0], outputs[1]],
     desktops: [{ x11DesktopNumber: 1 }, { x11DesktopNumber: 2 }],
     activities: ['act-1', 'act-2'],
     virtualScreenGeometry: { x: 0, y: 0, width: 3280, height: 1080 },
-    clientArea: (_option, w) => {
-        const out = outputs.find((o) => o === w._output) || outputs[0]
+    cursorPos: { x: 100, y: 100 },
+    screenAt(p) {
+        return this.screens.find((o) => p.x >= o.x && p.x < o.x + o.width && p.y >= o.y && p.y < o.y + o.height) || null
+    },
+    clientArea(_option, w) {
+        const out = this.screens.find((o) => o === (w && w._output)) || this.screens[0]
         return { x: out.x, y: out.y, width: out.width, height: out.height }
     }
 }
@@ -209,7 +214,7 @@ test('single-window app (chrome PWA): close, relaunch, geometry restored', () =>
     assert.equal(relaunched.y, 100)
     assert.equal(relaunched.width, 1000)
     assert.equal(relaunched.height, 700)
-    assert.equal(relaunched.desktops[0].x11DesktopNumber, 2)
+    assert.equal(relaunched.desktops[0].x11DesktopNumber, 1, 'desktop untouched: KWin opens windows on the current desktop')
 })
 
 test('multi-window app: windows restored to their own slots regardless of launch order', () => {
@@ -342,4 +347,77 @@ test('user moving the window during retries cancels further restore attempts', (
     reopened.move = false
     rt.tick()
     assert.equal(rt.retriesRef().length, 0, 'retry dropped after user interaction')
+})
+
+test('minimized and keepAbove/keepBelow are never restored - window opens in front of the user', () => {
+    const rt = buildRuntime()
+
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 20, y: 20, width: 700, height: 500 })
+    w.minimized = true
+    w.keepAbove = true
+    w.keepBelow = true
+    rt.trackWindow(w)
+    w.emitClosed()
+    sleepTick(rt, Engine.BURST_MS + 500)
+    rt.tick()
+
+    const blob = JSON.parse(rt.blobRef())
+    assert.equal(blob.apps['app'].w[0].m, undefined, 'window states are not persisted anymore')
+
+    const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 600, height: 400 })
+    rt.trackWindow(reopened)
+    assert.equal(reopened.minimized, false, 'opens in front of the user')
+    assert.equal(reopened.keepAbove, false)
+    assert.equal(reopened.keepBelow, false)
+    assert.equal(reopened.x, 20)
+    assert.equal(reopened.y, 20)
+})
+
+test('single monitor: restore works even when the connector name changed', () => {
+    const rt = buildRuntime()
+
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 100, width: 800, height: 600, outputIndex: 0 })
+    rt.trackWindow(w)
+    w.emitClosed()
+    sleepTick(rt, Engine.BURST_MS + 500)
+    rt.tick()
+
+    const renamed = makeOutput('HDMI-A-0', 'SER-CHANGED', 0, 0, 1920, 1080)
+    fakeWorkspace.screens = [renamed]
+    fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 1920, height: 1080 }
+    try {
+        const reopened = makeWindow({ cls: 'app', caption: 'App', x: 400, y: 400, width: 900, height: 700, outputIndex: 0 })
+        reopened._output = renamed
+        rt.trackWindow(reopened)
+        assert.equal(reopened.x, 100)
+        assert.equal(reopened.y, 100)
+        assert.equal(reopened.width, 800)
+        assert.equal(reopened.height, 600)
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+    }
+})
+
+test('multi-monitor: saved screen missing -> lands on the cursor screen with size clamped to it', () => {
+    const rt = buildRuntime()
+
+    fakeWorkspace.screens = [outputs[0], outputs[1], outputs[2]]
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2400, y: 100, width: 2400, height: 1600, outputIndex: 2 })
+    rt.trackWindow(w)
+    w.emitClosed()
+    sleepTick(rt, Engine.BURST_MS + 500)
+    rt.tick()
+
+    fakeWorkspace.screens = [outputs[0], outputs[1]]
+    try {
+        const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 800, height: 600, outputIndex: 0 })
+        rt.trackWindow(reopened)
+        assert.equal(reopened.x, 400, 'same relative position on the fallback screen (2400 - 2000)')
+        assert.equal(reopened.y, 0, 'clamped to the fallback screen height')
+        assert.equal(reopened.width, 1920, 'size clamped to the fallback screen work area')
+        assert.equal(reopened.height, 1080)
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
 })

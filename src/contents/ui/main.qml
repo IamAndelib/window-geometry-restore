@@ -127,11 +127,6 @@ Item {
                 y: Math.round(w.y),
                 width: Math.round(w.width),
                 height: Math.round(w.height),
-                desktopNumber: w.onAllDesktops ? -1 : (w.desktops.length > 0 ? w.desktops[0].x11DesktopNumber : 1),
-                activities: w.activities ? w.activities.slice() : [],
-                minimized: w.minimized,
-                keepAbove: w.keepAbove,
-                keepBelow: w.keepBelow,
                 output: output ? {
                     x: Math.round(relative.x),
                     y: Math.round(relative.y),
@@ -292,20 +287,34 @@ Item {
         dbg(cls + ': restore session ended')
     }
 
-    function findOutput(savedOutput) {
-        if (!savedOutput) return null
+    function resolveOutput(save) {
         var screens = Workspace.screens
-        if (savedOutput.serial) {
+        if (!screens || screens.length === 0) return null
+        if (screens.length === 1) return screens[0]
+        if (!save.output) return null
+        if (save.output.serial) {
             for (var i = 0; i < screens.length; i++) {
-                if (String(screens[i].serialNumber) === savedOutput.serial) return screens[i]
+                if (String(screens[i].serialNumber) === save.output.serial) return screens[i]
             }
         }
-        if (savedOutput.name) {
+        if (save.output.name) {
             for (var j = 0; j < screens.length; j++) {
-                if (String(screens[j].name) === savedOutput.name) return screens[j]
+                if (String(screens[j].name) === save.output.name) return screens[j]
             }
         }
         return null
+    }
+
+    function outputUnderCursor() {
+        try {
+            var at = Workspace.screenAt(Workspace.cursorPos)
+            if (at) return at
+        } catch (e) {}
+        try {
+            return Workspace.activeScreen
+        } catch (e) {
+            return null
+        }
     }
 
     function isMaximizedLike(w) {
@@ -322,16 +331,32 @@ Item {
         if (!virtual || virtual.width <= 0 || virtual.height <= 0) return null
         var x = save.x
         var y = save.y
+        var output = resolveOutput(save)
+        var fellBack = false
         if (save.output) {
-            var output = findOutput(save.output)
             if (output) {
                 var position = output.mapToGlobal(Qt.point(save.output.x, save.output.y))
                 x = Math.round(position.x)
                 y = Math.round(position.y)
+            } else {
+                output = outputUnderCursor()
+                fellBack = true
+                if (output) {
+                    var fallback = output.mapToGlobal(Qt.point(save.output.x, save.output.y))
+                    x = Math.round(fallback.x)
+                    y = Math.round(fallback.y)
+                }
             }
         }
         var maxWidth = Math.min(w.maxSize ? Math.floor(w.maxSize.width) : virtual.width, virtual.width)
         var maxHeight = Math.min(w.maxSize ? Math.floor(w.maxSize.height) : virtual.height, virtual.height)
+        if (fellBack && output) {
+            try {
+                var area = Workspace.clientArea(KWin.MaximizeArea, output, Workspace.currentDesktop)
+                maxWidth = Math.min(maxWidth, Math.floor(area.width))
+                maxHeight = Math.min(maxHeight, Math.floor(area.height))
+            } catch (e) {}
+        }
         var minWidth = w.minSize ? Math.ceil(w.minSize.width) : 0
         var minHeight = w.minSize ? Math.ceil(w.minSize.height) : 0
         var width = Math.max(minWidth, Math.min(save.width, maxWidth))
@@ -350,39 +375,6 @@ Item {
         var changes = []
         if (!w || w.deleted) return changes
 
-        if (save.desktopNumber === -1) {
-            if (!w.onAllDesktops) {
-                w.onAllDesktops = true
-                changes.push('desktop')
-            }
-        } else {
-            var target = null
-            for (var i = 0; i < Workspace.desktops.length; i++) {
-                if (Workspace.desktops[i].x11DesktopNumber === save.desktopNumber) {
-                    target = Workspace.desktops[i]
-                    break
-                }
-            }
-            if (target) {
-                var current = w.onAllDesktops ? null : (w.desktops.length === 1 ? w.desktops[0] : undefined)
-                if (current !== target) {
-                    w.desktops = [target]
-                    changes.push('desktop')
-                }
-            }
-        }
-
-        if (save.activities.length > 0 && Workspace.activities.length > 0) {
-            var valid = []
-            for (var j = 0; j < save.activities.length; j++) {
-                if (Workspace.activities.indexOf(save.activities[j]) !== -1) valid.push(save.activities[j])
-            }
-            if (valid.length > 0 && JSON.stringify(valid) !== JSON.stringify(w.activities)) {
-                w.activities = valid
-                changes.push('activities')
-            }
-        }
-
         if (!w.tile && !w.fullScreen && w.moveable && w.resizeable && !w.move && !w.resize && !isMaximizedLike(w)) {
             var geometry = targetFor(w, save)
             if (geometry && !rectEquals(w, geometry)) {
@@ -390,19 +382,6 @@ Item {
                 retries.push({ w: w, cls: cls, target: geometry, tries: 1, born: Date.now(), interacted: false })
                 changes.push('geometry')
             }
-        }
-
-        if (save.minimized && w.minimizable && !w.minimized) {
-            w.minimized = true
-            changes.push('minimized')
-        }
-        if (save.keepAbove && !w.keepAbove) {
-            w.keepAbove = true
-            changes.push('keepAbove')
-        }
-        if (save.keepBelow && !w.keepBelow) {
-            w.keepBelow = true
-            changes.push('keepBelow')
         }
 
         return changes

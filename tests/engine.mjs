@@ -17,9 +17,6 @@ function save(overrides = {}) {
     return engine.makeSave({
         caption: 'Window',
         x: 100, y: 50, width: 800, height: 600,
-        desktopNumber: 1,
-        activities: [],
-        minimized: false, keepAbove: false, keepBelow: false,
         output: { x: 10, y: 20, serial: 'SER1', name: 'DP-1' },
         ...overrides
     })
@@ -105,12 +102,12 @@ test('decodeState: rejects garbage without throwing, returns empty state', () =>
     assert.equal(empty.error, null)
 })
 
-test('encode/decode round-trip preserves fields, drops runtime flags', () => {
+test('encode/decode round-trip preserves geometry fields, drops runtime flags', () => {
     const state = engine.newState()
     state.apps['firefox'] = {
         lastAccess: 1234,
         saves: [
-            save({ caption: 'One', desktopNumber: -1, minimized: true, keepAbove: true, keepBelow: true, activities: ['act1'] }),
+            save({ caption: 'One', output: { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' } }),
             save({ caption: 'Two', output: null })
         ]
     }
@@ -121,14 +118,37 @@ test('encode/decode round-trip preserves fields, drops runtime flags', () => {
     assert.equal(app.saves.length, 2)
     const [a, b] = app.saves
     assert.equal(a.caption, 'One')
-    assert.equal(a.desktopNumber, -1)
-    assert.equal(a.minimized, true)
-    assert.equal(a.keepAbove, true)
-    assert.equal(a.keepBelow, true)
-    assert.deepEqual(a.activities, ['act1'])
-    assert.deepEqual(a.output, { x: 10, y: 20, serial: 'SER1', name: 'DP-1' })
+    assert.equal(a.x, 100)
+    assert.equal(a.width, 800)
+    assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
     assert.equal(a.matched, false)
+    const blob = JSON.parse(engine.encodeState(state))
+    assert.equal(blob.version, 2)
+    assert.equal(blob.apps['firefox'].w[0].d, undefined)
+    assert.equal(blob.apps['firefox'].w[0].m, undefined)
+})
+
+test('v1 blobs (with desktop/activities/state fields) decode cleanly - fields ignored', () => {
+    const v1 = JSON.stringify({
+        version: 1,
+        apps: {
+            app: {
+                t: 42,
+                w: [{ c: 'old', x: 5, y: 6, w: 700, h: 500, d: -1, a: ['act'], m: 1, v: 1, b: 1, o: { x: 7, y: 8, s: 'S1', n: 'DP-1' } }]
+            }
+        }
+    })
+    const r = engine.decodeState(v1)
+    assert.equal(r.error, null)
+    const save = r.state.apps['app'].saves[0]
+    assert.equal(save.caption, 'old')
+    assert.equal(save.x, 5)
+    assert.equal(save.width, 700)
+    assert.deepEqual(save.output, { x: 7, y: 8, serial: 'S1', name: 'DP-1' })
+    const reencoded = JSON.parse(engine.encodeState(r.state))
+    assert.equal(reencoded.version, 2)
+    assert.equal(reencoded.apps['app'].w[0].d, undefined, 'v1 fields are not carried forward')
 })
 
 test('decodeState: drops malformed saves, keeps valid ones', () => {
@@ -153,9 +173,6 @@ test('decodeState: drops malformed saves, keeps valid ones', () => {
     assert.equal(r.state.apps['app'].saves.length, 2)
     assert.equal(r.state.apps['empty'], undefined)
     const good = r.state.apps['app'].saves[0]
-    assert.equal(good.desktopNumber, 2)
-    assert.equal(good.minimized, true)
-    assert.equal(good.keepAbove, true)
     assert.deepEqual(good.output, { x: 3, y: 4, serial: 'S', name: 'N' })
 })
 
