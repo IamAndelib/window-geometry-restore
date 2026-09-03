@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, bestMatch, makeSave, decodeState, encodeState, pruneExpired, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, bestMatch, makeSave, decodeState, encodeState, pruneExpired, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -432,4 +432,22 @@ test('multi-monitor: saved screen missing -> lands on the cursor screen with siz
     } finally {
         fakeWorkspace.screens = [outputs[0], outputs[1]]
     }
+})
+
+test('close buffer is capped while an app keeps a window open (no unbounded memory)', () => {
+    const rt = buildRuntime()
+
+    const main = makeWindow({ cls: 'chatty', caption: 'Main' })
+    rt.trackWindow(main)
+
+    for (let i = 0; i < 70; i++) {
+        const aux = makeWindow({ cls: 'chatty', caption: 'Aux ' + i, x: i, y: i })
+        rt.trackWindow(aux)
+        aux.emitClosed()
+    }
+
+    const app = rt.stateRef().apps['chatty']
+    assert.equal(app.open.length, 1, 'main window still open')
+    assert.equal(app.finalizeAt, null, 'no finalize armed while a window is open')
+    assert.equal(app.buffer.length, Engine.MAX_BUFFER, 'buffer capped at MAX_BUFFER')
 })

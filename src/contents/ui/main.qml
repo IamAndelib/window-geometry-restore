@@ -155,7 +155,10 @@ Item {
                 unwatchCaption(id)
             }
             var snap = snapshotWindow(w)
-            if (snap) app.buffer.push({ closeTime: Date.now(), snap: snap })
+            if (snap) {
+                app.buffer.push({ closeTime: Date.now(), snap: snap })
+                while (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
+            }
             if (app.open.length === 0 && !app.finalizeAt) app.finalizeAt = Date.now() + Engine.BURST_MS
             ensureTick()
         } catch (e) {
