@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>KWin::WindowGeometryRestoreConfigForm</class>
+ <widget class="QWidget" name="KWin::WindowGeometryRestoreConfigForm">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>560</width>
+    <height>420</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="introLabel">
+     <property name="text">
+      <string>Window Geometry Restore remembers how you left your application windows (position, size, screen, virtual desktop) and puts them back when the app reopens - for apps that don't do it themselves, like Chrome web apps on Wayland.
+
+Everything works out of the box. The only thing you may ever need to change is the exclusion list below.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="blacklistGroup">
+     <property name="title">
+      <string>Excluded applications (one per line, * acts as a wildcard)</string>
+     </property>
+     <layout class="QVBoxLayout" name="blacklistLayout">
+      <item>
+       <widget class="QPlainTextEdit" name="kcfg_blacklist"/>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QCheckBox" name="kcfg_debug">
+     <property name="text">
+      <string>Verbose debug logging</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>0</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

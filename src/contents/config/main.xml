@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name=""/>
+    <group name="">
+        <entry name="blacklist" type="String">
+            <default>org.kde.spectacle
+org.kde.polkit-kde-authentication-agent-1
+steam*
+org.kde.plasmashell
+kwin
+ksmserver
+systemsettings
+kcm_kwinrules
+org.kde.kmenuedit
+org.kde.ark
+org.kde.plasma.emojier
+org.freedesktop.impl.portal.desktop.kde</default>
+        </entry>
+        <entry name="debug" type="Bool">
+            <default>false</default>
+        </entry>
+    </group>
+</kcfg>
