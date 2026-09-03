@@ -38,6 +38,18 @@ function extractFunctions(source) {
 
 const extracted = extractFunctions(qml)
 
+const REQUIRED_FUNCTIONS = [
+    'log', 'dbg', 'removeFromArray', 'isValidWindow', 'loadConfig', 'loadPersisted', 'persist',
+    'ensureApp', 'trackWindow', 'snapshotWindow', 'onWindowClosed', 'finalizeApp',
+    'maybeStartSession', 'watchCaption', 'unwatchCaption', 'bestMatchForWindow',
+    'tryAssign', 'assignSave', 'endSession', 'resolveOutput', 'outputUnderCursor',
+    'isMaximizedLike', 'targetFor', 'rectEquals', 'applySnapshot',
+    'sweepRetries', 'sweepSessions', 'stopTickIfIdle', 'ensureTick', 'onTick'
+]
+for (const name of REQUIRED_FUNCTIONS) {
+    assert.ok(extracted[name], `harness drift: function '${name}' was not extracted from main.qml`)
+}
+
 function makeOutput(name, serial, gx, gy, width, height) {
     return {
         name, serialNumber: serial, x: gx, y: gy, width, height,

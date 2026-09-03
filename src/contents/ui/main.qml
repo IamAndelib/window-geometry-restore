@@ -18,7 +18,7 @@ Item {
     property var tracked: ({})
     property var retries: []
 
-    property string defaultBlacklist: [
+    readonly property string defaultBlacklist: [
         'org.kde.spectacle',
         'org.kde.polkit-kde-authentication-agent-1',
         'steam*',
@@ -220,6 +220,14 @@ Item {
         }
     }
 
+    function bestMatchForWindow(w, saves) {
+        return Engine.bestMatch(saves, {
+            caption: String(w.caption || ''),
+            width: Math.round(w.width),
+            height: Math.round(w.height)
+        })
+    }
+
     function tryAssign(id) {
         var entry = tracked[id]
         if (!entry || entry.assigned) return
@@ -227,30 +235,25 @@ Item {
         if (!app || !app.session) return
         var w = entry.w
         if (!w || w.deleted) return
-        var match = Engine.bestMatch(app.session.saves, {
-            caption: String(w.caption || ''),
-            width: Math.round(w.width),
-            height: Math.round(w.height)
-        })
+        var match = bestMatchForWindow(w, app.session.saves)
         if (!match) return
         // Only unambiguous matches apply instantly; the rest wait for the set to arrive.
         var immediate = match.tier === 1 || app.session.saves.length === 1
         if (!immediate) return
-        assignSave(entry.cls, id, match.index, match.score)
+        assignSave(entry.cls, id, app.session, match, false)
     }
 
-    function assignSave(cls, id, index, score) {
-        var app = state.apps[cls]
-        var session = app.session
+    function assignSave(cls, id, session, match, bestEffort) {
         var entry = tracked[id]
-        if (!session || !entry) return
-        var save = session.saves[index]
+        if (!entry) return
+        var save = session.saves[match.index]
         save.matched = true
         entry.assigned = true
         unwatchCaption(id)
         removeFromArray(session.pending, id)
         var changes = applySnapshot(entry.w, save, cls)
-        log(cls + ': restored window to saved state' + (changes.length ? ' (' + changes.join(', ') + ')' : ' (already correct)') + ', caption match ' + score + '%')
+        var mode = bestEffort ? 'best effort' : (changes.length ? changes.join(', ') : 'already correct')
+        log(cls + ': restored window to saved state (' + mode + '), caption match ' + match.score + '%')
         for (var i = 0; i < session.saves.length; i++) {
             if (!session.saves[i].matched) return
         }
@@ -270,17 +273,8 @@ Item {
             if (!entry) continue
             var w = entry.w
             if (!w || w.deleted) continue
-            var match = Engine.bestMatch(session.saves, {
-                caption: String(w.caption || ''),
-                width: Math.round(w.width),
-                height: Math.round(w.height)
-            })
-            if (match) {
-                session.saves[match.index].matched = true
-                entry.assigned = true
-                applySnapshot(w, session.saves[match.index], cls)
-                log(cls + ': restored window to saved state (' + 'best effort, caption match ' + match.score + '%)')
-            }
+            var match = bestMatchForWindow(w, session.saves)
+            if (match) assignSave(cls, id, session, match, true)
         }
         if (app.saves === session.saves) app.saves = []
         persist()
@@ -448,7 +442,7 @@ Item {
 
     Timer {
         id: tickTimer
-        interval: 250
+        interval: Engine.TICK_MS
         repeat: true
         running: false
         onTriggered: root.onTick()
@@ -467,6 +461,7 @@ Item {
         }
 
         function onWindowRemoved(window) {
+            // Safety net: fires even for windows whose closed signal was missed.
             onWindowClosed(window)
         }
     }
