@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -39,13 +39,16 @@ function extractFunctions(source) {
 const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
-    'log', 'dbg', 'removeFromArray', 'isValidWindow', 'loadConfig', 'loadPersisted', 'persist',
-    'ensureApp', 'trackWindow', 'snapshotWindow', 'onWindowClosed', 'finalizeApp',
-    'maybeStartSession', 'watchCaption', 'unwatchCaption', 'bestMatchForWindow',
-    'tryAssign', 'assignSave', 'endSession', 'resolveOutput', 'outputUnderCursor',
-    'isMaximizedLike', 'targetFor', 'rectEquals', 'applySnapshot',
-    'sweepRetries', 'sweepSessions', 'stopTickIfIdle', 'ensureTick', 'onTick'
+    'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
+    'loadConfig', 'loadPersisted', 'persist', 'trackWindow', 'untrack', 'snapshotWindow',
+    'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
+    'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
+    'resolveOutput', 'outputUnderCursor', 'isOnScreen', 'isMaximizedLike', 'canPlace', 'fitLength',
+    'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'reapplyProvisional',
+    'sweepRetries', 'sweepSessions', 'isIdle', 'ensureTick', 'onTick',
+    'handleAdded', 'handleRemoved', 'startup', 'shutdown'
 ]
+assert.deepEqual(Object.keys(extracted).sort(), [...REQUIRED_FUNCTIONS].sort(), 'harness drift: main.qml functions changed')
 for (const name of REQUIRED_FUNCTIONS) {
     assert.ok(extracted[name], `harness drift: function '${name}' was not extracted from main.qml`)
 }
@@ -53,6 +56,7 @@ for (const name of REQUIRED_FUNCTIONS) {
 function makeOutput(name, serial, gx, gy, width, height) {
     return {
         name, serialNumber: serial, x: gx, y: gy, width, height,
+        geometry: { x: gx, y: gy, width, height },
         mapToGlobal: (p) => ({ x: p.x + gx, y: p.y + gy }),
         mapFromGlobal: (p) => ({ x: p.x - gx, y: p.y - gy })
     }
@@ -66,6 +70,7 @@ outputs.push(makeOutput('DP-3', 'SER-3', 2000, 0, 1280, 1024))
 
 const fakeWorkspace = {
     screens: [outputs[0], outputs[1]],
+    stackingOrder: [],
     desktops: [{ x11DesktopNumber: 1 }, { x11DesktopNumber: 2 }],
     activities: ['act-1', 'act-2'],
     virtualScreenGeometry: { x: 0, y: 0, width: 3280, height: 1080 },
@@ -73,10 +78,13 @@ const fakeWorkspace = {
     screenAt(p) {
         return this.screens.find((o) => p.x >= o.x && p.x < o.x + o.width && p.y >= o.y && p.y < o.y + o.height) || null
     },
-    clientArea(_option, w) {
-        const out = this.screens.find((o) => o === (w && w._output)) || this.screens[0]
+    // Accepts a window (its screen) or an output; panels are not modelled.
+    clientArea(_option, target) {
+        const out = this.screens.find((o) => o === target || o === (target && target._output)) || this.screens[0]
         return { x: out.x, y: out.y, width: out.width, height: out.height }
-    }
+    },
+    // Set by buildRuntime: what Workspace.windowRemoved would call.
+    removed: null
 }
 
 const fakeKWin = {
@@ -117,8 +125,8 @@ function makeWindow(fields) {
         _output: fields.outputIndex !== undefined ? outputs[fields.outputIndex] : outputs[0],
         _geometryWrites: 0,
         _ignoreGeometry: false,
-        _closedHandlers: [],
         _captionHandlers: [],
+        _moveResizeHandlers: [],
         get x() { return this._g.x },
         get y() { return this._g.y },
         get width() { return this._g.width },
@@ -136,15 +144,16 @@ function makeWindow(fields) {
                 disconnect: (fn) => { const i = handlers.indexOf(fn); if (i !== -1) handlers.splice(i, 1) }
             }
         },
-        get closed() {
-            const handlers = this._closedHandlers
+        get interactiveMoveResizeStarted() {
+            const handlers = this._moveResizeHandlers
             return {
                 connect: (fn) => handlers.push(fn),
                 disconnect: (fn) => { const i = handlers.indexOf(fn); if (i !== -1) handlers.splice(i, 1) }
             }
         },
-        emitClosed() { for (const fn of [...this._closedHandlers]) fn() },
-        emitCaptionChanged() { for (const fn of [...this._captionHandlers]) fn() }
+        emitClosed() { fakeWorkspace.removed(this) },
+        emitCaptionChanged() { for (const fn of [...this._captionHandlers]) fn() },
+        emitMoveResizeStarted() { for (const fn of [...this._moveResizeHandlers]) fn() }
     }
     w._g = { x: fields.x ?? 100, y: fields.y ?? 100, width: fields.width ?? 800, height: fields.height ?? 600 }
     return w
@@ -159,12 +168,11 @@ function buildRuntime(initialBlob = '{}') {
     const Workspace = fakeWorkspace
     const KWin = fakeKWin
 
-    let storedBlob = initialBlob
+    const stored = { windowgeometryrestore_windows: initialBlob }
     const settings = {
-        value: (_key, fallback) => (storedBlob === '' ? fallback : storedBlob),
-        setValue: (_key, v) => { storedBlob = v },
-        sync: () => {},
-        rawSet: (v) => { storedBlob = v }
+        value: (key, fallback) => (stored[key] === undefined || stored[key] === '' ? fallback : stored[key]),
+        setValue: (key, v) => { stored[key] = v },
+        sync: () => {}
     }
 
     const tickTimer = {
@@ -179,24 +187,26 @@ function buildRuntime(initialBlob = '{}') {
         var Date = { now: function () { return now } };
         var console = { warn: function (m) { logs.push(String(m)) } };
         var debugMode = true;
-        var config = {};
-        var state = Engine.newState();
+        var storeKey = 'windowgeometryrestore_windows';
+        var defaultBlacklist = '';
+        var blacklist = Engine.parseList('');
+        var store = Engine.newState();
+        var live = {};
         var tracked = {};
         var retries = [];
-        var defaultBlacklist = '';
         ${Object.keys(extracted).map((name) => {
             const fn = extracted[name]
             return `function ${name}(${fn.params}) ${fn.body}`
         }).join('\n')}
-        return { ${Object.keys(extracted).join(', ')}, trackedRef: () => tracked, stateRef: () => state, retriesRef: () => retries, blobRef: () => settings.value('windowgeometryrestore_windows', '{}'), rawSetRef: settings.rawSet, getLogs: () => logs, nowRef: () => now, setNow: (n) => { now = n }, tick: onTick, tickRef: () => tickTimer };
+        return { ${Object.keys(extracted).join(', ')}, trackedRef: () => tracked, storeRef: () => store, liveRef: () => live, retriesRef: () => retries, blobRef: () => settings.value(storeKey, '{}'), stored, getLogs: () => logs, nowRef: () => now, setNow: (n) => { now = n }, tick: onTick, tickRef: () => tickTimer };
     `
 
-    const runtime = new Function('Engine', 'Workspace', 'KWin', 'Qt', 'settings', 'tickTimer', `
+    const runtime = new Function('Engine', 'Workspace', 'KWin', 'Qt', 'settings', 'tickTimer', 'stored', `
         ${scope}
-    `)(Engine, Workspace, KWin, Qt, settings, tickTimer)
+    `)(Engine, Workspace, KWin, Qt, settings, tickTimer, stored)
 
-    runtime.loadConfig()
-    runtime.loadPersisted()
+    fakeWorkspace.removed = runtime.handleRemoved
+    runtime.startup()
     return runtime
 }
 
@@ -242,8 +252,8 @@ test('multi-window app: windows restored to their own slots regardless of launch
     assert.equal(saved.w.length, 2)
 
     // Windows reopen at default placement with swapped-ish sizes: the window whose
-    // caption matches a save exactly is restored instantly; the other waits for the
-    // deadline sweep so it cannot steal the wrong slot by size alone.
+    // caption matches a save exactly is restored instantly; the other must not steal
+    // that slot by size alone, and takes the one save left once it is unambiguous.
     const b2 = makeWindow({ cls: 'firefox', caption: 'News - Mail', x: 0, y: 0, width: 800, height: 600, outputIndex: 0 })
     const a2 = makeWindow({ cls: 'firefox', caption: 'Inbox - Mail', x: 0, y: 0, width: 800, height: 600, outputIndex: 0 })
     rt.trackWindow(b2)
@@ -251,10 +261,7 @@ test('multi-window app: windows restored to their own slots regardless of launch
 
     assert.equal(a2.x, 10, 'tier-1 match restored instantly')
     assert.equal(a2.width, 800)
-
-    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 500)
-    rt.tick()
-    assert.equal(b2.x, 2010, 'deferred window got its caption-matched slot at deadline')
+    assert.equal(b2.x, 2010, 'deferred window got the last slot as soon as it was the only one left')
     assert.equal(b2.width, 1200)
 })
 
@@ -307,7 +314,8 @@ test('corrupt persisted data is discarded safely, saving still works afterwards'
     const rt = buildRuntime('{"apps": broken json{{{')
 
     assert.ok(rt.getLogs().some((l) => l.includes('unreadable')), 'corruption logged')
-    assert.deepEqual(rt.stateRef().apps, {})
+    assert.deepEqual(rt.storeRef().apps, {})
+    assert.equal(rt.stored.windowgeometryrestore_windows_corrupt, '{"apps": broken json{{{', 'unreadable data kept aside')
 
     const w = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 500, height: 400 })
     rt.trackWindow(w)
@@ -427,7 +435,7 @@ test('close buffer is capped while an app keeps a window open (no unbounded memo
         aux.emitClosed()
     }
 
-    const app = rt.stateRef().apps['chatty']
+    const app = rt.liveRef()['chatty']
     assert.equal(app.open.length, 1, 'main window still open')
     assert.equal(app.buffer.length, Engine.MAX_BUFFER, 'buffer capped at MAX_BUFFER')
 })
@@ -450,10 +458,10 @@ test('saves hit disk synchronously when the last window closes (no timers involv
 
 test('persist re-adopts apps present on disk but missing from memory (self-healing merge)', () => {
     const rt = buildRuntime()
-    rt.rawSetRef(JSON.stringify({
+    rt.stored.windowgeometryrestore_windows = JSON.stringify({
         version: 2,
-        apps: { 'lost-app': { t: 1, w: [{ c: 'Lost window', x: 1, y: 2, w: 300, h: 200, o: null }] } }
-    }))
+        apps: { 'lost-app': { t: rt.nowRef(), w: [{ c: 'Lost window', x: 1, y: 2, w: 300, h: 200, o: null }] } }
+    })
 
     const w = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 500, height: 400 })
     rt.trackWindow(w)
@@ -463,4 +471,385 @@ test('persist re-adopts apps present on disk but missing from memory (self-heali
     assert.ok(blob.apps['app'], 'own save written')
     assert.ok(blob.apps['lost-app'], 'disk-only app rescued instead of erased')
     assert.equal(blob.apps['lost-app'].w[0].c, 'Lost window')
+})
+
+// --- Regression tests: persistence across restarts ---
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function closeAll(...windows) {
+    for (const w of windows) w.emitClosed()
+}
+
+test('an app that is open is never pruned: its close is saved even if its entry had aged out', () => {
+    const now = 1000000000
+    const rt = buildRuntime(JSON.stringify({
+        version: 2,
+        apps: { foo: { t: now - Engine.EXPIRY_MS + 3600000, w: [{ c: 'Foo', x: 10, y: 10, w: 500, h: 400, o: null }] } }
+    }))
+    const w = makeWindow({ cls: 'foo', caption: 'Foo', x: 10, y: 10, width: 500, height: 400 })
+    rt.trackWindow(w)
+    rt.setNow(now + 2 * 3600000)
+    const other = makeWindow({ cls: 'bar', caption: 'Bar' })
+    rt.trackWindow(other)
+    other.emitClosed() // persists and prunes
+
+    w._g = { x: 300, y: 300, width: 500, height: 400 }
+    w.emitClosed()
+    const saved = JSON.parse(rt.blobRef()).apps.foo
+    assert.ok(saved, 'close of the still-open app was saved')
+    assert.equal(saved.w[0].x, 300)
+})
+
+test('expired apps are removed from disk and not resurrected by the merge', () => {
+    const now = 1000000000
+    const rt = buildRuntime(JSON.stringify({
+        version: 2,
+        apps: {
+            stale: { t: now - Engine.EXPIRY_MS - 1, w: [{ c: 'Old', x: 1, y: 1, w: 300, h: 200, o: null }] },
+            fresh: { t: now, w: [{ c: 'New', x: 1, y: 1, w: 300, h: 200, o: null }] }
+        }
+    }))
+    assert.equal(JSON.parse(rt.blobRef()).apps.stale, undefined, 'pruned at load and written back without it')
+
+    const w = makeWindow({ cls: 'app', caption: 'App' })
+    rt.trackWindow(w)
+    w.emitClosed()
+    const apps = JSON.parse(rt.blobRef()).apps
+    assert.equal(apps.stale, undefined, 'still gone after a later save')
+    assert.ok(apps.fresh)
+    assert.ok(apps.app)
+})
+
+test('saves survive a restore: a crash after relaunch still restores the last layout', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 40, y: 50, width: 700, height: 500 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 700, height: 500 })
+    rt.trackWindow(reopened)
+    assert.equal(reopened.x, 40)
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+
+    const blob = JSON.parse(rt.blobRef())
+    assert.equal(blob.apps.app.w[0].x, 40, 'layout still on disk while the app runs')
+
+    const fresh = buildRuntime(rt.blobRef()) // KWin restarted without the app closing
+    const again = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 700, height: 500 })
+    fresh.trackWindow(again)
+    assert.equal(again.x, 40)
+    assert.equal(again.y, 50)
+})
+
+test('a running app does not restore windows it opens later', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 40, y: 50, width: 700, height: 500 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const first = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0 })
+    rt.trackWindow(first)
+    const second = makeWindow({ cls: 'app', caption: 'App', x: 5, y: 5 })
+    rt.trackWindow(second)
+    assert.equal(second._geometryWrites, 0, 'restore session already settled')
+})
+
+test('shutdown saves windows that are still open, and disconnects from them', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'One', x: 10, y: 20, width: 600, height: 400 })
+    const b = makeWindow({ cls: 'app', caption: 'Two', x: 900, y: 20, width: 500, height: 400 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+
+    rt.shutdown()
+
+    const saved = JSON.parse(rt.blobRef()).apps.app
+    assert.equal(saved.w.length, 2, 'both open windows saved as one layout')
+    assert.deepEqual(saved.w.map((s) => s.c).sort(), ['One', 'Two'])
+    assert.deepEqual(Object.keys(rt.trackedRef()), [])
+    assert.equal(a._moveResizeHandlers.length, 0)
+    assert.equal(b._moveResizeHandlers.length, 0)
+})
+
+test('windows open before the script started are adopted, never moved, and saved on close', () => {
+    const blob = JSON.stringify({ version: 2, apps: { app: { t: 1000000000, w: [{ c: 'App', x: 1, y: 1, w: 300, h: 200, o: null }] } } })
+    const existing = makeWindow({ cls: 'app', caption: 'App', x: 500, y: 400, width: 800, height: 600 })
+    fakeWorkspace.stackingOrder = [existing]
+    let rt
+    try {
+        rt = buildRuntime(blob)
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(existing._geometryWrites, 0, 'script reload must not move open windows')
+
+    const extra = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0 })
+    rt.trackWindow(extra)
+    assert.equal(extra._geometryWrites, 0, 'app is already running: no restore session')
+
+    extra.emitClosed()
+    existing.emitClosed()
+    const saved = JSON.parse(rt.blobRef()).apps.app
+    assert.equal(saved.w[saved.w.length - 1].x, 500)
+})
+
+test('reopening while the previous restore session still runs uses the newest layout', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'One', x: 10, y: 10, width: 500, height: 400 })
+    const b = makeWindow({ cls: 'app', caption: 'Two', x: 900, y: 10, width: 600, height: 400 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    const r1 = makeWindow({ cls: 'app', caption: 'One', x: 0, y: 0, width: 500, height: 400 })
+    rt.trackWindow(r1) // tier 1, session keeps waiting for 'Two'
+    r1._g = { x: 1200, y: 500, width: 500, height: 400 }
+    r1.emitClosed()
+
+    const r2 = makeWindow({ cls: 'app', caption: 'One', x: 0, y: 0, width: 500, height: 400 })
+    rt.trackWindow(r2)
+    assert.deepEqual([r2.x, r2.y], [1200, 500])
+})
+
+test('a window closed before its deferred restore does not overwrite the saved layout', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'One', x: 10, y: 10, width: 500, height: 400 })
+    const b = makeWindow({ cls: 'app', caption: 'Two', x: 900, y: 10, width: 600, height: 400 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    const early = makeWindow({ cls: 'app', caption: 'Loading', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(early) // no unambiguous match: waits for the deadline
+    assert.equal(early._geometryWrites, 0)
+    early.emitClosed()
+
+    const saved = JSON.parse(rt.blobRef()).apps.app
+    assert.equal(saved.w.length, 2, 'previous two-window layout kept')
+    assert.deepEqual(saved.w.map((s) => s.x), [10, 900])
+})
+
+// --- Regression tests: placement and retries ---
+
+test('retries never fight a window that got maximized after the restore', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'max', caption: 'M', x: 10, y: 10, width: 500, height: 400 })
+    rt.trackWindow(a)
+    a.emitClosed()
+
+    const r = makeWindow({ cls: 'max', caption: 'M', x: 0, y: 0, width: 800, height: 600 })
+    r._ignoreGeometry = true
+    rt.trackWindow(r) // first write does not stick
+    r._ignoreGeometry = false
+    r._g = { x: 0, y: 0, width: 1920, height: 1080 } // the app maximizes itself
+    sleepTick(rt, Engine.TICK_MS)
+    rt.tick()
+    assert.equal(r.width, 1920)
+    assert.equal(rt.retriesRef().length, 0)
+})
+
+test('a user move before a deferred restore wins: the window is left where the user put it', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'One', x: 10, y: 10, width: 500, height: 400 })
+    const b = makeWindow({ cls: 'app', caption: 'Two', x: 900, y: 10, width: 600, height: 400 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    const w = makeWindow({ cls: 'app', caption: 'Other', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    w.emitMoveResizeStarted()
+    w._g = { x: 333, y: 222, width: 640, height: 480 }
+
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.equal(w._geometryWrites, 0)
+    assert.equal(w.x, 333)
+
+    w.emitClosed()
+    assert.equal(JSON.parse(rt.blobRef()).apps.app.w[0].x, 333, 'user placement is saved')
+})
+
+test('a user move signal cancels pending geometry retries immediately', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 50, y: 50, width: 700, height: 500 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 600, height: 400 })
+    reopened._ignoreGeometry = true
+    rt.trackWindow(reopened)
+    assert.equal(rt.retriesRef().length, 1)
+    reopened.emitMoveResizeStarted()
+    const writes = reopened._geometryWrites
+    rt.tick()
+    assert.equal(reopened._geometryWrites, writes)
+    assert.equal(rt.retriesRef().length, 0)
+})
+
+test('deadline sweep assigns the best pair overall, whatever order windows arrived in', () => {
+    for (const sizedFirst of [true, false]) {
+        const rt = buildRuntime()
+        const s1 = makeWindow({ cls: 'app', caption: 'Alpha docs', x: 10, y: 10, width: 500, height: 400 })
+        const s2 = makeWindow({ cls: 'app', caption: 'Beta', x: 900, y: 10, width: 700, height: 400 })
+        const s3 = makeWindow({ cls: 'app', caption: 'Gamma', x: 10, y: 600, width: 300, height: 300 })
+        rt.trackWindow(s1)
+        rt.trackWindow(s2)
+        rt.trackWindow(s3)
+        closeAll(s1, s2, s3)
+
+        // Both windows want save 1: one only by caption (tier 3), the other by size (tier 2).
+        const sized = makeWindow({ cls: 'app', caption: 'Untitled', x: 0, y: 0, width: 500, height: 400 })
+        const loose = makeWindow({ cls: 'app', caption: 'Alpha doc', x: 0, y: 0, width: 640, height: 480 })
+        for (const w of sizedFirst ? [sized, loose] : [loose, sized]) rt.trackWindow(w)
+        sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+        rt.tick()
+        assert.deepEqual([sized.x, sized.y], [10, 10], 'size match (tier 2) gets slot 1')
+        assert.notDeepEqual([loose.x, loose.y], [10, 10])
+    }
+})
+
+test('identical monitors sharing a serial: the connector name decides', () => {
+    const left = makeOutput('DP-1', 'SAME', 0, 0, 1920, 1080)
+    const right = makeOutput('DP-2', 'SAME', 1920, 0, 1920, 1080)
+    fakeWorkspace.screens = [left, right]
+    fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3840, height: 1080 }
+    try {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 2020, y: 100, width: 800, height: 600 })
+        w._output = right
+        rt.trackWindow(w)
+        w.emitClosed()
+
+        const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 800, height: 600 })
+        reopened._output = left
+        rt.trackWindow(reopened)
+        assert.equal(reopened.x, 2020)
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+    }
+})
+
+test('a monitor that appears late (login) gets its window moved to it', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2040, y: 100, width: 800, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    fakeWorkspace.screens = [outputs[0]]
+    fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 1920, height: 1080 }
+    try {
+        const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 800, height: 600 })
+        rt.trackWindow(reopened)
+        assert.deepEqual([reopened.x, reopened.y], [40, 100], 'provisionally on the only screen')
+
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+        rt.reapplyProvisional()
+        assert.deepEqual([reopened.x, reopened.y], [2040, 100], 'moved once its own screen is back')
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+    }
+})
+
+test('a late monitor does not move a window the user already placed', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2040, y: 100, width: 800, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const reopened = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 800, height: 600 })
+        rt.trackWindow(reopened)
+        reopened.emitMoveResizeStarted()
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        const writes = reopened._geometryWrites
+        rt.reapplyProvisional()
+        assert.equal(reopened._geometryWrites, writes)
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+})
+
+test('a window never lands in the gap between unequal screens', () => {
+    const rt = buildRuntime(JSON.stringify({
+        version: 2,
+        apps: { app: { t: 1000000000, w: [{ c: 'App', x: 1900, y: 100, w: 100, h: 100, o: null }] } }
+    }))
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 0, y: 0, width: 100, height: 100 })
+    rt.trackWindow(w)
+    assert.ok(rt.isOnScreen(w.x + w.width / 2, w.y), `title bar reachable at ${w.x},${w.y}`)
+})
+
+test('fixed-size windows get their position restored and keep their size', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'dialogish', caption: 'Calc', x: 300, y: 200, width: 400, height: 500 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const reopened = makeWindow({ cls: 'dialogish', caption: 'Calc', x: 0, y: 0, width: 420, height: 520 })
+    reopened.resizeable = false
+    rt.trackWindow(reopened)
+    assert.deepEqual([reopened.x, reopened.y, reopened.width, reopened.height], [300, 200, 420, 520])
+})
+
+test('fullscreen windows are not saved over a good layout', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'player', caption: 'Video', x: 100, y: 100, width: 800, height: 450 })
+    rt.trackWindow(w)
+    w.emitClosed()
+
+    const reopened = makeWindow({ cls: 'player', caption: 'Video', x: 100, y: 100, width: 800, height: 450 })
+    rt.trackWindow(reopened)
+    reopened.fullScreen = true
+    reopened._g = { x: 0, y: 0, width: 1920, height: 1080 }
+    reopened.emitClosed()
+    assert.equal(JSON.parse(rt.blobRef()).apps.player.w[0].w, 800, 'windowed layout kept')
+})
+
+// --- Regression tests: error containment ---
+
+test('one broken window at startup does not stop the others from being tracked', () => {
+    const broken = makeWindow({ cls: 'bad', caption: 'Bad' })
+    Object.defineProperty(broken, 'normalWindow', { get() { throw new Error('boom') } })
+    const good = makeWindow({ cls: 'good', caption: 'Good' })
+    fakeWorkspace.stackingOrder = [broken, good]
+    let rt
+    try {
+        rt = buildRuntime()
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(Object.keys(rt.trackedRef()).length, 1)
+    assert.ok(rt.getLogs().some((l) => l.includes('tracking an existing window failed')))
+})
+
+test('a failing geometry retry does not stop other sessions from ending', () => {
+    const rt = buildRuntime()
+    for (const cls of ['p', 'q']) {
+        const one = makeWindow({ cls, caption: 'One', x: 10, y: 10, width: 500, height: 400 })
+        const two = makeWindow({ cls, caption: 'Two', x: 900, y: 10, width: 600, height: 400 })
+        rt.trackWindow(one)
+        rt.trackWindow(two)
+        closeAll(one, two)
+    }
+    const bad = makeWindow({ cls: 'p', caption: 'One', x: 0, y: 0, width: 500, height: 400 })
+    bad._ignoreGeometry = true
+    rt.trackWindow(bad)
+    Object.defineProperty(bad, 'frameGeometry', { set() { throw new Error('boom') } })
+    const waiting = makeWindow({ cls: 'q', caption: 'Other', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(waiting)
+
+    sleepTick(rt, Engine.TICK_MS)
+    rt.tick()
+    assert.equal(rt.retriesRef().length, 0, 'failing retry dropped')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS)
+    rt.tick()
+    assert.equal(rt.liveRef().q.session, null, 'q session ended at its deadline')
+    assert.equal(rt.tickRef().running, false, 'timer stops once idle')
 })

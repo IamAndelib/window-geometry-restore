@@ -12,12 +12,7 @@ import "engine.js" as Engine
 Item {
     id: root
 
-    property bool debugMode: false
-    property var config: ({})
-    property var state: Engine.newState()
-    property var tracked: ({})
-    property var retries: []
-
+    readonly property string storeKey: 'windowgeometryrestore_windows'
     readonly property string defaultBlacklist: [
         'org.kde.spectacle',
         'org.kde.polkit-kde-authentication-agent-1',
@@ -33,17 +28,45 @@ Item {
         'org.freedesktop.impl.portal.desktop.kde'
     ].join('\n')
 
+    property bool debugMode: false
+    property var blacklist: Engine.parseList('')
+    // Persisted: { apps: { cls: { lastAccess, saves } } }. Saves stay until replaced
+    // by the app's next close, so a crash or power loss still restores the last layout.
+    property var store: Engine.newState()
+    // Runtime, per app with open windows: { open: [ids], buffer: [closes], session, settled }
+    property var live: ({})
+    // Runtime, per window id: { w, cls, assigned, userPlaced, provisional, captionHandler, moveHandler }
+    property var tracked: ({})
+    // Geometry writes that have not stuck yet: { id, target, tries, born }
+    property var retries: []
+
     function log(message) {
         console.warn('WindowGeometryRestore: ' + message)
     }
 
     function dbg(message) {
-        if (debugMode) console.warn('WindowGeometryRestore: ' + message)
+        if (debugMode) log(message)
     }
 
     function removeFromArray(array, item) {
         var index = array.indexOf(item)
         if (index !== -1) array.splice(index, 1)
+    }
+
+    function connectSignal(w, name, handler) {
+        try {
+            w[name].connect(handler)
+            return handler
+        } catch (e) {
+            return null
+        }
+    }
+
+    function disconnectSignal(w, name, handler) {
+        if (!handler) return
+        try {
+            w[name].disconnect(handler)
+        } catch (e) {}
     }
 
     function isValidWindow(w) {
@@ -56,71 +79,77 @@ Item {
 
     function loadConfig() {
         debugMode = KWin.readConfig('debug', false)
-        config.blacklist = Engine.parseList(KWin.readConfig('blacklist', defaultBlacklist))
-        dbg('blacklist entries: ' + (config.blacklist.exact.length + config.blacklist.patterns.length))
+        blacklist = Engine.parseList(KWin.readConfig('blacklist', defaultBlacklist))
+        dbg('blacklist entries: ' + (blacklist.exact.length + blacklist.patterns.length))
     }
 
     function loadPersisted() {
-        var result = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
-        if (result.error) log('saved window data unreadable (' + result.error + ') - starting fresh')
-        state = result.state
-        var removed = Engine.pruneExpired(state, Date.now())
+        var raw = settings.value(storeKey, '{}')
+        var result = Engine.decodeState(raw)
+        if (result.error) {
+            log('saved window data unreadable (' + result.error + ') - kept a copy, starting fresh')
+            settings.setValue(storeKey + '_corrupt', String(raw))
+        }
+        store = result.state
+        var removed = Engine.pruneExpired(store, Date.now())
         var count = 0
-        for (var cls in state.apps) count += state.apps[cls].saves.length
-        log('loaded ' + count + ' saved window(s) for ' + Object.keys(state.apps).length + ' app(s)' +
+        for (var cls in store.apps) count += store.apps[cls].saves.length
+        log('loaded ' + count + ' saved window(s) for ' + Object.keys(store.apps).length + ' app(s)' +
             (removed > 0 ? ', pruned ' + removed + ' expired app(s)' : ''))
-        if (removed > 0) persist()
+        if (removed > 0 || result.error) persist()
     }
 
+    // Write the store and flush it to disk at once. sync() first reloads the file,
+    // so apps saved by another KWin instance are adopted instead of erased.
     function persist() {
         try {
-            Engine.pruneExpired(state, Date.now())
-            var disk = Engine.decodeState(settings.value('windowgeometryrestore_windows', '{}'))
-            if (!disk.error) Engine.mergeDiskApps(state, disk.state)
-            settings.setValue('windowgeometryrestore_windows', Engine.encodeState(state))
+            settings.sync()
+            var disk = Engine.decodeState(settings.value(storeKey, '{}'))
+            if (!disk.error) Engine.mergeDiskApps(store, disk.state)
+            Engine.pruneExpired(store, Date.now())
+            settings.setValue(storeKey, Engine.encodeState(store))
             settings.sync()
         } catch (e) {
             log('failed to persist: ' + e)
         }
     }
 
-    function ensureApp(cls) {
-        if (!state.apps[cls]) state.apps[cls] = {}
-        var app = state.apps[cls]
-        if (!app.lastAccess) app.lastAccess = Date.now()
-        if (!Array.isArray(app.saves)) app.saves = []
-        if (!Array.isArray(app.open)) app.open = []
-        if (!Array.isArray(app.buffer)) app.buffer = []
-        if (app.session === undefined) app.session = null
-        return app
-    }
-
-    function trackWindow(w) {
+    // `adopted` windows were open before the script started (reload, KWin restart):
+    // they are left where they are and only saved when they close.
+    function trackWindow(w, adopted) {
         if (!isValidWindow(w)) return
         var cls = w.resourceClass
-        if (Engine.isListed(cls, config.blacklist)) {
+        if (Engine.isListed(cls, blacklist)) {
             dbg('ignoring blacklisted app: ' + cls)
             return
         }
         var id = String(w.internalId)
         if (tracked[id]) return
-        var app = ensureApp(cls)
+        if (!live[cls]) live[cls] = { open: [], buffer: [], session: null, settled: false }
+        var app = live[cls]
+        var entry = { w: w, cls: cls, assigned: !!adopted, userPlaced: false, provisional: null, captionHandler: null, moveHandler: null }
+        tracked[id] = entry
         app.open.push(id)
-        tracked[id] = { w: w, cls: cls, assigned: false, captionHandler: null }
-        w.closed.connect(function () { onWindowClosed(w) })
+        entry.moveHandler = connectSignal(w, 'interactiveMoveResizeStarted', function () { onUserMoveResize(id) })
         dbg('tracking window for ' + cls)
-        if (app.session) {
-            app.session.pending.push(id)
-            app.session.deadline = Math.max(app.session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
-            watchCaption(id)
-            tryAssign(id)
-        } else {
-            maybeStartSession(cls)
+        if (adopted) {
+            app.settled = true
+        } else if (app.session || startSession(cls)) {
+            joinSession(cls, id)
         }
+    }
+
+    function untrack(id) {
+        var entry = tracked[id]
+        delete tracked[id]
+        unwatchCaption(entry)
+        disconnectSignal(entry.w, 'interactiveMoveResizeStarted', entry.moveHandler)
+        return entry
     }
 
     function snapshotWindow(w) {
         try {
+            if (w.fullScreen || !(w.width >= 1) || !(w.height >= 1)) return null
             var output = w.output
             var relative = output ? output.mapFromGlobal(w.pos) : Qt.point(w.x, w.y)
             return Engine.makeSave({
@@ -142,166 +171,159 @@ Item {
         }
     }
 
-    function onWindowClosed(w) {
-        try {
-            if (!w) return
-            var id = String(w.internalId)
-            var entry = tracked[id]
-            if (!entry) return
-            delete tracked[id]
-            var app = state.apps[entry.cls]
-            if (!app) return
-            removeFromArray(app.open, id)
-            if (app.session) {
-                removeFromArray(app.session.pending, id)
-                unwatchCaption(id)
-            }
-            var snap = snapshotWindow(w)
-            if (snap) {
-                app.buffer.push({ closeTime: Date.now(), snap: snap })
-                while (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
-            }
-            if (app.open.length === 0) finalizeApp(entry.cls)
-            ensureTick()
-        } catch (e) {
-            dbg('close handling failed: ' + e)
+    // Forget a window. Returns true when it was the app's last one and new saves were made.
+    function releaseWindow(id) {
+        var entry = untrack(id)
+        var app = live[entry.cls]
+        removeFromArray(app.open, id)
+        // A window still awaiting its restore shows the app's default placement, not the user's layout.
+        var awaitingRestore = !!app.session && app.session.pending.indexOf(id) !== -1
+        if (app.session) removeFromArray(app.session.pending, id)
+        var snap = awaitingRestore ? null : snapshotWindow(entry.w)
+        if (snap) {
+            app.buffer.push({ closeTime: Date.now(), snap: snap })
+            if (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
         }
+        if (app.open.length > 0) return false
+        delete live[entry.cls]
+        return finalizeApp(entry.cls, app.buffer)
     }
 
-    function finalizeApp(cls) {
-        var app = state.apps[cls]
-        if (!app) return
-        if (!app.buffer.length) return
-        app.buffer.sort(function (a, b) { return a.closeTime - b.closeTime })
+    // The windows that closed together (each within BURST_MS of the next) become the app's layout.
+    function finalizeApp(cls, buffer) {
+        if (!buffer.length) return false
         var saves = []
-        var last = app.buffer[app.buffer.length - 1].closeTime
-        for (var i = app.buffer.length - 1; i >= 0; i--) {
-            if (last - app.buffer[i].closeTime > Engine.BURST_MS) break
-            saves.unshift(app.buffer[i].snap)
-            last = app.buffer[i].closeTime
+        var last = buffer[buffer.length - 1].closeTime
+        for (var i = buffer.length - 1; i >= 0 && last - buffer[i].closeTime <= Engine.BURST_MS; i--) {
+            saves.unshift(buffer[i].snap)
+            last = buffer[i].closeTime
         }
-        app.buffer = []
-        if (!saves.length) return
-        app.saves = saves
-        app.lastAccess = Date.now()
+        store.apps[cls] = { lastAccess: Date.now(), saves: saves }
         log(cls + ' closed, saved ' + saves.length + ' window(s)')
-        persist()
-        maybeStartSession(cls)
+        return true
     }
 
-    function maybeStartSession(cls) {
-        var app = state.apps[cls]
-        if (!app || app.session || !app.saves.length || app.open.length === 0) return
-        var pending = []
-        for (var i = 0; i < app.open.length; i++) {
-            var entry = tracked[app.open[i]]
-            if (entry && !entry.assigned) pending.push(app.open[i])
-        }
-        app.session = { saves: app.saves, deadline: Date.now() + Engine.RESTORE_TIMEOUT_MS, pending: pending }
-        dbg(cls + ': restore session started - ' + pending.length + ' window(s) open, ' + app.saves.length + ' saved')
-        for (i = 0; i < pending.length; i++) watchCaption(pending[i])
-        for (i = 0; i < pending.length; i++) tryAssign(pending[i])
+    function startSession(cls) {
+        var app = live[cls]
+        var saved = store.apps[cls]
+        if (app.settled || !saved) return false
+        saved.lastAccess = Date.now()
+        app.session = { saves: saved.saves, taken: [], remaining: saved.saves.length, pending: [], deadline: 0 }
+        dbg(cls + ': restore session started - ' + saved.saves.length + ' saved window(s)')
         ensureTick()
+        return true
+    }
+
+    function joinSession(cls, id) {
+        var session = live[cls].session
+        session.pending.push(id)
+        session.deadline = Math.max(session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
+        watchCaption(id)
+        tryAssign(id)
     }
 
     function watchCaption(id) {
         var entry = tracked[id]
-        if (!entry || entry.captionHandler) return
-        entry.captionHandler = function () { tryAssign(id) }
-        try {
-            entry.w.captionChanged.connect(entry.captionHandler)
-        } catch (e) {
-            entry.captionHandler = null
-        }
+        if (!entry.captionHandler) entry.captionHandler = connectSignal(entry.w, 'captionChanged', function () { tryAssign(id) })
     }
 
-    function unwatchCaption(id) {
+    function unwatchCaption(entry) {
+        disconnectSignal(entry.w, 'captionChanged', entry.captionHandler)
+        entry.captionHandler = null
+    }
+
+    function onUserMoveResize(id) {
         var entry = tracked[id]
-        if (entry && entry.captionHandler) {
-            try {
-                entry.w.captionChanged.disconnect(entry.captionHandler)
-            } catch (e) {}
-            entry.captionHandler = null
-        }
+        if (!entry || entry.userPlaced) return
+        entry.userPlaced = true
+        entry.provisional = null
+        var session = live[entry.cls].session
+        if (entry.assigned || !session) return
+        entry.assigned = true
+        unwatchCaption(entry)
+        removeFromArray(session.pending, id)
+        dbg(entry.cls + ': window placed by the user, not restoring it')
     }
 
-    function bestMatchForWindow(w, saves) {
-        return Engine.bestMatch(saves, {
+    function matchFor(entry, session) {
+        var w = entry.w
+        return Engine.bestMatch(session.saves, {
             caption: String(w.caption || ''),
             width: Math.round(w.width),
             height: Math.round(w.height)
-        })
+        }, session.taken)
     }
 
+    // Unambiguous matches apply at once; the rest wait for the set to arrive or the deadline.
     function tryAssign(id) {
         var entry = tracked[id]
         if (!entry || entry.assigned) return
-        var app = state.apps[entry.cls]
-        if (!app || !app.session) return
-        var w = entry.w
-        if (!w || w.deleted) return
-        var match = bestMatchForWindow(w, app.session.saves)
-        if (!match) return
-        // Only unambiguous matches apply instantly; the rest wait for the set to arrive.
-        var immediate = match.tier === 1 || app.session.saves.length === 1
-        if (!immediate) return
-        assignSave(entry.cls, id, app.session, match, false)
-    }
-
-    function assignSave(cls, id, session, match, bestEffort) {
-        var entry = tracked[id]
-        if (!entry) return
-        var save = session.saves[match.index]
-        save.matched = true
-        entry.assigned = true
-        unwatchCaption(id)
-        removeFromArray(session.pending, id)
-        var changes = applySnapshot(entry.w, save, cls)
-        var mode = bestEffort ? 'best effort' : (changes.length ? changes.join(', ') : 'already correct')
-        log(cls + ': restored window to saved state (' + mode + '), caption match ' + match.score + '%')
-        for (var i = 0; i < session.saves.length; i++) {
-            if (!session.saves[i].matched) return
-        }
-        endSession(cls)
-    }
-
-    function endSession(cls) {
-        var app = state.apps[cls]
-        var session = app.session
+        var session = live[entry.cls].session
         if (!session) return
-        app.session = null
-        for (var i = session.pending.length - 1; i >= 0; i--) {
-            var id = session.pending[i]
-            var entry = tracked[id]
-            unwatchCaption(id)
-            session.pending.splice(i, 1)
-            if (!entry) continue
-            var w = entry.w
-            if (!w || w.deleted) continue
-            var match = bestMatchForWindow(w, session.saves)
-            if (match) assignSave(cls, id, session, match, true)
+        var match = matchFor(entry, session)
+        if (!match || (match.tier !== 1 && session.remaining !== 1)) return
+        assignSave(entry, id, session, match, false)
+        if (session.remaining === 0) {
+            endSession(entry.cls)
+        } else if (session.remaining === 1) {
+            var waiting = session.pending.slice()
+            for (var i = 0; i < waiting.length; i++) tryAssign(waiting[i])
         }
-        if (app.saves === session.saves) app.saves = []
-        persist()
+    }
+
+    function assignSave(entry, id, session, match, bestEffort) {
+        session.taken[match.index] = true
+        session.remaining--
+        entry.assigned = true
+        unwatchCaption(entry)
+        removeFromArray(session.pending, id)
+        var moved = applySave(entry, id, session.saves[match.index], Date.now() + Engine.RESTORE_TIMEOUT_MS)
+        var mode = bestEffort ? 'best effort' : (moved ? 'moved' : 'left as is')
+        log(entry.cls + ': restored window to saved state (' + mode + '), caption match ' + match.score + '%')
+    }
+
+    // Deadline: give each waiting window the best remaining save, best pair first.
+    function endSession(cls) {
+        var app = live[cls]
+        var session = app.session
+        for (;;) {
+            var best = null
+            for (var i = 0; i < session.pending.length; i++) {
+                var match = matchFor(tracked[session.pending[i]], session)
+                if (match && (!best || Engine.isBetterMatch(match, best.match))) best = { id: session.pending[i], match: match }
+            }
+            if (!best) break
+            assignSave(tracked[best.id], best.id, session, best.match, true)
+        }
+        for (var j = 0; j < session.pending.length; j++) unwatchCaption(tracked[session.pending[j]])
+        app.session = null
+        app.settled = true
         dbg(cls + ': restore session ended')
     }
 
-    function resolveOutput(save) {
-        var screens = Workspace.screens
-        if (!screens || screens.length === 0) return null
-        if (screens.length === 1) return screens[0]
-        if (!save.output) return null
-        if (save.output.serial) {
-            for (var i = 0; i < screens.length; i++) {
-                if (String(screens[i].serialNumber) === save.output.serial) return screens[i]
-            }
+    function workArea(output) {
+        try {
+            return Workspace.clientArea(KWin.MaximizeArea, output, Workspace.currentDesktop)
+        } catch (e) {
+            return null
         }
-        if (save.output.name) {
-            for (var j = 0; j < screens.length; j++) {
-                if (String(screens[j].name) === save.output.name) return screens[j]
-            }
+    }
+
+    // Serial + name first, then a serial no other screen shares (identical monitor
+    // models often report the same one), then the connector name.
+    function resolveOutput(saved) {
+        var screens = Workspace.screens || []
+        var bySerial = []
+        var byName = null
+        for (var i = 0; i < screens.length; i++) {
+            var serialMatch = !!saved.serial && String(screens[i].serialNumber) === saved.serial
+            var nameMatch = !!saved.name && String(screens[i].name) === saved.name
+            if (serialMatch && nameMatch) return screens[i]
+            if (serialMatch) bySerial.push(screens[i])
+            if (nameMatch && !byName) byName = screens[i]
         }
-        return null
+        if (bySerial.length === 1) return bySerial[0]
+        return byName || bySerial[0] || null
     }
 
     function outputUnderCursor() {
@@ -316,6 +338,15 @@ Item {
         }
     }
 
+    function isOnScreen(x, y) {
+        var screens = Workspace.screens || []
+        for (var i = 0; i < screens.length; i++) {
+            var g = screens[i].geometry
+            if (x >= g.x && x < g.x + g.width && y >= g.y && y < g.y + g.height) return true
+        }
+        return false
+    }
+
     function isMaximizedLike(w) {
         try {
             var area = Workspace.clientArea(KWin.MaximizeArea, w)
@@ -325,44 +356,49 @@ Item {
         }
     }
 
+    // Windows that KWin, the app or the user is managing right now are never moved.
+    function canPlace(w) {
+        return !w.tile && !w.fullScreen && w.moveable && !w.move && !w.resize && !isMaximizedLike(w)
+    }
+
+    function fitLength(saved, min, max, limit) {
+        var upper = max ? Math.min(Math.floor(max), limit) : limit
+        return Math.max(min ? Math.ceil(min) : 0, Math.min(saved, upper))
+    }
+
+    // Returns { rect, provisional } or null. `provisional` means the saved screen is
+    // missing and a fallback screen was used; the size then fits that screen.
     function targetFor(w, save) {
         var virtual = Workspace.virtualScreenGeometry
         if (!virtual || virtual.width <= 0 || virtual.height <= 0) return null
         var x = save.x
         var y = save.y
-        var output = resolveOutput(save)
-        var fellBack = false
+        var output = null
+        var provisional = false
         if (save.output) {
+            output = resolveOutput(save.output)
+            if (!output) {
+                output = Workspace.screens.length === 1 ? Workspace.screens[0] : outputUnderCursor()
+                provisional = true
+            }
             if (output) {
                 var position = output.mapToGlobal(Qt.point(save.output.x, save.output.y))
-                x = Math.round(position.x)
-                y = Math.round(position.y)
-            } else {
-                output = outputUnderCursor()
-                fellBack = true
-                if (output) {
-                    var fallback = output.mapToGlobal(Qt.point(save.output.x, save.output.y))
-                    x = Math.round(fallback.x)
-                    y = Math.round(fallback.y)
-                }
+                x = position.x
+                y = position.y
             }
         }
-        var maxWidth = Math.min(w.maxSize ? Math.floor(w.maxSize.width) : virtual.width, virtual.width)
-        var maxHeight = Math.min(w.maxSize ? Math.floor(w.maxSize.height) : virtual.height, virtual.height)
-        if (fellBack && output) {
-            try {
-                var area = Workspace.clientArea(KWin.MaximizeArea, output, Workspace.currentDesktop)
-                maxWidth = Math.min(maxWidth, Math.floor(area.width))
-                maxHeight = Math.min(maxHeight, Math.floor(area.height))
-            } catch (e) {}
-        }
-        var minWidth = w.minSize ? Math.ceil(w.minSize.width) : 0
-        var minHeight = w.minSize ? Math.ceil(w.minSize.height) : 0
-        var width = Math.max(minWidth, Math.min(save.width, maxWidth))
-        var height = Math.max(minHeight, Math.min(save.height, maxHeight))
+        var bounds = (provisional && output && workArea(output)) || virtual
+        var width = w.resizeable ? fitLength(save.width, w.minSize && w.minSize.width, w.maxSize && w.maxSize.width, bounds.width) : w.width
+        var height = w.resizeable ? fitLength(save.height, w.minSize && w.minSize.height, w.maxSize && w.maxSize.height, bounds.height) : w.height
         x = Math.max(virtual.x, Math.min(x, virtual.x + virtual.width - width))
         y = Math.max(virtual.y, Math.min(y, virtual.y + virtual.height - height))
-        return { x: Math.round(x), y: Math.round(y), w: Math.round(width), h: Math.round(height) }
+        // The virtual bounding box has gaps between unequal screens: keep the title bar reachable.
+        var area = !isOnScreen(x + width / 2, y) && workArea(output || outputUnderCursor())
+        if (area) {
+            x = Math.max(area.x, Math.min(x, area.x + area.width - width))
+            y = Math.max(area.y, Math.min(y, area.y + area.height - height))
+        }
+        return { rect: { x: Math.round(x), y: Math.round(y), w: Math.round(width), h: Math.round(height) }, provisional: provisional }
     }
 
     function rectEquals(w, target) {
@@ -370,66 +406,88 @@ Item {
                Math.round(w.width) === target.w && Math.round(w.height) === target.h
     }
 
-    function applySnapshot(w, save, cls) {
-        var changes = []
-        if (!w || w.deleted) return changes
+    function setGeometry(w, rect) {
+        w.frameGeometry = Qt.rect(rect.x, rect.y, rect.w, rect.h)
+    }
 
-        if (!w.tile && !w.fullScreen && w.moveable && w.resizeable && !w.move && !w.resize && !isMaximizedLike(w)) {
-            var geometry = targetFor(w, save)
-            if (geometry && !rectEquals(w, geometry)) {
-                w.frameGeometry = Qt.rect(geometry.x, geometry.y, geometry.w, geometry.h)
-                retries.push({ w: w, cls: cls, target: geometry, tries: 1, born: Date.now(), interacted: false })
-                changes.push('geometry')
+    // Returns true when the window was moved. A provisional placement may be redone
+    // until `until` if the saved screen shows up (see reapplyProvisional).
+    function applySave(entry, id, save, until) {
+        if (!canPlace(entry.w)) return false
+        var target = targetFor(entry.w, save)
+        if (!target) return false
+        entry.provisional = target.provisional ? { save: save, until: until } : null
+        if (rectEquals(entry.w, target.rect)) return false
+        setGeometry(entry.w, target.rect)
+        for (var i = retries.length - 1; i >= 0; i--) {
+            if (retries[i].id === id) retries.splice(i, 1)
+        }
+        retries.push({ id: id, target: target.rect, tries: 1, born: Date.now() })
+        ensureTick()
+        return true
+    }
+
+    // A screen came or went (e.g. a monitor that finished initialising after login):
+    // windows restored onto a fallback screen get another chance to reach their own.
+    function reapplyProvisional() {
+        var now = Date.now()
+        for (var id in tracked) {
+            var entry = tracked[id]
+            if (!entry.provisional) continue
+            if (entry.userPlaced || now > entry.provisional.until) {
+                entry.provisional = null
+                continue
+            }
+            try {
+                applySave(entry, id, entry.provisional.save, entry.provisional.until)
+            } catch (e) {
+                dbg('re-placing window failed: ' + e)
             }
         }
-
-        return changes
     }
 
     function sweepRetries(now) {
         for (var i = retries.length - 1; i >= 0; i--) {
             var retry = retries[i]
-            var w = retry.w
-            if (!w || w.deleted) {
+            var entry = tracked[retry.id]
+            try {
+                if (!entry || entry.userPlaced || now - retry.born > Engine.RETRY_MAX_AGE_MS ||
+                        !canPlace(entry.w) || rectEquals(entry.w, retry.target)) {
+                    retries.splice(i, 1)
+                } else if (retry.tries >= Engine.MAX_GEOMETRY_TRIES) {
+                    dbg(entry.cls + ': geometry did not stick, giving up silently (a window rule or the app owns this window)')
+                    retries.splice(i, 1)
+                } else {
+                    retry.tries++
+                    setGeometry(entry.w, retry.target)
+                }
+            } catch (e) {
+                dbg('geometry retry failed: ' + e)
                 retries.splice(i, 1)
-                continue
             }
-            if (w.move || w.resize) {
-                retry.interacted = true
-                continue
-            }
-            if (retry.interacted || now - retry.born > Engine.RETRY_MAX_AGE_MS) {
-                dbg(retry.cls + ': stopped restoring geometry (window is user-managed now)')
-                retries.splice(i, 1)
-                continue
-            }
-            if (rectEquals(w, retry.target)) {
-                retries.splice(i, 1)
-                continue
-            }
-            if (retry.tries >= Engine.MAX_GEOMETRY_TRIES) {
-                dbg(retry.cls + ': geometry did not stick, giving up silently (a window rule or the app owns this window)')
-                retries.splice(i, 1)
-                continue
-            }
-            retry.tries++
-            w.frameGeometry = Qt.rect(retry.target.x, retry.target.y, retry.target.w, retry.target.h)
         }
     }
 
     function sweepSessions(now) {
-        for (var cls in state.apps) {
-            var app = state.apps[cls]
-            if (app.session && now >= app.session.deadline) endSession(cls)
+        for (var cls in live) {
+            var app = live[cls]
+            if (!app.session || now < app.session.deadline) continue
+            try {
+                endSession(cls)
+            } catch (e) {
+                log(cls + ': ending restore session failed: ' + e)
+                app.session = null
+                app.settled = true
+            }
         }
     }
 
-    function stopTickIfIdle() {
-        if (retries.length > 0) return
-        for (var cls in state.apps) {
-            if (state.apps[cls].session) return
+    function isIdle() {
+        if (retries.length > 0) return false
+        for (var cls in live) {
+            if (live[cls].session) return false
         }
-        tickTimer.stop()
+        return true
     }
 
     function ensureTick() {
@@ -440,14 +498,56 @@ Item {
         var now = Date.now()
         sweepRetries(now)
         sweepSessions(now)
-        stopTickIfIdle()
+        if (isIdle()) tickTimer.stop()
+    }
+
+    function handleAdded(w) {
+        try {
+            trackWindow(w, false)
+        } catch (e) {
+            log('tracking a new window failed: ' + e)
+        }
+    }
+
+    function handleRemoved(w) {
+        try {
+            var id = w ? String(w.internalId) : ''
+            if (tracked[id] && releaseWindow(id)) persist()
+        } catch (e) {
+            log('close handling failed: ' + e)
+        }
+    }
+
+    function startup() {
+        loadConfig()
+        loadPersisted()
+        var windows = Workspace.stackingOrder
+        for (var i = 0; i < windows.length; i++) {
+            try {
+                trackWindow(windows[i], true)
+            } catch (e) {
+                log('tracking an existing window failed: ' + e)
+            }
+        }
+    }
+
+    // Script unload or KWin exit: windows still open are saved as if they closed now,
+    // so a logout, reboot or reload that never closed them keeps their layout.
+    function shutdown() {
+        for (var id in tracked) {
+            try {
+                releaseWindow(id)
+            } catch (e) {
+                log('saving a window on shutdown failed: ' + e)
+            }
+        }
+        persist()
     }
 
     Timer {
         id: tickTimer
         interval: Engine.TICK_MS
         repeat: true
-        running: false
         onTriggered: root.onTick()
     }
 
@@ -459,25 +559,19 @@ Item {
         target: Workspace
 
         function onWindowAdded(window) {
-            trackWindow(window)
+            root.handleAdded(window)
         }
 
         function onWindowRemoved(window) {
-            // Safety net: fires even for windows whose closed signal was missed.
-            onWindowClosed(window)
+            root.handleRemoved(window)
+        }
+
+        function onScreensChanged() {
+            root.reapplyProvisional()
         }
     }
 
-    Component.onCompleted: {
-        loadConfig()
-        loadPersisted()
-        var clients = Workspace.stackingOrder
-        for (var i = 0; i < clients.length; i++) {
-            trackWindow(clients[i])
-        }
-    }
+    Component.onCompleted: startup()
 
-    Component.onDestruction: {
-        persist()
-    }
+    Component.onDestruction: shutdown()
 }

@@ -5,7 +5,7 @@
 //   save: { c: caption, x: globalX, y: globalY, w: width, h: height,
 //           o: { x, y, s: outputSerial, n: outputName }  output-relative position }
 //   Only geometry is saved and restored; everything else is left to KWin.
-//   Runtime save objects use long names plus a `matched` flag (never persisted).
+//   Runtime save objects use the long names below and are never mutated.
 //   v1 blobs (which also stored desktop/activities/state flags) decode fine - those
 //   fields are simply ignored.
 
@@ -25,6 +25,10 @@ function numberOr(value, fallback) {
     return isFinite(n) ? n : fallback
 }
 
+function isObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
 function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -34,7 +38,7 @@ function parseList(text) {
     if (!text) return parsed
     var lines = String(text).split(/\r?\n/)
     for (var i = 0; i < lines.length; i++) {
-        var line = lines[i].trim()
+        var line = lines[i].trim().toLowerCase()
         if (!line) continue
         if (line.indexOf('*') === -1) {
             parsed.exact.push(line)
@@ -47,8 +51,10 @@ function parseList(text) {
     return parsed
 }
 
+// Case-insensitive: KWin lowercases X11 classes, Wayland app ids keep their case.
 function isListed(name, parsed) {
     if (!name) return false
+    name = String(name).toLowerCase()
     if (parsed.exact.indexOf(name) !== -1) return true
     for (var i = 0; i < parsed.patterns.length; i++)
         if (parsed.patterns[i].test(name)) return true
@@ -75,16 +81,29 @@ function captionScore(a, b) {
     return Math.max(Math.min((Math.max(forward, reverse) * 100 / max), 100), 0)
 }
 
-// Deterministic slot matching: pick the best unmatched save for one live window.
+// Ranking shared by single-window matching and the deadline sweep:
+// lower tier first, then more matching dimensions, then higher caption score.
+function isBetterMatch(a, b) {
+    if (a.tier !== b.tier) return a.tier < b.tier
+    if (a.dims !== b.dims) return a.dims > b.dims
+    return a.score > b.score
+}
+
+// Deterministic slot matching: pick the best save not yet taken for one live window.
 // Tier 1: caption 100% (numbers stripped) and same size
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
-// Returns { index, tier, score } or null.
-function bestMatch(saves, live) {
+// Tier 4: the only save left, whatever it is - the "app never remembers anything" case
+// Returns { index, tier, dims, score } or null.
+function bestMatch(saves, live, taken) {
     var best = null
+    var free = -1
+    var freeCount = 0
     for (var i = 0; i < saves.length; i++) {
+        if (taken[i]) continue
+        free = i
+        freeCount++
         var s = saves[i]
-        if (!s || s.matched) continue
         var dims = (s.width === live.width ? 1 : 0) + (s.height === live.height ? 1 : 0)
         var score = captionScore(s.caption, live.caption)
         var tier
@@ -92,24 +111,11 @@ function bestMatch(saves, live) {
         else if (dims === 2) tier = 2
         else if (score >= CAPTION_FALLBACK) tier = 3
         else continue
-        if (!best || tier < best.tier || (tier === best.tier && (dims > best.dims || (dims === best.dims && score > best.score)))) {
-            best = { index: i, tier: tier, dims: dims, score: score }
-        }
+        var candidate = { index: i, tier: tier, dims: dims, score: score }
+        if (!best || isBetterMatch(candidate, best)) best = candidate
     }
-    if (!best) {
-        // Single-save fallback: an app with exactly one saved window always gets it
-        // applied to its next window - this is the "app never remembers anything" case.
-        var only = -1
-        var count = 0
-        for (var j = 0; j < saves.length; j++) {
-            if (saves[j] && !saves[j].matched) {
-                count++
-                only = j
-            }
-        }
-        if (count === 1 && saves[only]) {
-            return { index: only, tier: 4, dims: 0, score: captionScore(saves[only].caption, live.caption) }
-        }
+    if (!best && freeCount === 1) {
+        return { index: free, tier: 4, dims: 0, score: captionScore(saves[free].caption, live.caption) }
     }
     return best
 }
@@ -121,13 +127,12 @@ function makeSave(fields) {
         y: fields.y,
         width: fields.width,
         height: fields.height,
-        output: fields.output || null,
-        matched: false
+        output: fields.output || null
     }
 }
 
 function newState() {
-    return { version: SCHEMA_VERSION, apps: {} }
+    return { apps: {} }
 }
 
 function encodeSave(s) {
@@ -144,12 +149,12 @@ function encodeSave(s) {
 }
 
 function decodeSave(s) {
-    if (!s || typeof s !== 'object' || Array.isArray(s)) return null
+    if (!isObject(s)) return null
     var width = numberOr(s.w, NaN)
     var height = numberOr(s.h, NaN)
-    if (!isFinite(width) || !isFinite(height)) return null
+    if (!(width >= 1) || !(height >= 1)) return null
     var output = null
-    if (s.o && typeof s.o === 'object' && !Array.isArray(s.o)) {
+    if (isObject(s.o)) {
         output = {
             x: numberOr(s.o.x, 0),
             y: numberOr(s.o.y, 0),
@@ -157,15 +162,14 @@ function decodeSave(s) {
             name: typeof s.o.n === 'string' ? s.o.n : ''
         }
     }
-    return {
+    return makeSave({
         caption: typeof s.c === 'string' ? s.c : '',
         x: numberOr(s.x, 0),
         y: numberOr(s.y, 0),
         width: width,
         height: height,
-        output: output,
-        matched: false
-    }
+        output: output
+    })
 }
 
 // Never throws. Returns { state, error } - error is null when the blob was usable.
@@ -178,13 +182,13 @@ function decodeState(text) {
     } catch (e) {
         return { state: state, error: String(e) }
     }
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { state: state, error: 'unexpected root' }
+    if (!isObject(raw)) return { state: state, error: 'unexpected root' }
     if (raw.apps === undefined) return { state: state, error: null }
     var apps = raw.apps
-    if (!apps || typeof apps !== 'object' || Array.isArray(apps)) return { state: state, error: 'unexpected apps' }
+    if (!isObject(apps)) return { state: state, error: 'unexpected apps' }
     for (var cls in apps) {
         var app = apps[cls]
-        if (!app || typeof app !== 'object' || Array.isArray(app) || !Array.isArray(app.w) || !app.w.length) continue
+        if (!isObject(app) || !Array.isArray(app.w) || !app.w.length) continue
         var saves = []
         for (var i = 0; i < app.w.length; i++) {
             var save = decodeSave(app.w[i])
@@ -228,8 +232,9 @@ function pruneExpired(state, now) {
     return removed
 }
 
-// Re-adopt apps that exist on disk but are missing from the in-memory state.
-// Memory wins for every app it already knows; disk-only apps are preserved.
+// Re-adopt apps that exist on disk but are missing from the in-memory state
+// (written by another KWin instance, e.g. across a login). Memory wins for every
+// app it already knows. Callers prune afterwards, so expired disk apps still go.
 function mergeDiskApps(state, diskState) {
     var adopted = 0
     if (!diskState || !diskState.apps) return adopted
