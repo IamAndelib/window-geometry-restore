@@ -9,7 +9,7 @@ const engine = new Function(`
     ${source}
     return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
              MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
-             parseList, isListed, captionScore, bestMatch, makeSave, newState,
+             parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, newState,
              decodeState, encodeState, pruneExpired, mergeDiskApps };
 `)()
 
@@ -39,7 +39,7 @@ test('captionScore: exact, numeric drift, prefix/suffix drift, unrelated', () =>
 })
 
 test('parseList/isListed: exact, wildcard, no false positives', () => {
-    const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game')
+    const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)
     assert.equal(engine.isListed('steam', parsed), true)
     assert.equal(engine.isListed('steam_app_440', parsed), true)
@@ -48,6 +48,9 @@ test('parseList/isListed: exact, wildcard, no false positives', () => {
     assert.equal(engine.isListed('xsteam', parsed), false)
     assert.equal(engine.isListed('other', parsed), false)
     assert.equal(engine.isListed('', parsed), false)
+    assert.equal(engine.isListed('Steam', parsed), true, 'case-insensitive wildcard')
+    assert.equal(engine.isListed('chrome-abc-default', parsed), true, 'case-insensitive exact')
+    assert.equal(engine.isListed('ORG.KDE.SPECTACLE', parsed), true)
     const special = engine.parseList('a.b(c)')
     assert.equal(engine.isListed('a.b(c)', special), true)
     assert.equal(engine.isListed('aXbXc', special), false)
@@ -55,17 +58,18 @@ test('parseList/isListed: exact, wildcard, no false positives', () => {
 
 test('bestMatch: tier 1 caption+size, tier 2 size, tier 3 caption, no match', () => {
     const saves = [save(), save({ caption: 'Second window', width: 800, height: 600 })]
-    assert.equal(engine.bestMatch(saves, live()).tier, 1)
-    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' })).tier, 2)
-    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 })).tier, 3)
-    assert.equal(engine.bestMatch(saves, live({ caption: 'Unrelated', width: 1280, height: 720 })), null,
+    assert.equal(engine.bestMatch(saves, live(), []).tier, 1)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' }), []).tier, 2)
+    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 }), []).tier, 3)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Unrelated', width: 1280, height: 720 }), []), null,
         'no match with several unmatched saves and neither caption nor size fitting')
 })
 
-test('bestMatch: skips already matched saves', () => {
+test('bestMatch: skips taken saves without mutating them', () => {
     const saves = [save(), save({ caption: 'Second', width: 800, height: 600 })]
-    saves[0].matched = true
-    const m = engine.bestMatch(saves, live())
+    const before = JSON.stringify(saves)
+    const m = engine.bestMatch(saves, live(), [true])
+    assert.equal(JSON.stringify(saves), before)
     assert.equal(m.index, 1)
     assert.equal(m.tier, 2)
 })
@@ -75,18 +79,26 @@ test('bestMatch: prefers higher tier, then dims, then score', () => {
         save({ caption: 'Unrelated', width: 800, height: 600 }),
         save({ caption: 'Window', width: 799, height: 599 })
     ]
-    const m = engine.bestMatch(saves, live())
+    const m = engine.bestMatch(saves, live(), [])
     assert.equal(m.index, 0)
     assert.equal(m.tier, 2)
 })
 
+test('isBetterMatch: tier, then dims, then score', () => {
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0 }, { tier: 2, dims: 2, score: 100 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 0, score: 99 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 1, score: 80 }), false)
+})
+
 test('single-save fallback: the lone save always applies to the next window (tier 4)', () => {
     const saves = [save({ caption: 'Unrelated', width: 640, height: 480 })]
-    const m = engine.bestMatch(saves, live({ caption: 'WhatsApp', width: 1200, height: 900 }))
+    const m = engine.bestMatch(saves, live({ caption: 'WhatsApp', width: 1200, height: 900 }), [])
     assert.equal(m.tier, 4)
     assert.equal(m.index, 0)
-    saves[0].matched = true
-    assert.equal(engine.bestMatch(saves, live()), null, 'no fallback once the single save is matched')
+    assert.equal(engine.bestMatch(saves, live(), [true]), null, 'no fallback once the single save is taken')
+    const two = [save({ caption: 'A', width: 1, height: 1 }), save({ caption: 'B', width: 2, height: 2 })]
+    assert.equal(engine.bestMatch(two, live(), [false, true]).index, 0, 'fallback applies to the last free save')
 })
 
 test('decodeState: rejects garbage without throwing, returns empty state', () => {
@@ -122,7 +134,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.equal(a.matched, false)
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'height', 'output', 'width', 'x', 'y'])
     const blob = JSON.parse(engine.encodeState(state))
     assert.equal(blob.version, 2)
     assert.equal(blob.apps['firefox'].w[0].d, undefined)
@@ -162,6 +174,8 @@ test('decodeState: drops malformed saves, keeps valid ones', () => {
                     { c: 'bad-size', x: 1, y: 2 },
                     null,
                     { c: 5, w: 10, h: 10 },
+                    { c: 'zero', w: 0, h: 10 },
+                    { c: 'negative', w: 10, h: -5 },
                     'string'
                 ]
             },
@@ -213,4 +227,14 @@ test('mergeDiskApps: adopts disk-only apps, memory wins for known apps', () => {
     assert.equal(adopted, 1)
     assert.equal(memory.apps['known'].saves[0].caption, 'Window', 'memory wins for known apps')
     assert.equal(memory.apps['lost'].saves[0].caption, 'lost', 'disk-only app re-adopted')
+})
+
+test('default exclusion list is identical in main.qml and config/main.xml', () => {
+    const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
+    const xml = readFileSync(new URL('../src/contents/config/main.xml', import.meta.url), 'utf8')
+    const qmlBlock = qml.match(/defaultBlacklist: \[([\s\S]*?)\]\.join/)[1]
+    const fromQml = [...qmlBlock.matchAll(/'([^']+)'/g)].map((m) => m[1])
+    const fromXml = xml.match(/<entry name="blacklist"[\s\S]*?<default>([\s\S]*?)<\/default>/)[1].split('\n').map((l) => l.trim()).filter(Boolean)
+    assert.ok(fromQml.length > 0)
+    assert.deepEqual(fromQml, fromXml)
 })
