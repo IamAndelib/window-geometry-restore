@@ -24,6 +24,8 @@ cd window-geometry-restore
 ./install.sh
 ```
 
+When upgrading, log out and back in afterwards — KWin keeps running the old version until the session ends.
+
 > After changing settings, reload the script (untick, Apply, tick, Apply) — a KWin limitation.
 
 ## How it works
@@ -63,7 +65,8 @@ Saved data lives in `~/.config/kde.org/kwin.conf` under `windowgeometryrestore_w
 ```bash
 make test      # engine + lifecycle tests (node)
 make build     # package into .kwinscript
-make install   # install or upgrade, enable, and reload in the live session
+make install   # install or upgrade and enable (a new version runs from the next login)
+make load      # run the working tree as a separate test script, no logout needed
 make logs      # follow the script's log output
 ```
 

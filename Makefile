@@ -14,7 +14,7 @@ $(PKGFILE): $(shell find $(SRC_DIR) -type f)
 test:
 	node tests/engine.mjs && node tests/lifecycle.mjs
 
-# Install or upgrade, enable, and reload the running copy.
+# Install or upgrade and enable. An upgrade runs from the next login (KWin caches scripts).
 install:
 	@./install.sh
 
@@ -27,7 +27,9 @@ clean:
 logs:
 	@journalctl --user -f | grep --line-buffered WindowGeometryRestore
 
-# Load the working tree as a separate script for quick testing (unload the installed one first).
+# Load the working tree as a separate script for quick testing without logging out:
+# each load uses a fresh copy, which sidesteps KWin's script cache. Disable the
+# installed script first so the two don't both act on windows.
 load:
 	bin/load.sh "$(SRC_DIR)" "$(SCRIPT_NAME)-test"
 

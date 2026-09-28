@@ -3,6 +3,9 @@
 #
 # Usage: ./install.sh            install (or upgrade) and enable
 #        ./install.sh --uninstall
+#
+# An upgrade runs from the next login: KWin keeps a script's code cached for the
+# whole session, so reloading the script would still run the old version.
 
 set -eu
 
@@ -48,14 +51,18 @@ info "Packaging..."
 (cd "$ROOT_DIR" && zip -rq "$PKG" src)
 
 info "Installing..."
-kpackagetool6 --type=KWin/Script -i "$PKG" 2>/dev/null || \
+if kpackagetool6 --type=KWin/Script -i "$PKG" 2>/dev/null; then
+    UPGRADED=false
+else
     kpackagetool6 --type=KWin/Script -u "$PKG" || die "installation failed"
+    UPGRADED=true
+fi
 
 info "Enabling..."
-# KWin keeps an already-loaded script running across reconfigure: unload it first so
-# an upgrade takes effect now. KWin batches reconfigure requests, hence the pause.
-set_enabled false
-sleep 1
 set_enabled true
 
-info "Installed and enabled. Configure it in System Settings > Window Management > KWin Scripts."
+if [ "$UPGRADED" = true ]; then
+    info "Upgraded. Log out and back in to run the new version (KWin caches the old one until then)."
+else
+    info "Installed and enabled. Configure it in System Settings > Window Management > KWin Scripts."
+fi
