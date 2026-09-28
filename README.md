@@ -28,11 +28,11 @@ cd window-geometry-restore
 
 ## How it works
 
-- When an app's **last window closes**, all its windows that closed together are remembered.
-- On the next launch, each window is matched to its remembered slot (caption + size, then size, then caption) and restored — instantly when the match is unambiguous, otherwise within a few seconds.
+- When an app's **last window closes**, all its windows that closed together are remembered. Windows still open when you log out, shut down or reload the script are remembered too.
+- On the next launch, each window is matched to its remembered slot (caption + size, then size, then caption) and restored — instantly when the match is unambiguous, otherwise within a few seconds. If you move a window yourself first, your placement wins.
 - **Geometry only.** Windows open on the current desktop, in front of you, never minimized or forced above/below. Focus, stacking and desktops stay 100% native KWin.
-- **Native-first.** If a window is already where it should be (app self-restore, a KWin window rule, Plasma session restore), the script does nothing. Restores are clamped so nothing lands off-screen; if the remembered screen is missing, windows land on the screen under your cursor.
-- **Reliable storage.** Saves are written the moment the last window closes and flushed to disk immediately. Corrupt data is discarded safely, apps already on disk are never erased by a stale reload, and unused entries expire after 30 days.
+- **Native-first.** If a window is already where it should be (app self-restore, a KWin window rule, Plasma session restore), or it is maximized, tiled or fullscreen, the script does nothing. Windows that were already open when the script started are never moved. Restores are clamped so nothing lands off-screen; if the remembered screen is missing, windows land on the screen under your cursor and move to their own screen if it shows up within a few seconds (e.g. a monitor that wakes late after login).
+- **Reliable storage.** Saves are written the moment the last window closes and flushed to disk immediately, and they are kept until the app's next close replaces them — so a crash or power loss still restores the last layout. Unreadable data is set aside (not destroyed), apps already on disk are never erased by a stale reload, and entries unused for 30 days expire.
 
 ## Configuration
 
@@ -56,14 +56,14 @@ kwriteconfig6 --file kwinrc --group Plugins --key windowgeometryrestoreEnabled f
 qdbus org.kde.KWin /KWin reconfigure
 ```
 
-Saved data lives in `~/.config/kde.org/kwin.conf` under `windowgeometryrestore_windows`.
+Saved data lives in `~/.config/kde.org/kwin.conf` under `windowgeometryrestore_windows` (unreadable data is moved aside to `windowgeometryrestore_windows_corrupt`).
 
 ## Development
 
 ```bash
 make test      # engine + lifecycle tests (node)
 make build     # package into .kwinscript
-make refresh   # build + install + reload in the live session
+make install   # install or upgrade, enable, and reload in the live session
 make logs      # follow the script's log output
 ```
 

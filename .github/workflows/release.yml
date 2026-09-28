@@ -18,9 +18,7 @@ jobs:
           node-version: 22
 
       - name: Run tests
-        run: |
-          node tests/engine.mjs
-          node tests/lifecycle.mjs
+        run: make test
 
       - name: Build package
         run: make build

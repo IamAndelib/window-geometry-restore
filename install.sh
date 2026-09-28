@@ -24,14 +24,15 @@ else
     die "qdbus not found - KDE Plasma 6 is required"
 fi
 
-reconfigure() {
+set_enabled() {
+    kwriteconfig6 --file kwinrc --group Plugins --key "${SCRIPT_NAME}Enabled" "$1"
     "$QDBUS" org.kde.KWin /KWin reconfigure
 }
 
 if [ "${1-}" = "--uninstall" ]; then
     info "Uninstalling $SCRIPT_NAME..."
+    set_enabled false
     kpackagetool6 --type=KWin/Script -r "$SCRIPT_NAME" || true
-    reconfigure
     info "Uninstalled."
     exit 0
 fi
@@ -51,7 +52,10 @@ kpackagetool6 --type=KWin/Script -i "$PKG" 2>/dev/null || \
     kpackagetool6 --type=KWin/Script -u "$PKG" || die "installation failed"
 
 info "Enabling..."
-kwriteconfig6 --file kwinrc --group Plugins --key "${SCRIPT_NAME}Enabled" true
-reconfigure
+# KWin keeps an already-loaded script running across reconfigure: unload it first so
+# an upgrade takes effect now. KWin batches reconfigure requests, hence the pause.
+set_enabled false
+sleep 1
+set_enabled true
 
 info "Installed and enabled. Configure it in System Settings > Window Management > KWin Scripts."
