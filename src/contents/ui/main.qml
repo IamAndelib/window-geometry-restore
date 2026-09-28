@@ -242,7 +242,7 @@ Item {
         entry.assigned = true
         unwatchCaption(entry)
         removeFromArray(session.pending, id)
-        dbg(entry.cls + ': window placed by the user, not restoring it')
+        log(entry.cls + ': window placed by the user, not restoring it')
     }
 
     function matchFor(entry, session) {
@@ -279,7 +279,7 @@ Item {
         removeFromArray(session.pending, id)
         var moved = applySave(entry, id, session.saves[match.index], Date.now() + Engine.RESTORE_TIMEOUT_MS)
         var mode = bestEffort ? 'best effort' : (moved ? 'moved' : 'left as is')
-        log(entry.cls + ': restored window to saved state (' + mode + '), caption match ' + match.score + '%')
+        log(entry.cls + ': restored window to saved state (' + mode + '), caption match ' + Math.round(match.score) + '%')
     }
 
     // Deadline: give each waiting window the best remaining save, best pair first.
