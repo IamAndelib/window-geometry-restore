@@ -17,6 +17,14 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check tag matches metadata.json version
+        run: |
+          version=$(node -p "require('./src/metadata.json').KPlugin.Version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match metadata.json version $version"
+            exit 1
+          fi
+
       - name: Run tests
         run: make test
 
