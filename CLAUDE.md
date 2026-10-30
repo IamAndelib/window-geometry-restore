@@ -63,3 +63,4 @@ The Release workflow refuses a tag that does not match `metadata.json`.
 ## Current work
 - `docs/plans/tile-restore.md` — tiled state and pre-tile size: implemented (see its Status section).
 - `docs/plans/per-desktop-restore.md` — independent save/restore per virtual desktop: implemented.
+- `docs/plans/per-monitor-restore.md` — independent while running, all back on a fresh start: implemented.

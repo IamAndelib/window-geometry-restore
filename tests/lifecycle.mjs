@@ -42,7 +42,7 @@ const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
     'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'geometryRuleOf', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'copyGeometry', 'describeTile',
     'noteTile', 'noteGeometry', 'snapshotWindow',
-    'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
+    'monitorOf', 'sameMonitor', 'hasWindowOn', 'releaseWindow', 'finalizeMonitor', 'startSessionFor', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
     'resolveOutput', 'outputUnderCursor', 'isOnScreen', 'isMaximizedLike', 'canPlace', 'fitLength',
     'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'rootTileFor', 'isTileAt', 'findCustomTile',
@@ -1623,7 +1623,7 @@ test('closing an app on one desktop saves that desktop only, while it stays open
     const app = savedApp(rt, 'konsole')
     assert.equal(app.d['desk-uuid-2'].w[0].x, 700)
     assert.equal(app.d['desk-uuid-1'].w[0].x, 10, 'desktop 1 keeps its layout')
-    assert.ok(rt.getLogs().some((l) => l.includes('konsole (desktop 2) closed, saved 1 window(s)')))
+    assert.ok(rt.getLogs().some((l) => l.includes('konsole (desktop 2) closed on DP-1, saved 1 window(s)')))
 })
 
 test('windows on all desktops share one layout of their own', () => {
@@ -1960,4 +1960,146 @@ test('an app whose first window a rule places counts as running: later windows a
     const later = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
     rt.trackWindow(later)
     assert.equal(later._geometryWrites, 0)
+})
+
+// ---- monitors: independent while the app runs, all back on a fresh start ----
+
+const onMonitor = (rt, cls, monitor, geometry, caption = 'Doc') => {
+    const w = makeWindow({ cls, caption, outputIndex: monitor, ...geometry })
+    rt.trackWindow(w)
+    return w
+}
+
+test('closing an app\'s last window on one monitor saves that monitor while it stays open on the other', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    const right = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    right.emitClosed()
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]), [['Right', 'HDMI-A-1']])
+    assert.ok(rt.getLogs().some((l) => l.includes('konsole (desktop 1) closed on HDMI-A-1, saved 1 window(s)')))
+    left.emitClosed()
+    const both = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(both.map((s) => s.c).sort(), ['Left', 'Right'], 'each monitor keeps its part of the layout')
+})
+
+test('an app running on one monitor restores a new window on another monitor from that monitor\'s layout', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }).emitClosed()
+
+    const w = onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 640, height: 480 })
+    assert.deepEqual([w.x, w.y, w.width, w.height], [2100, 150, 900, 600])
+    assert.equal(w._output, outputs[1], 'stays on the monitor KWin opened it on')
+})
+
+test('a new window on a monitor where the app already has a window is left alone', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'One')
+    const b = onMonitor(rt, 'konsole', 0, { x: 900, y: 300, width: 700, height: 500 }, 'Two')
+    b.emitClosed()
+    a.emitClosed()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'One')
+    const extra = onMonitor(rt, 'konsole', 0, { x: 0, y: 0, width: 700, height: 500 }, 'Two')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    const later = onMonitor(rt, 'konsole', 0, { x: 5, y: 5, width: 700, height: 500 }, 'Two')
+    assert.equal(later._geometryWrites, 0)
+    assert.ok(extra, 'precondition')
+})
+
+test('a running app\'s new window takes only its own monitor\'s layout, never another monitor\'s', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right').emitClosed()
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    const w = onMonitor(rt, 'konsole', 0, { x: 10, y: 10, width: 900, height: 600 }, 'Right')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.equal(w._geometryWrites, 0, 'monitor 1 has no layout of its own: nothing to restore')
+})
+
+test('a fresh start brings back the windows of both monitors, saved at different times', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    const right = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    right.emitClosed()
+    sleepTick(rt, 60000)
+    left.emitClosed()
+
+    // Apps reopen at their own last size: caption and size match, so each restores at once.
+    const a = onMonitor(rt, 'konsole', 0, { x: 0, y: 0, width: 800, height: 600 }, 'Left')
+    const b = onMonitor(rt, 'konsole', 0, { x: 0, y: 0, width: 900, height: 600 }, 'Right')
+    assert.deepEqual([a.x, a.y], [100, 100])
+    assert.deepEqual([b.x, b.y], [2100, 150], 'back on monitor 2')
+})
+
+test('a window moved to another monitor is saved in that monitor\'s layout', () => {
+    const rt = buildRuntime()
+    const stays = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Stays')
+    onMonitor(rt, 'konsole', 0, { x: 900, y: 300, width: 700, height: 500 }, 'Older').emitClosed()
+    stays.emitClosed()
+    const w = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Stays')
+    const mover = onMonitor(rt, 'konsole', 0, { x: 300, y: 300, width: 700, height: 500 }, 'Mover')
+    mover._output = outputs[1]
+    mover._setFrame({ x: 2200, y: 200, width: 700, height: 500 })
+    mover.emitClosed()
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Older', 'DP-1'], ['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
+    assert.ok(w, 'precondition')
+})
+
+test('a window whose monitor is unplugged is saved in that monitor\'s layout', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    const right = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    try {
+        unplug(right, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+        right.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.x, s.o.n]), [['Right', 2100, 'HDMI-A-1']], 'not saved as a monitor-1 window')
+    assert.ok(left, 'precondition')
+})
+
+test('an app whose first window had nothing to restore counts as running: a later window next to it is left alone', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'First')
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right').emitClosed()
+    const next = onMonitor(rt, 'konsole', 0, { x: 300, y: 300, width: 900, height: 600 }, 'Right')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.equal(next._geometryWrites, 0, 'not sent to monitor 2: the app already has a window on monitor 1')
+})
+
+test('a window KWin parked on another monitor does not occupy it', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left').emitClosed()
+    const right = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    try {
+        unplug(right, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+        const left = onMonitor(rt, 'konsole', 0, { x: 0, y: 0, width: 800, height: 600 }, 'Left')
+        assert.deepEqual([left.x, left.y], [100, 100], 'monitor 1 is free: the parked window belongs to monitor 2')
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+})
+
+test('a monitor back under another connector name keeps its layout for a running app', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right').emitClosed()
+    const renamed = makeOutput('HDMI-A-2', 'SER-2', 2000, 0, 1280, 1024)
+    fakeWorkspace.screens = [outputs[0], renamed]
+    try {
+        const w = makeWindow({ cls: 'konsole', caption: 'Right', x: 2000, y: 0, width: 900, height: 600 })
+        w._output = renamed
+        rt.trackWindow(w)
+        assert.deepEqual([w.x, w.y], [2100, 150])
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
 })

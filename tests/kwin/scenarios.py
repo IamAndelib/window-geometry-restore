@@ -302,6 +302,66 @@ def s_unplugged_monitor_then_close():
               "back on monitor 2 like the window that stayed open: %s on %s" % (rect(w), w["output"]))
 
 
+
+def move_to(sb, title, x, y):
+    """Move a window, keeping the size KWin gave it (apps reopen at their own last size)."""
+    w = sb.window(title)
+    sb.set_geometry(title, x, y, w["geo"]["w"], w["geo"]["h"])
+
+
+def s_monitors_independent_while_running():
+    """The app is open on monitor 1. Its window closed on monitor 2 comes back on monitor 2
+    when reopened there, although the app is running."""
+    with sandbox(outputs=2) as sb:
+        sb.open_app("org.example.alpha", "Left")
+        move_to(sb, "Left", 200, 150)
+        right = sb.open_app("org.example.alpha", "Right")
+        move_to(sb, "Right", 2400, 300)
+        right.close()
+        log = sb.script_log()
+        check(logged(log, "closed on Virtual-1, saved 1 window(s)"), "monitor 2's layout saved while open on monitor 1: %s" % log)
+        sb.pointer.move(2900, 600)
+        sb.open_app("org.example.alpha", "Right")
+        w = sb.window("Right")
+        log = sb.script_log()
+        check(logged(log, "for Virtual-1, where it has no window yet"), "restored from monitor 2's layout: %s" % log)
+        check(w["output"] == "Virtual-1" and rect(w)[:2] == (2400, 300), "back at its spot on monitor 2: %s" % (rect(w),))
+        check(rect(sb.window("Left"))[:2] == (200, 150), "the window on monitor 1 untouched")
+
+
+def s_new_window_beside_open_one_left_alone():
+    """A second window opened next to the app's open window on the same monitor stays where
+    KWin put it."""
+    with sandbox(outputs=2) as sb:
+        sb.open_app("org.example.alpha", "One")
+        two = sb.open_app("org.example.alpha", "Two")
+        move_to(sb, "Two", 1000, 400)
+        two.close()
+        sb.pointer.move(400, 400)
+        sb.open_app("org.example.alpha", "Two")
+        w = sb.window("Two")
+        check(w["output"] == "Virtual-0", "precondition: opened on monitor 1")
+        check(rect(w)[:2] != (1000, 400), "left where KWin put it: %s" % (rect(w),))
+
+
+def s_fresh_start_both_monitors():
+    """Windows closed on two monitors at different times all come back, each on its own
+    monitor, when the app starts again."""
+    with sandbox(outputs=2) as sb:
+        left = sb.open_app("org.example.alpha", "Left", size=(700, 450))
+        move_to(sb, "Left", 200, 150)
+        right = sb.open_app("org.example.alpha", "Right", size=(900, 600))
+        move_to(sb, "Right", 2400, 300)
+        right.close()
+        sb.settle(2.0)
+        left.close()
+        sb.pointer.move(400, 400)
+        sb.open_app("org.example.alpha", "Left", size=(700, 450))
+        sb.open_app("org.example.alpha", "Right", size=(900, 600))
+        l, r = sb.window("Left"), sb.window("Right")
+        check(l["output"] == "Virtual-0" and rect(l)[:2] == (200, 150), "Left back on monitor 1: %s %s" % (rect(l), l["output"]))
+        check(r["output"] == "Virtual-1" and rect(r)[:2] == (2400, 300), "Right back on monitor 2: %s %s" % (rect(r), r["output"]))
+
 SCENARIOS = [
     s_returns_to_its_monitor,
     s_logout_login,
@@ -316,6 +376,9 @@ SCENARIOS = [
     s_desktops_are_independent,
     s_late_monitor,
     s_unplugged_monitor_then_close,
+    s_monitors_independent_while_running,
+    s_new_window_beside_open_one_left_alone,
+    s_fresh_start_both_monitors,
 ]
 
 

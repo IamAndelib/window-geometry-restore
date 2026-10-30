@@ -178,12 +178,14 @@ Item {
             // restore as usual.
             entry.assigned = true
             log(entry.label + ': a KWin window rule places this window (' + (rule.description || rule.id) + '), leaving it to KWin')
-            if (app.session || startSession(entry.group)) {
+            if (app.session || startSessionFor(entry, id)) {
                 app.session.deadline = Math.max(app.session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
             }
-        } else if (app.session || startSession(entry.group)) {
+        } else if (app.session || startSessionFor(entry, id)) {
             joinSession(entry.group, id)
         }
+        // Without a restore under way, the app is running here from this window on.
+        if (!app.session) app.settled = true
     }
 
     // The first KWin window rule that places or sizes this window, or null. The rules file is
@@ -388,7 +390,34 @@ Item {
         }
     }
 
-    // Forget a window. Returns true when it was its group's last one and new saves were made.
+    // The monitor a window belongs to, as a saved screen: its own while KWin keeps it on
+    // another one (see isAway).
+    function monitorOf(entry) {
+        if (isAway(entry)) return entry.home.output
+        var output = entry.w.output
+        return output ? { name: String(output.name || ''), serial: String(output.serialNumber || '') } : null
+    }
+
+    // Saved screens are the same monitor when they resolve to the same connected screen, or,
+    // when neither is connected, have the same name and serial.
+    function sameMonitor(a, b) {
+        if (!a || !b) return !a && !b
+        var screenA = resolveOutput(a)
+        var screenB = resolveOutput(b)
+        if (screenA || screenB) return screenA === screenB
+        return a.name === b.name && a.serial === b.serial
+    }
+
+    function hasWindowOn(app, monitor, except) {
+        for (var i = 0; i < app.open.length; i++) {
+            var other = tracked[app.open[i]]
+            if (app.open[i] !== except && other && sameMonitor(monitorOf(other), monitor)) return true
+        }
+        return false
+    }
+
+    // Forget a window. Returns true when it was its app's last one on its monitor and new
+    // saves were made.
     function releaseWindow(id) {
         var entry = untrack(id)
         var app = live[entry.group]
@@ -397,38 +426,70 @@ Item {
         var awaitingRestore = !!app.session && app.session.pending.indexOf(id) !== -1
         if (app.session) removeFromArray(app.session.pending, id)
         var snap = awaitingRestore ? null : snapshotWindow(entry)
+        var monitor = snap ? snap.output : monitorOf(entry)
         if (snap) {
-            app.buffer.push({ closeTime: Date.now(), snap: snap })
+            app.buffer.push({ closeTime: Date.now(), snap: snap, monitor: monitor })
             if (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
         }
-        if (app.open.length > 0) return false
-        delete live[entry.group]
-        return finalizeApp(app, app.buffer)
+        var saved = !hasWindowOn(app, monitor) && finalizeMonitor(app, monitor)
+        if (!app.open.length) delete live[entry.group]
+        return saved
     }
 
-    // The windows that closed together (each within BURST_MS of the next) become the app's
-    // layout on that desktop.
-    function finalizeApp(app, buffer) {
-        if (!buffer.length) return false
-        var saves = []
-        var last = buffer[buffer.length - 1].closeTime
-        for (var i = buffer.length - 1; i >= 0 && last - buffer[i].closeTime <= Engine.BURST_MS; i--) {
-            saves.unshift(buffer[i].snap)
-            last = buffer[i].closeTime
+    // The windows that closed together on one monitor (each within BURST_MS of the next) become
+    // that monitor's part of the app's layout on this desktop. Other monitors keep theirs.
+    function finalizeMonitor(app, monitor) {
+        var closed = []
+        var others = []
+        for (var i = 0; i < app.buffer.length; i++) {
+            (sameMonitor(app.buffer[i].monitor, monitor) ? closed : others).push(app.buffer[i])
         }
-        Engine.recordLayout(store, app.cls, app.desk, saves, Date.now())
-        log(app.label + ' closed, saved ' + saves.length + ' window(s)')
+        app.buffer = others
+        if (!closed.length) return false
+        var saves = []
+        var last = closed[closed.length - 1].closeTime
+        for (var j = closed.length - 1; j >= 0 && last - closed[j].closeTime <= Engine.BURST_MS; j--) {
+            saves.unshift(closed[j].snap)
+            last = closed[j].closeTime
+        }
+        var layout = Engine.layoutFor(store, app.cls, app.desk)
+        var kept = []
+        for (var k = 0; layout && k < layout.saves.length; k++) {
+            if (!sameMonitor(layout.saves[k].output, monitor)) kept.push(layout.saves[k])
+        }
+        Engine.recordLayout(store, app.cls, app.desk, kept.concat(saves), Date.now())
+        log(app.label + ' closed' + (monitor ? ' on ' + monitor.name : '') + ', saved ' + saves.length + ' window(s)')
         return true
     }
 
+    // A fresh start restores the app's whole layout on this desktop, each window back on its own
+    // monitor. An app already running here restores a new window only from the layout of the
+    // monitor KWin opened it on, and only if the app has no other window there.
+    function startSessionFor(entry, id) {
+        var app = live[entry.group]
+        if (!app.settled) return startSession(entry.group, null)
+        var monitor = monitorOf(entry)
+        return !hasWindowOn(app, monitor, id) && startSession(entry.group, monitor)
+    }
+
     // Only the layout saved on the group's own desktop is restored: desktops are independent.
-    function startSession(group) {
+    // With `monitor`, only that monitor's part of it.
+    function startSession(group, monitor) {
         var app = live[group]
         var saved = Engine.layoutFor(store, app.cls, app.desk)
-        if (app.settled || !saved) return false
+        if (!saved) return false
+        var saves = saved.saves
+        if (monitor) {
+            saves = []
+            for (var i = 0; i < saved.saves.length; i++) {
+                if (sameMonitor(saved.saves[i].output, monitor)) saves.push(saved.saves[i])
+            }
+            if (!saves.length) return false
+        }
         saved.lastAccess = store.apps[app.cls].lastAccess = Date.now()
-        app.session = { saves: saved.saves, taken: [], remaining: saved.saves.length, pending: [], deadline: 0 }
-        dbg(app.label + ': restore session started - ' + saved.saves.length + ' saved window(s)')
+        app.session = { saves: saves, taken: [], remaining: saves.length, pending: [], deadline: 0 }
+        dbg(app.label + ': restore session started - ' + saves.length + ' saved window(s)' +
+            (monitor ? ' for ' + monitor.name + ', where it has no window yet' : ''))
         ensureTick()
         return true
     }
