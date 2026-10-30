@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE, layoutFor, recordLayout, parseRules, geometryRuleFor };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE, layoutFor, recordLayout, parseRules, geometryRuleFor, SCHEMA_VERSION };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -40,12 +40,12 @@ const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
-    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'geometryRuleOf', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'copyGeometry', 'describeTile',
+    'logOnce', 'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'geometryRuleOf', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'onCurrentMonitor', 'waitingQuickTile', 'copyGeometry', 'describeTile',
     'noteTile', 'noteGeometry', 'snapshotWindow',
-    'monitorOf', 'sameMonitor', 'hasWindowOn', 'releaseWindow', 'finalizeMonitor', 'startSessionFor', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
+    'monitorOf', 'sameMonitor', 'hasWindowOn', 'releaseWindow', 'finalizeLeftMonitors', 'onOutputChanged', 'finalizeMonitor', 'startSessionFor', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
     'resolveOutput', 'outputUnderCursor', 'isOnScreen', 'isMaximizedLike', 'canPlace', 'fitLength',
-    'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'rootTileFor', 'isTileAt', 'findCustomTile',
+    'currentDesktopOn', 'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'rootTileFor', 'isTileAt', 'findCustomTile',
     'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive', 'restoreQuickSplit', 'cancelPendingTile', 'reapplyProvisional',
     'sweepRetries', 'sweepSessions', 'isIdle', 'ensureTick', 'onTick',
     'handleAdded', 'handleRemoved', 'startup', 'shutdown'
@@ -257,6 +257,13 @@ function makeWindow(fields) {
         get tileChanged() { return this._signal('tileChanged') },
         get activeChanged() { return this._signal('activeChanged') },
         get desktopsChanged() { return this._signal('desktopsChanged') },
+        get outputChanged() { return this._signal('outputChanged') },
+        // KWin moves the frame first, then reports the new monitor.
+        _moveToOutput(output, rect) {
+            this._output = output
+            this._setFrame(rect)
+            this._emit('outputChanged')
+        },
         // The user sends the window to another desktop (a number), or to all desktops ('all').
         _moveToDesktop(desktop) {
             this.onAllDesktops = desktop === 'all'
@@ -361,7 +368,14 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         // Only a Settings object for the rules file is ever created.
         createQmlObject: (source) => {
             assert.match(source, /^import QtCore; Settings \{ location: "file:\/\/\/sandbox\/kwinrulesrc" \}$/)
-            const file = { destroyed: false, value: (key, fallback) => (key in rules ? rules[key] : fallback), destroy() { this.destroyed = true } }
+            // QSettings splits a value at commas; QML hands the list over as a sequence object.
+            const read = (key) => {
+                const v = rules[key]
+                if (typeof v !== 'string' || v.indexOf(',') === -1) return v
+                const items = v.split(',').map((x) => x.trim())
+                return Object.assign(Object.create({}), items, { length: items.length })
+            }
+            const file = { destroyed: false, value: (key, fallback) => (key in rules ? read(key) : fallback), destroy() { this.destroyed = true } }
             rulesFiles.push(file)
             return file
         }
@@ -397,6 +411,8 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         var storeKey = 'windowgeometryrestore_windows';
         var defaultBlacklist = '';
         var blacklist = Engine.parseList('');
+        var reported = {};
+        var lastWritten = '';
         var store = Engine.newState();
         var live = {};
         var tracked = {};
@@ -1419,22 +1435,28 @@ test('closing a window that waits for its quick tile stops listening for activat
     assert.equal(w._connected('activeChanged'), 0)
 })
 
-test('a pre-tile geometry on a missing screen still tiles, starting from the tile rect', () => {
+test('a window dragged from another monitor into a tile keeps its pre-tile size on the tile\'s monitor', () => {
     const rt = buildRuntime()
     const w0 = makeWindow({ cls: 'doc', caption: 'Doc', x: 2100, y: 100, width: 900, height: 600, outputIndex: 1 })
     rt.trackWindow(w0)
     w0._output = outputs[0] // dragged over to DP-1 and into its left quick tile
     w0._tileTo(makeQuickRoot(outputs[0]).tiles[0])
     w0.emitClosed()
-    assert.equal(savedApp(rt, 'doc').w[0].f.o.n, 'HDMI-A-1')
+    const { f } = savedApp(rt, 'doc').w[0]
+    assert.deepEqual([f.o.n, f.o.x, f.o.y, f.w, f.h], ['DP-1', 100, 100, 900, 600], 'its place on HDMI-A-1, on DP-1')
 
-    fakeWorkspace.screens = [outputs[0]]
-    let w
-    try {
-        w = reopen(rt, 'doc', { active: true, width: 640, height: 480 })
-    } finally {
-        fakeWorkspace.screens = [outputs[0], outputs[1]]
-    }
+    const w = reopen(rt, 'doc', { active: true, width: 640, height: 480 })
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0])
+    assert.deepEqual(w._restoreGeometry, { x: 100, y: 100, width: 900, height: 600 })
+})
+
+test('a saved pre-tile geometry on a missing monitor still tiles, starting from the tile rect', () => {
+    const blob = JSON.stringify({ version: 2, apps: { doc: { t: 1000000000, d: { 'desk-uuid-1': { t: 1000000000, w: [{
+        c: 'Doc', x: 0, y: 0, w: 960, h: 1080, o: { x: 0, y: 0, s: 'SER-1', n: 'DP-1' },
+        t: { k: 'q', i: 0 }, f: { x: 2100, y: 100, w: 900, h: 600, o: { x: 100, y: 100, s: 'SER-9', n: 'GONE-1' } }
+    }] } } } } })
+    const rt = buildRuntime(blob)
+    const w = reopen(rt, 'doc', { active: true, width: 640, height: 480 })
     assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0])
     assert.deepEqual(w._restoreGeometry, { x: 0, y: 0, width: 960, height: 1080 })
 })
@@ -2102,4 +2124,441 @@ test('a monitor back under another connector name keeps its layout for a running
     } finally {
         fakeWorkspace.screens = [outputs[0], outputs[1]]
     }
+})
+
+// ---- review findings (pre-1.4.0) ----
+
+test('a quick-tiled window KWin sent to another monitor keeps its pre-tile size on that monitor', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'mon', caption: 'Mon', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(quickRootOf(outputs[0]).tiles[0])
+    // "Window to next screen": KWin re-manages it into the other monitor's quick tile.
+    w._output = outputs[1]
+    w._tileTo(quickRootOf(outputs[1]).tiles[0])
+    w.emitClosed()
+    const [s] = savedApp(rt, 'mon').w
+    assert.equal(s.o.n, 'HDMI-A-1')
+    assert.deepEqual([s.f.w, s.f.h, s.f.o.n, s.f.o.x, s.f.o.y], [1000, 700, 'HDMI-A-1', 300, 200], 'pre-tile size, now on the tile\'s monitor')
+
+    const again = makeWindow({ cls: 'mon', caption: 'Mon', x: 0, y: 0, width: 640, height: 480 })
+    again.active = true
+    fakeWorkspace.activeWindow = again
+    again._output = outputs[1]
+    rt.trackWindow(again)
+    assert.equal(again.tile, quickRootOf(outputs[1]).tiles[0], 'tiled on monitor 2 instead of waiting on monitor 1')
+})
+
+test('a maximized window KWin sent to another monitor is saved at its normal size on that monitor', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 200, width: 1000, height: 650 })
+    rt.trackWindow(w)
+    w.maximizeMode = 3
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w._output = outputs[1]
+    w._setFrame({ x: 2000, y: 0, width: 1280, height: 1024 })
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.w, s.h, s.o.n, s.o.x, s.o.y], [1000, 650, 'HDMI-A-1', 300, 200])
+})
+
+test('a restore for one monitor does not take a window that opens on another monitor', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    const a = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'One')
+    const b = onMonitor(rt, 'konsole', 1, { x: 2300, y: 400, width: 700, height: 500 }, 'Two')
+    closeAll(a, b)
+    // A new window on monitor 2 starts a restore for monitor 2's two saves...
+    onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 640, height: 480 }, 'Unknown')
+    // ...and one opening on monitor 1 meanwhile must not be pulled over to monitor 2.
+    // It matches monitor 2's 'One' exactly, but it opened next to 'Left' on monitor 1.
+    const stray = onMonitor(rt, 'konsole', 0, { x: 50, y: 50, width: 900, height: 600 }, 'One')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.equal(stray._geometryWrites, 0)
+})
+
+test('a close is saved when the last window left on its monitor is moved away', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'A')
+    const b = onMonitor(rt, 'konsole', 0, { x: 900, y: 300, width: 700, height: 500 }, 'B')
+    a.emitClosed()
+    assert.equal((JSON.parse(rt.blobRef()).apps || {}).konsole, undefined, 'B still open on monitor 1: nothing saved yet')
+    b._moveToOutput(outputs[1], { x: 2100, y: 300, width: 700, height: 500 })
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]), [['A', 'DP-1']], 'monitor 1 now empty: A\'s close is its layout')
+})
+
+test('a close is saved when the last window left on its monitor goes to another desktop', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'A')
+    const b = onMonitor(rt, 'konsole', 0, { x: 900, y: 300, width: 700, height: 500 }, 'B')
+    a.emitClosed()
+    b._moveToDesktop(2)
+    assert.deepEqual(savedApp(rt, 'konsole').d['desk-uuid-1'].w.map((s) => s.c), ['A'])
+})
+
+test('a window closed while waiting for its quick tile keeps the tile in its save', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    const w = reopen(rt, 'doc')
+    assert.equal(w.tile, null, 'precondition: waiting for focus')
+    w.emitClosed()
+    const [s] = savedApp(rt, 'doc').d['desk-uuid-1'].w
+    assert.equal(s.t.k, 'q')
+    assert.equal(s.t.i, 1)
+    assert.equal(s.f.w, 1000)
+})
+
+test('a tiled window that is then maximized is saved untiled, at its normal size', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 200, width: 1000, height: 650 })
+    rt.trackWindow(w)
+    w._tileTo(quickRootOf(outputs[0]).tiles[0])
+    // KWin untiles a window it maximizes.
+    w.tile = null
+    w._emit('tileChanged')
+    w.maximizeMode = 3
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.equal(s.t, undefined, 'no stale tile')
+    assert.deepEqual([s.x, s.y, s.w, s.h], [300, 200, 1000, 650])
+})
+
+test('a rules file with several rules, as System Settings writes it, is read', () => {
+    const rt = buildRuntime('{}', {}, {
+        rules: 'e3b0c442-98fc,1c14-9afb-4c8996fb', count: '2',
+        'e3b0c442-98fc/wmclass': 'dolphin', 'e3b0c442-98fc/wmclassmatch': '1', 'e3b0c442-98fc/positionrule': '3',
+        '1c14-9afb-4c8996fb/wmclass': 'konsole', '1c14-9afb-4c8996fb/wmclassmatch': '1', '1c14-9afb-4c8996fb/positionrule': '3'
+    })
+    saveOn(rt, 'konsole', 1, { x: 900, y: 400, width: 700, height: 500 })
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 100, y: 100, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._geometryWrites, 0, 'the second rule applies')
+})
+
+test('a rule with a regular expression the script cannot read is logged once', () => {
+    const rt = buildRuntime('{}', {}, { rules: 'r1', 'r1/wmclass': '(?>konsole)+', 'r1/wmclassmatch': '3', 'r1/positionrule': '3' })
+    for (let i = 0; i < 3; i++) rt.trackWindow(makeWindow({ cls: 'dolphin', caption: 'Doc ' + i }))
+    assert.equal(rt.getLogs().filter((l) => l.includes('cannot read the regular expression')).length, 1)
+})
+
+// ---- reliability ----
+
+test('an error in a window signal handler is logged under the script\'s name and contained', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'konsole', caption: 'Doc', x: 900, y: 400, width: 700, height: 500 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Doc', x: 100, y: 100, width: 700, height: 500 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._captionHandlers.length, 1, 'precondition: waiting, watching its caption')
+    Object.defineProperty(w, 'caption', { get() { throw new Error('caption gone') } })
+    assert.doesNotThrow(() => w.emitCaptionChanged())
+    assert.ok(rt.getLogs().some((l) => l.startsWith('WindowGeometryRestore: ') && l.includes('captionChanged') && l.includes('caption gone')))
+})
+
+test('a signal a future KWin no longer has is logged once', () => {
+    const rt = buildRuntime()
+    for (let i = 0; i < 2; i++) {
+        const w = makeWindow({ cls: 'app', caption: 'App ' + i })
+        Object.defineProperty(w, 'tileChanged', { get() { return undefined } })
+        rt.trackWindow(w)
+    }
+    assert.equal(rt.getLogs().filter((l) => l.includes("cannot connect to KWin's tileChanged")).length, 1)
+})
+
+test('saved data that turned unreadable on disk is kept aside when saving, not overwritten', () => {
+    const rt = buildRuntime()
+    rt.stored.windowgeometryrestore_windows = '{broken'
+    saveOn(rt, 'app', 1, { x: 10, y: 10, width: 700, height: 500 })
+    assert.equal(rt.stored.windowgeometryrestore_windows_corrupt, '{broken')
+    assert.ok(savedApp(rt, 'app'))
+})
+
+test('saved data from a newer version of the script is kept aside before being rewritten', () => {
+    const newer = JSON.stringify({ version: 99, apps: {} })
+    const rt = buildRuntime(newer)
+    assert.equal(rt.stored.windowgeometryrestore_windows_v99, newer)
+    assert.ok(rt.getLogs().some((l) => l.includes('written by a newer version')))
+})
+
+test('saving does not decode the saved data again when only the script wrote it', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 10, y: 10, width: 700, height: 500 })
+    const decode = Engine.decodeState
+    let calls = 0
+    Engine.decodeState = (...args) => { calls++; return decode(...args) }
+    try {
+        saveOn(rt, 'app', 1, { x: 20, y: 20, width: 700, height: 500 })
+        assert.equal(calls, 0, 'nothing else wrote it')
+        rt.stored.windowgeometryrestore_windows = rt.stored.windowgeometryrestore_windows.replace('"apps":{', '"apps":{"other":{"t":' + rt.nowRef() + ',"w":[{"c":"o","x":1,"y":1,"w":500,"h":400}]},')
+        saveOn(rt, 'app', 1, { x: 30, y: 30, width: 700, height: 500 })
+        assert.equal(calls, 1, 'another KWin instance wrote it: merged')
+        assert.ok(JSON.parse(rt.blobRef()).apps.other)
+    } finally {
+        Engine.decodeState = decode
+    }
+})
+
+// ---- coverage review (pre-1.4.0) ----
+
+
+test('only the windows that closed together are saved: an earlier close on the same monitor is not', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'konsole', 0, { x: 10, y: 10, width: 500, height: 400 }, 'Early')
+    const b = onMonitor(rt, 'konsole', 0, { x: 600, y: 10, width: 500, height: 400 }, 'B')
+    const c = onMonitor(rt, 'konsole', 0, { x: 10, y: 500, width: 500, height: 400 }, 'C')
+    a.emitClosed()
+    sleepTick(rt, 60000)
+    closeAll(b, c)
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => s.c), ['B', 'C'], 'the window closed a minute earlier is not part of the layout')
+})
+
+test('a ruled first window keeps the restore open for the app\'s other windows until the deadline', () => {
+    const rt = buildRuntime('{}', {}, positionRule({ 'r1/title': 'Pinned', 'r1/titlematch': '2' }))
+    const a = makeWindow({ cls: 'konsole', caption: 'Pinned', x: 100, y: 100, width: 640, height: 480 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Work', x: 900, y: 300, width: 800, height: 600 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    rt.trackWindow(makeWindow({ cls: 'konsole', caption: 'Pinned', x: 100, y: 100, width: 640, height: 480 }))
+    sleepTick(rt, 2000) // the app's second window maps two seconds later
+    rt.tick()
+    const work = makeWindow({ cls: 'konsole', caption: 'Work', x: 0, y: 0, width: 800, height: 600 })
+    rt.trackWindow(work)
+    assert.equal(work.x, 900)
+})
+
+test('undocking two monitors at once: each parked window saves its own monitor and keeps the other\'s', () => {
+    const mid = makeOutput('HDMI-A-1', 'SER-2', 1920, 0, 1920, 1080)
+    const right = makeOutput('DP-3', 'SER-3', 3840, 0, 1920, 1080)
+    fakeWorkspace.screens = [outputs[0], mid, right]
+    fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 5760, height: 1080 }
+    try {
+        const rt = buildRuntime()
+        const l = makeWindow({ cls: 'konsole', caption: 'L', x: 100, y: 100, width: 800, height: 600 })
+        const m = makeWindow({ cls: 'konsole', caption: 'M', x: 2000, y: 100, width: 800, height: 600 })
+        m._output = mid
+        const r = makeWindow({ cls: 'konsole', caption: 'R', x: 4000, y: 100, width: 800, height: 600 })
+        r._output = right
+        for (const w of [l, m, r]) rt.trackWindow(w)
+        // Undock: both external monitors go; KWin parks their windows on the laptop panel.
+        fakeWorkspace.screens = [outputs[0]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 1920, height: 1080 }
+        m._output = outputs[0]
+        m._setFrame({ x: 300, y: 100, width: 800, height: 600 })
+        r._output = outputs[0]
+        r._setFrame({ x: 500, y: 100, width: 800, height: 600 })
+        r.emitClosed()
+        assert.deepEqual(savedApp(rt, 'konsole').d['desk-uuid-1'].w.map((s) => s.c), ['R'], 'DP-3 saved at once, although M is parked too')
+        sleepTick(rt, 60000)
+        m.emitClosed()
+        l.emitClosed()
+        const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+        assert.deepEqual(saved.map((s) => [s.c, s.x, s.o.n]).sort(), [['L', 100, 'DP-1'], ['M', 2000, 'HDMI-A-1'], ['R', 4000, 'DP-3']])
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+    }
+})
+
+test('a custom-tiled neighbour does not stand in for the quick-tile layout', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    const layout = makeCustomRoot(outputs[0])
+    const neighbour = makeWindow({ cls: 'other', caption: 'Other' })
+    neighbour._tileTo(layout.tiles[1].tiles[0])
+    fakeWorkspace.stackingOrder = [neighbour]
+    let w
+    try {
+        w = reopen(rt, 'doc')
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.notEqual(w.tile, layout.tiles[1].tiles[1], 'not put into a custom tile')
+    assert.equal(w.tile, null, 'waits for activation to quick-tile instead')
+})
+
+test('a window maximized vertically or horizontally saves its floating geometry', () => {
+    for (const [mode, frame] of [[1, { x: 300, y: 0, width: 1000, height: 1080 }], [2, { x: 0, y: 200, width: 1920, height: 650 }]]) {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 200, width: 1000, height: 650 })
+        rt.trackWindow(w)
+        w.maximizeMode = mode
+        w._setFrame(frame)
+        w.emitClosed()
+        const [s] = savedApp(rt, 'app').w
+        assert.deepEqual([s.x, s.y, s.w, s.h], [300, 200, 1000, 650], 'maximizeMode ' + mode)
+    }
+})
+
+test('a monitor that comes back after the restore window does not move the window', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 2040, y: 100, width: 800, height: 600, outputIndex: 1 })
+    fakeWorkspace.screens = [outputs[0]]
+    fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 1920, height: 1080 }
+    try {
+        const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 800, height: 600 })
+        rt.trackWindow(w)
+        assert.deepEqual([w.x, w.y], [40, 100], 'precondition: provisional')
+        sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+        rt.reapplyProvisional()
+        assert.deepEqual([w.x, w.y], [40, 100], 'a monitor plugged in later does not yank the window')
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        fakeWorkspace.virtualScreenGeometry = { x: 0, y: 0, width: 3280, height: 1080 }
+    }
+})
+
+test('a window that maximizes itself while waiting for its quick tile is not tiled', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const w = reopen(rt, 'doc')
+    w.maximizeMode = 3
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w._activate()
+    assert.equal(w.tile, null)
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a window on some but not all desktops belongs to the shared "*" layout', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'player', caption: 'Doc', x: 1500, y: 800, width: 400, height: 250 })
+    w.desktops = [fakeWorkspace.desktops[0], fakeWorkspace.desktops[1]]
+    rt.trackWindow(w)
+    w.emitClosed()
+    assert.deepEqual(Object.keys(savedApp(rt, 'player').d), ['*'])
+})
+
+test('a window placed on a fallback screen leaves exactly one save, on its own monitor', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const saves = savedApp(rt, 'app').d['desk-uuid-1'].w
+    assert.deepEqual(saves.map((s) => [s.x, s.y, s.o.n]), [[2100, 150, 'HDMI-A-1']], 'no extra save at the fallback spot')
+})
+
+test('a desktopsChanged that keeps the desktop does not cancel a pending restore', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'konsole', caption: 'One', x: 10, y: 10, width: 800, height: 600 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Two', x: 900, y: 10, width: 700, height: 500 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+    const w = makeWindow({ cls: 'konsole', caption: 'One', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    w._emit('desktopsChanged') // e.g. an activity change or KWin re-announcing the same desktop
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.deepEqual([w.x, w.y], [10, 10])
+})
+
+test('a window waiting for its quick tile and sent to another desktop is not tiled there', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const w = reopen(rt, 'doc')
+    w._moveToDesktop(2)
+    w._activate()
+    assert.equal(w.tile, null)
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a window on all desktops reopens in its custom tile on the current desktop', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set('DP-1/desk-uuid-1', layout)
+    const w0 = makeWindow({ cls: 'doc', caption: 'Doc', desktop: 'all', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    w0._tileTo(layout.tiles[0])
+    w0.emitClosed()
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', desktop: 'all', x: 40, y: 40, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w.tile, layout.tiles[0])
+})
+
+test('many windows of one app restore into their own slots', () => {
+    const rt = buildRuntime()
+    const n = 24
+    const ws = []
+    for (let i = 0; i < n; i++) ws.push(onMonitor(rt, 'browser', i % 2, { x: (i % 2 ? 2000 : 0) + i * 10, y: i * 10, width: 600 + i, height: 400 + i }, 'Tab ' + i))
+    closeAll(...ws)
+    assert.equal(savedApp(rt, 'browser').d['desk-uuid-1'].w.length, n)
+    const back = []
+    for (let i = n - 1; i >= 0; i--) back.push(onMonitor(rt, 'browser', 0, { x: 0, y: 0, width: 600 + i, height: 400 + i }, 'Tab ' + i))
+    back.reverse()
+    back.forEach((w, i) => assert.deepEqual([w.x, w.y], [(i % 2 ? 2000 : 0) + i * 10, i * 10], 'Tab ' + i))
+})
+
+// KWin 6.7 Workspace::updateOutputs: after the output list changes, windows in the removed
+// output's quick tiles are managed by the same quick tile on another output; windows in its
+// custom tiles are unmanaged (they float back to their restore geometry).
+test('a quick-tiled window whose monitor is unplugged keeps its own tile and split', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'mon', caption: 'Mon', x: 2100, y: 100, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    const root2 = quickRootOf(outputs[1])
+    w._tileTo(root2.tiles[0])
+    root2.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.65, height: 1 }
+    try {
+        fakeWorkspace.screens = [outputs[0]]
+        w._output = outputs[0]
+        w._tileTo(quickRootOf(outputs[0]).tiles[0]) // KWin migrates it into DP-1's left tile
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'mon').w
+    assert.equal(s.o.n, 'HDMI-A-1')
+    assert.deepEqual(s.t, { k: 'q', i: 0, g: { x: 0, y: 0, w: 0.65, h: 1 } }, 'monitor 2\'s split, not DP-1\'s')
+    assert.equal(s.f.w, 900)
+})
+
+test('a custom-tiled window whose monitor is unplugged is saved in its tile there', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', x: 2100, y: 100, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    const layout = makeCustomRoot(outputs[1])
+    w._tileTo(layout.tiles[0])
+    try {
+        fakeWorkspace.screens = [outputs[0]]
+        // Unmanaged: untiled, back at its restore geometry, then moved onto DP-1.
+        w._leaveTile()
+        w.tile = null
+        w._emit('tileChanged')
+        w._output = outputs[0]
+        w._setFrame({ x: 180, y: 100, width: 900, height: 600 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'doc').w
+    assert.deepEqual([s.o.n, s.t && s.t.k, s.t && s.t.p], ['HDMI-A-1', 'c', [0]])
+    assert.equal(s.f.w, 900)
+})
+
+
+test('a running app\'s new window next to its rule-placed window on another monitor is left alone', () => {
+    const rt = buildRuntime('{}', {}, positionRule({ 'r1/title': 'Pinned', 'r1/titlematch': '2', 'r1/position': '2100,100' }))
+    onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Main') // running on monitor 1
+    onMonitor(rt, 'konsole', 1, { x: 2400, y: 300, width: 700, height: 500 }, 'Work').emitClosed() // monitor 2's part
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    onMonitor(rt, 'konsole', 1, { x: 2100, y: 100, width: 640, height: 480 }, 'Pinned') // the rule puts it on monitor 2
+    const next = onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 700, height: 500 }, 'Work')
+    assert.equal(next._geometryWrites, 0, 'the app already has a window on monitor 2: the ruled one')
 })

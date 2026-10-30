@@ -436,7 +436,7 @@ test('geometryRuleFor matches the app the way KWin does: exact, substring or reg
     assert.ok(engine.geometryRuleFor(rule('konsole', '2'), konsole))
     assert.ok(engine.geometryRuleFor(rule('^org\\.kde\\.k', '3'), konsole))
     assert.equal(engine.geometryRuleFor(rule('^dolphin', '3'), konsole), null)
-    assert.ok(engine.geometryRuleFor(rule('([', '3'), konsole), 'an unreadable pattern counts as matching: leave it to KWin')
+    assert.equal(engine.geometryRuleFor(rule('([', '3'), konsole), null, 'an unreadable pattern without literal text matches nothing')
     assert.ok(engine.geometryRuleFor(rule('', '0'), konsole), 'no app condition: the rule is for every window')
     assert.ok(engine.geometryRuleFor(rule('org.kde.konsole org.kde.konsole', '1', { wmclasscomplete: 'true' }), konsole), 'whole class')
 })
@@ -448,6 +448,31 @@ test('geometryRuleFor honours title conditions and window types', () => {
     assert.ok(engine.geometryRuleFor(rules({ types: '1' }), konsole), 'normal windows')
     assert.equal(engine.geometryRuleFor(rules({ types: '32' }), konsole), null, 'dialogs only')
     assert.ok(engine.geometryRuleFor(rules({ types: '' }), konsole))
+})
+
+// QML hands a QStringList to JS as a sequence object: indexable, with a length, but no Array.
+const sequence = (...items) => Object.assign(Object.create({}), items, { length: items.length })
+
+test('parseRules reads the list of rule ids as QML gives it (a sequence, not an Array)', () => {
+    const rules = engine.parseRules(rulesFile({ a: { positionrule: '2' }, b: { sizerule: '3' } }, { rules: sequence('a', 'b'), count: '2' }))
+    assert.deepEqual(rules.map((r) => r.id), ['a', 'b'])
+})
+
+test('rule values QSettings split at commas are joined back', () => {
+    const rules = engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', title: sequence('Shell', 'Konsole'), titlematch: '1', positionrule: '2' } }))
+    assert.ok(engine.geometryRuleFor(rules, { ...konsole, caption: 'Shell, Konsole' }), 'exact title with a comma')
+    assert.equal(engine.geometryRuleFor(rules, { ...konsole, caption: 'Shell Konsole' }), null)
+})
+
+test('regular expressions: inline flags are understood, unreadable ones fall back to their literal text', () => {
+    const rule = (pattern) => engine.parseRules(rulesFile({ r: { wmclass: pattern, wmclassmatch: '3', positionrule: '2' } }))
+    const dolphin = { resourceClass: 'org.kde.dolphin', resourceName: 'org.kde.dolphin', caption: 'Home' }
+    assert.ok(engine.geometryRuleFor(rule('(?i)KONSOLE'), konsole), '(?i) as KWin users write it')
+    assert.equal(engine.geometryRuleFor(rule('(?i)KONSOLE'), dolphin), null, 'and only for that app')
+    const atomic = rule('(?>konsole)+') // PCRE only
+    assert.equal(atomic[0].unreadable, 'wmclass')
+    assert.ok(engine.geometryRuleFor(atomic, konsole), 'its literal text still matches konsole')
+    assert.equal(engine.geometryRuleFor(atomic, dolphin), null, 'one unreadable rule does not cover every app')
 })
 
 test('default exclusion list is identical in main.qml and config/main.xml', () => {

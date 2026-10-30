@@ -263,20 +263,21 @@ function hasLayouts(app) {
                      (isObject(app.desktops) && Object.keys(app.desktops).length > 0))
 }
 
-// Never throws. Returns { state, error } - error is null when the blob was usable.
+// Never throws. Returns { state, error, version } - error is null when the blob was usable.
 function decodeState(text) {
     var state = newState()
-    if (!text || !String(text).trim()) return { state: state, error: null }
+    if (!text || !String(text).trim()) return { state: state, error: null, version: 0 }
     var raw
     try {
         raw = JSON.parse(text)
     } catch (e) {
-        return { state: state, error: String(e) }
+        return { state: state, error: String(e), version: 0 }
     }
-    if (!isObject(raw)) return { state: state, error: 'unexpected root' }
-    if (raw.apps === undefined) return { state: state, error: null }
+    if (!isObject(raw)) return { state: state, error: 'unexpected root', version: 0 }
+    var version = numberOr(raw.version, 0)
+    if (raw.apps === undefined) return { state: state, error: null, version: version }
     var apps = raw.apps
-    if (!isObject(apps)) return { state: state, error: 'unexpected apps' }
+    if (!isObject(apps)) return { state: state, error: 'unexpected apps', version: version }
     for (var cls in apps) {
         var app = apps[cls]
         if (!isObject(app)) continue
@@ -284,7 +285,7 @@ function decodeState(text) {
         var decoded = { lastAccess: lastAccess, saves: decodeSaves(app.w), desktops: decodeDesktops(app.d, lastAccess) }
         if (hasLayouts(decoded)) state.apps[cls] = decoded
     }
-    return { state: state, error: null }
+    return { state: state, error: null, version: version }
 }
 
 function encodeSaves(saves) {
@@ -392,12 +393,59 @@ var RULE_GEOMETRY = ['position', 'size', 'screen', 'placement']
 var RULE_KINDS = [2, 3, 4, 6]
 var NORMAL_WINDOW_TYPE = 1
 
+// QSettings returns a comma-separated value as a list: a JS array, or, through QML, a sequence
+// object (indexable, with a length) that is no Array.
+function isList(value) {
+    return !!value && typeof value === 'object' && typeof value.length === 'number'
+}
+
+// The longest run of literal text in a pattern: escaped characters count as text, other
+// regular-expression syntax and character classes (\\d, \\w...) end a run.
+function literalOf(pattern) {
+    var best = ''
+    var run = ''
+    for (var i = 0; i < pattern.length; i++) {
+        var c = pattern[i]
+        if (c === '\\' && i + 1 < pattern.length && !/[a-z0-9]/i.test(pattern[i + 1])) {
+            run += pattern[++i]
+            continue
+        }
+        if ('\\^$.*+?()[]{}|<>=!:'.indexOf(c) !== -1) {
+            if (run.length > best.length) best = run
+            run = ''
+            if (c === '\\') i++
+            continue
+        }
+        run += c
+    }
+    return run.length > best.length ? run : best
+}
+
+// A rule condition as a matcher. Regular expressions run case-insensitive (KWin's PCRE allows
+// inline flags such as (?i), stripped here). One JS can't read falls back to a substring test
+// of its literal text: erring towards KWin, without one odd rule covering every window.
+function ruleCondition(pattern, mode) {
+    mode = parseInt(mode, 10) || 0
+    pattern = pattern.toLowerCase()
+    if (mode === 0) return { test: function () { return true } }
+    if (mode === 1) return { test: function (v) { return v === pattern } }
+    if (mode === 2) return { test: function (v) { return v.indexOf(pattern) !== -1 } }
+    try {
+        var re = new RegExp(pattern.replace(/^\(\?[a-z]+\)/, ''), 'i')
+        return { test: function (v) { return re.test(v) } }
+    } catch (e) {
+        var literal = literalOf(pattern)
+        return { unreadable: true, test: function (v) { return !!literal && v.indexOf(literal) !== -1 } }
+    }
+}
+
 // `read(key)` returns a value from the rules file as QSettings reads it: [General] keys at
 // the top level, rule groups as "group/key". Rules ids come from General/rules, or, in older
 // files, the groups 1..count.
 function parseRules(read) {
     var ids = read('rules')
-    if (typeof ids === 'string') ids = ids.length ? ids.split(',') : []
+    if (isList(ids)) ids = Array.prototype.slice.call(ids)
+    else if (typeof ids === 'string') ids = ids.length ? ids.split(',') : []
     if (!Array.isArray(ids) || !ids.length) {
         ids = []
         var count = parseInt(read('count'), 10) || 0
@@ -412,28 +460,25 @@ function parseRules(read) {
             if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
         }
         if (!geometry.length) continue
-        var text = function (key) { var v = read(id + '/' + key); return v === undefined || v === null ? '' : String(v) }
+        var text = function (key) {
+            var v = read(id + '/' + key)
+            if (isList(v)) return Array.prototype.slice.call(v).join(',')
+            return v === undefined || v === null ? '' : String(v)
+        }
+        var wmclass = ruleCondition(normalizeRuleText(text('wmclass')), text('wmclassmatch'))
+        var title = ruleCondition(normalizeRuleText(text('title')), text('titlematch'))
         rules.push({
             id: id, description: text('Description'), geometry: geometry,
-            wmclass: text('wmclass'), wmclassmatch: text('wmclassmatch'), wmclasscomplete: text('wmclasscomplete') === 'true',
-            title: text('title'), titlematch: text('titlematch'), types: text('types')
+            wmclass: wmclass, wmclasscomplete: text('wmclasscomplete') === 'true', title: title, types: text('types'),
+            unreadable: wmclass.unreadable ? 'wmclass' : (title.unreadable ? 'title' : null)
         })
     }
     return rules
 }
 
-// KWin's string matches: 0 unimportant, 1 exact, 2 substring, 3 regular expression.
-function matchesRuleText(value, pattern, mode) {
-    mode = parseInt(mode, 10) || 0
-    if (mode === 0) return true
-    value = String(value).toLowerCase()
-    if (mode === 1) return value === pattern.toLowerCase()
-    if (mode === 2) return value.indexOf(pattern.toLowerCase()) !== -1
-    try {
-        return new RegExp(pattern, 'i').test(value)
-    } catch (e) {
-        return true
-    }
+// QSettings trims the items of a value it split at commas, so spaces after commas don't count.
+function normalizeRuleText(text) {
+    return String(text).replace(/\s*,\s*/g, ',')
 }
 
 // The first rule that places or sizes this window, or null. `win`: { resourceClass,
@@ -444,8 +489,8 @@ function geometryRuleFor(rules, win) {
         var r = rules[i]
         if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) continue
         var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
-        if (!matchesRuleText(cls, r.wmclass, r.wmclassmatch)) continue
-        if (!matchesRuleText(win.caption, r.title, r.titlematch)) continue
+        if (!r.wmclass.test(normalizeRuleText(cls).toLowerCase())) continue
+        if (!r.title.test(normalizeRuleText(win.caption).toLowerCase())) continue
         return r
     }
     return null

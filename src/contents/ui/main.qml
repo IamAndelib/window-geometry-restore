@@ -31,6 +31,11 @@ Item {
     property bool debugMode: false
     property bool restoreTiles: true
     property var blacklist: Engine.parseList('')
+    // Problems already logged once (see logOnce): { key: true }
+    property var reported: ({})
+    // The saved data as this script last wrote it: when the file still holds it, no other KWin
+    // instance wrote in between, and saving skips reading it back.
+    property string lastWritten: ''
     // Persisted: { apps: { cls: { lastAccess, saves, desktops: { key: { lastAccess, saves } } } } }.
     // Each virtual desktop keeps its own layout per app, until the app's next close on that
     // desktop replaces it, so a crash or power loss still restores the last layout.
@@ -40,7 +45,7 @@ Item {
     property var live: ({})
     // Runtime, per window id: { w, cls, desk, group, label, assigned, userPlaced, provisional,
     //                          home, tile, free, pendingTile,
-    //                          captionHandler, moveHandler, geometryHandler, tileHandler, desktopsHandler }
+    //                          captionHandler, moveHandler, geometryHandler, tileHandler, desktopsHandler, outputHandler }
     // `home` is the last geometry on a connected screen, `tile` the last tile seen and `free` the
     // last floating geometry (all save-shaped).
     // `pendingTile` is a quick tile waiting for the window to become active.
@@ -56,16 +61,33 @@ Item {
         if (debugMode) log(message)
     }
 
+    // For problems that would repeat on every window or frame.
+    function logOnce(key, message) {
+        if (reported[key]) return
+        reported[key] = true
+        log(message)
+    }
+
     function removeFromArray(array, item) {
         var index = array.indexOf(item)
         if (index !== -1) array.splice(index, 1)
     }
 
+    // Connects `handler`, wrapped so that an error is logged under the script's name instead of
+    // reaching KWin's log as an anonymous QML error. Returns what disconnectSignal needs.
     function connectSignal(w, name, handler) {
+        var guarded = function () {
+            try {
+                handler.apply(null, arguments)
+            } catch (e) {
+                log('handling ' + name + ' failed: ' + e)
+            }
+        }
         try {
-            w[name].connect(handler)
-            return handler
+            w[name].connect(guarded)
+            return guarded
         } catch (e) {
+            logOnce('signal:' + name, "cannot connect to KWin's " + name + ' signal (' + e + '); that part is skipped')
             return null
         }
     }
@@ -93,11 +115,16 @@ Item {
     }
 
     function loadPersisted() {
-        var raw = settings.value(storeKey, '{}')
+        var raw = String(settings.value(storeKey, '{}'))
         var result = Engine.decodeState(raw)
         if (result.error) {
             log('saved window data unreadable (' + result.error + ') - kept a copy, starting fresh')
-            settings.setValue(storeKey + '_corrupt', String(raw))
+            settings.setValue(storeKey + '_corrupt', raw)
+        } else if (result.version > Engine.SCHEMA_VERSION) {
+            log('saved window data was written by a newer version of the script - kept a copy, reading what this version understands')
+            settings.setValue(storeKey + '_v' + result.version, raw)
+        } else {
+            lastWritten = raw
         }
         store = result.state
         var removed = Engine.pruneExpired(store, Date.now())
@@ -115,10 +142,19 @@ Item {
     function persist() {
         try {
             settings.sync()
-            var disk = Engine.decodeState(settings.value(storeKey, '{}'))
-            if (!disk.error) Engine.mergeDiskApps(store, disk.state)
+            var raw = String(settings.value(storeKey, '{}'))
+            if (raw !== lastWritten) {
+                var disk = Engine.decodeState(raw)
+                if (!disk.error) {
+                    Engine.mergeDiskApps(store, disk.state)
+                } else {
+                    log('saved window data on disk unreadable (' + disk.error + ') - kept a copy before saving')
+                    settings.setValue(storeKey + '_corrupt', raw)
+                }
+            }
             Engine.pruneExpired(store, Date.now())
-            settings.setValue(storeKey, Engine.encodeState(store))
+            lastWritten = Engine.encodeState(store)
+            settings.setValue(storeKey, lastWritten)
             settings.sync()
         } catch (e) {
             log('failed to persist: ' + e)
@@ -160,7 +196,7 @@ Item {
         var entry = {
             w: w, cls: cls, desk: '', group: '', label: cls, assigned: !!adopted, userPlaced: false, provisional: null,
             home: null, tile: null, free: null, pendingTile: null,
-            captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null, desktopsHandler: null
+            captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null, desktopsHandler: null, outputHandler: null
         }
         tracked[id] = entry
         var app = joinGroup(entry, id)
@@ -168,17 +204,20 @@ Item {
         entry.geometryHandler = connectSignal(w, 'frameGeometryChanged', function () { noteGeometry(id) })
         entry.tileHandler = connectSignal(w, 'tileChanged', function () { noteTile(id) })
         entry.desktopsHandler = connectSignal(w, 'desktopsChanged', function () { onDesktopsChanged(id) })
+        entry.outputHandler = connectSignal(w, 'outputChanged', function () { onOutputChanged(id) })
         noteGeometry(id)
         dbg('tracking window for ' + entry.label)
         var rule = adopted ? null : geometryRuleOf(w)
         if (adopted) {
             app.settled = true
+        } else if (app.session && app.session.monitor && !sameMonitor(app.session.monitor, monitorOf(entry))) {
+            dbg(entry.label + ': a restore for another monitor is under way, leaving this window')
         } else if (rule) {
-            // Still saved, so removing the rule brings restores back; the app's other windows
-            // restore as usual.
+            // Still saved, so removing the rule brings restores back. On a fresh start the app's
+            // other windows restore as usual; for a running app, the window occupies its monitor.
             entry.assigned = true
             log(entry.label + ': a KWin window rule places this window (' + (rule.description || rule.id) + '), leaving it to KWin')
-            if (app.session || startSessionFor(entry, id)) {
+            if (app.session || (!app.settled && startSession(entry.group, null))) {
                 app.session.deadline = Math.max(app.session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
             }
         } else if (app.session || startSessionFor(entry, id)) {
@@ -197,6 +236,10 @@ Item {
             var file = Qt.createQmlObject('import QtCore; Settings { location: ' + JSON.stringify(url) + ' }', root)
             try {
                 var rules = Engine.parseRules(function (key) { return file.value(key, undefined) })
+                rules.forEach(function (r) {
+                    if (r.unreadable) logOnce('rule:' + r.id + '/' + r.unreadable, 'cannot read the regular expression of KWin window rule ' +
+                        (r.description || r.id) + ' (' + r.unreadable + '): matching its plain text instead')
+                })
                 return Engine.geometryRuleFor(rules, {
                     resourceClass: String(w.resourceClass),
                     resourceName: String(w.resourceName || ''),
@@ -206,7 +249,7 @@ Item {
                 file.destroy()
             }
         } catch (e) {
-            dbg('reading KWin window rules failed: ' + e)
+            logOnce('rules', 'reading KWin window rules failed: ' + e)
             return null
         }
     }
@@ -224,6 +267,7 @@ Item {
             unwatchCaption(entry)
             dbg(entry.label + ': window moved to another desktop before its restore, not restoring it')
         }
+        if (old.buffer.length && finalizeLeftMonitors(old)) persist()
         if (!old.open.length) delete live[entry.group]
         entry.provisional = null
         cancelPendingTile(entry)
@@ -240,6 +284,7 @@ Item {
         disconnectSignal(entry.w, 'frameGeometryChanged', entry.geometryHandler)
         disconnectSignal(entry.w, 'tileChanged', entry.tileHandler)
         disconnectSignal(entry.w, 'desktopsChanged', entry.desktopsHandler)
+        disconnectSignal(entry.w, 'outputChanged', entry.outputHandler)
         return entry
     }
 
@@ -288,7 +333,7 @@ Item {
             }
             return { kind: 'custom', path: path, rel: rel }
         } catch (e) {
-            dbg('reading a tile failed: ' + e)
+            logOnce('tile', 'reading a tile failed: ' + e)
             return null
         }
     }
@@ -333,17 +378,35 @@ Item {
                 if (entry.pendingTile) quickTileWhenActive(id)
                 return
             }
-            entry.home = geometryOf(w.output, w.x, w.y, w.width, w.height)
+            var frame = geometryOf(w.output, w.x, w.y, w.width, w.height)
+            entry.home = frame
             if (w.tile) {
                 noteTile(id)
-            } else if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w)) {
+            } else {
+                // A frame without a tile: the window left it (KWin also untiles a window it maximizes).
                 entry.tile = null
-                entry.free = geometryOf(w.output, w.x, w.y, w.width, w.height)
+                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && (w.move || !isMaximizedLike(w))) entry.free = frame
             }
         } catch (e) {
-            dbg('reading window geometry failed: ' + e)
+            logOnce('geometry', 'reading window geometry failed: ' + e)
         }
         if (entry.pendingTile) quickTileWhenActive(id)
+    }
+
+    // KWin carries a tiled or maximized window's restore geometry along when it sends the window
+    // to another monitor. The floating geometry follows the same way: same place on the window's
+    // current monitor.
+    function onCurrentMonitor(g, w) {
+        var output = w.output
+        if (!g || !g.output || !output || sameMonitor(g.output, monitorOf({ w: w, home: null }))) return g
+        var at = output.mapToGlobal(Qt.point(g.output.x, g.output.y))
+        return geometryOf(output, at.x, at.y, g.width, g.height)
+    }
+
+    // A quick tile still waiting for the window to get focus is the window's tile all the same.
+    function waitingQuickTile(entry) {
+        var pending = entry.pendingTile
+        return pending ? { kind: 'quick', index: pending.index, rel: pending.rel || null } : null
     }
 
     function copyGeometry(g) {
@@ -365,7 +428,7 @@ Item {
                     dbg(entry.label + ': closed maximized, normal geometry unknown, not saved')
                     return null
                 }
-                fields = copyGeometry(entry.free)
+                fields = copyGeometry(onCurrentMonitor(entry.free, w))
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
@@ -374,8 +437,8 @@ Item {
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
             if (w.tile && !current && !away) dbg(entry.label + ': closed in a tile that could not be identified')
-            fields.tile = entry.tile || current
-            fields.free = fields.tile ? entry.free : null
+            fields.tile = entry.tile || current || waitingQuickTile(entry)
+            fields.free = fields.tile ? (away ? entry.free : onCurrentMonitor(entry.free, w)) : null
             if (fields.tile) {
                 dbg(entry.label + ': closed in ' + fields.tile.kind + ' tile ' +
                     (fields.tile.kind === 'quick' ? fields.tile.index : '[' + fields.tile.path.join(',') + ']') +
@@ -385,7 +448,7 @@ Item {
             }
             return Engine.makeSave(fields)
         } catch (e) {
-            dbg('snapshot failed: ' + e)
+            log(entry.label + ': saving the window failed: ' + e)
             return null
         }
     }
@@ -419,21 +482,49 @@ Item {
     // Forget a window. Returns true when it was its app's last one on its monitor and new
     // saves were made.
     function releaseWindow(id) {
-        var entry = untrack(id)
+        var entry = tracked[id]
         var app = live[entry.group]
         removeFromArray(app.open, id)
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
         var awaitingRestore = !!app.session && app.session.pending.indexOf(id) !== -1
         if (app.session) removeFromArray(app.session.pending, id)
+        // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
         var snap = awaitingRestore ? null : snapshotWindow(entry)
-        var monitor = snap ? snap.output : monitorOf(entry)
+        untrack(id)
         if (snap) {
-            app.buffer.push({ closeTime: Date.now(), snap: snap, monitor: monitor })
+            app.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output })
             if (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
         }
-        var saved = !hasWindowOn(app, monitor) && finalizeMonitor(app, monitor)
+        var saved = finalizeLeftMonitors(app)
         if (!app.open.length) delete live[entry.group]
         return saved
+    }
+
+    // Saves the closes of every monitor the app has no window on any more: its last window there
+    // closed, or was moved to another monitor or desktop.
+    function finalizeLeftMonitors(app) {
+        var monitors = []
+        app.buffer.forEach(function (close) {
+            if (!monitors.some(function (m) { return sameMonitor(m, close.monitor) })) monitors.push(close.monitor)
+        })
+        var saved = false
+        monitors.forEach(function (monitor) {
+            if (!hasWindowOn(app, monitor) && finalizeMonitor(app, monitor)) saved = true
+        })
+        return saved
+    }
+
+    // KWin reports a window's new monitor after moving it. A user move can leave a monitor without
+    // windows of the app, which completes the closes buffered there.
+    function onOutputChanged(id) {
+        var entry = tracked[id]
+        if (!entry) return
+        var app = live[entry.group]
+        try {
+            if (app.buffer.length && finalizeLeftMonitors(app)) persist()
+        } catch (e) {
+            log(entry.label + ': saving after a monitor change failed: ' + e)
+        }
     }
 
     // The windows that closed together on one monitor (each within BURST_MS of the next) become
@@ -487,7 +578,7 @@ Item {
             if (!saves.length) return false
         }
         saved.lastAccess = store.apps[app.cls].lastAccess = Date.now()
-        app.session = { saves: saves, taken: [], remaining: saves.length, pending: [], deadline: 0 }
+        app.session = { saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0 }
         dbg(app.label + ': restore session started - ' + saves.length + ' saved window(s)' +
             (monitor ? ' for ' + monitor.name + ', where it has no window yet' : ''))
         ensureTick()
@@ -559,7 +650,13 @@ Item {
         entry.assigned = true
         unwatchCaption(entry)
         removeFromArray(session.pending, id)
-        var moved = applySave(entry, id, session.saves[match.index], Date.now() + Engine.RESTORE_TIMEOUT_MS)
+        var moved = false
+        try {
+            moved = applySave(entry, id, session.saves[match.index], Date.now() + Engine.RESTORE_TIMEOUT_MS)
+        } catch (e) {
+            log(entry.label + ': placing the window failed: ' + e)
+            return
+        }
         var mode = bestEffort ? 'best effort' : (moved ? 'moved' : 'left as is')
         log(entry.label + ': restored window to saved state (' + mode + '), caption match ' + Math.round(match.score) + '%')
     }
@@ -583,9 +680,17 @@ Item {
         dbg(app.label + ': restore session ended')
     }
 
+    // The desktop shown on `output`: KWin 6.7 can show a different one on each monitor.
+    function currentDesktopOn(output) {
+        try {
+            if (output && typeof Workspace.currentDesktopForScreen === 'function') return Workspace.currentDesktopForScreen(output)
+        } catch (e) {}
+        return Workspace.currentDesktop
+    }
+
     function workArea(output) {
         try {
-            return Workspace.clientArea(KWin.MaximizeArea, output, Workspace.currentDesktop)
+            return Workspace.clientArea(KWin.MaximizeArea, output, currentDesktopOn(output))
         } catch (e) {
             return null
         }
@@ -782,7 +887,7 @@ Item {
             if (!output) return null
             // Tile layouts are per desktop; a window on all desktops is tiled on the current one.
             var desktops = entry.w.desktops || []
-            var desktop = desktops.length === 1 ? desktops[0] : Workspace.currentDesktop
+            var desktop = desktops.length === 1 ? desktops[0] : currentDesktopOn(output)
             if (save.tile.kind === 'quick') {
                 var root = quickRootFor(entry.w, output, desktop)
                 var quick = root && root.tiles ? root.tiles[save.tile.index] : null
@@ -792,7 +897,7 @@ Item {
             if (!tile) log(entry.label + ': saved tile is not in the current layout, restoring plain geometry')
             return tile ? { tile: tile } : null
         } catch (e) {
-            dbg('looking up the saved tile failed: ' + e)
+            log(entry.label + ': looking up the saved tile failed: ' + e)
             return null
         }
     }
@@ -889,7 +994,7 @@ Item {
             try {
                 applySave(entry, id, entry.provisional.save, entry.provisional.until)
             } catch (e) {
-                dbg('re-placing window failed: ' + e)
+                log(entry.label + ': moving the window to its screen failed: ' + e)
             }
         }
     }
@@ -910,7 +1015,7 @@ Item {
                     setGeometry(entry.w, retry.target)
                 }
             } catch (e) {
-                dbg('geometry retry failed: ' + e)
+                log((entry ? entry.label : 'window') + ': placing the window again failed: ' + e)
                 retries.splice(i, 1)
             }
         }
@@ -999,8 +1104,11 @@ Item {
         onTriggered: root.onTick()
     }
 
+    // The file KWin's default settings location has always given this script, named explicitly
+    // so that a change of KWin's application name can't move the saved layouts.
     Settings {
         id: settings
+        location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + '/kde.org/kwin.conf'
     }
 
     Connections {

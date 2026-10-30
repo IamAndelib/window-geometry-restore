@@ -31,7 +31,7 @@ clean:
 	@rm -f $(PKGFILE)
 
 logs:
-	@journalctl --user -f | grep --line-buffered WindowGeometryRestore
+	@journalctl --user -f | grep --line-buffered -i windowgeometryrestore
 
 # Load the working tree as a separate script for quick testing without logging out:
 # each load uses a fresh copy, which sidesteps KWin's script cache. Disable the

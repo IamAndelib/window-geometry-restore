@@ -21,6 +21,7 @@ Run inside the dev container only: python3 -I tests/kwin/scenarios.py
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,13 +137,15 @@ class App:
 
 class Sandbox:
     def __init__(self, outputs=2, width=1920, height=1080, script_config=None,
-                 windows_config=None, desktops=1, rules=None, keep=False):
+                 windows_config=None, desktops=1, desktop_ids=None, rules=None, keep=False):
         self.outputs = outputs
         self.width = width
         self.height = height
         self.script_config = {"debug": "true", **(script_config or {})}
         self.windows_config = windows_config or {}
         self.desktops = desktops
+        # Fixed desktop ids (kwinrc Id_N), so that a window rule can name a desktop.
+        self.desktop_ids = desktop_ids or []
         self.rules = rules or []
         self.keep = keep
         self.kwin = None
@@ -197,16 +200,29 @@ class Sandbox:
         lines += ["%s=%s" % kv for kv in self.script_config.items()]
         lines += ["", "[Windows]"] + ["%s=%s" % kv for kv in self.windows_config.items()]
         lines += ["", "[Desktops]", "Number=%d" % self.desktops, "Rows=1"]
+        lines += ["Id_%d=%s" % (i + 1, d) for i, d in enumerate(self.desktop_ids)]
         lines += ["", "[Compositing]", "AnimationSpeed=0"]
         (cfg / "kwinrc").write_text("\n".join(lines) + "\n")
         # No animations: positions settle at once, so probes are deterministic.
         (cfg / "kdeglobals").write_text("[KDE]\nAnimationDurationFactor=0\n")
         if self.rules:
-            ids = [str(i + 1) for i in range(len(self.rules))]
-            text = ["[General]", "count=%d" % len(ids), "rules=" + ",".join(ids), ""]
-            for rid, rule in zip(ids, self.rules):
-                text += ["[%s]" % rid] + ["%s=%s" % kv for kv in rule.items()] + [""]
-            (cfg / "kwinrulesrc").write_text("\n".join(text))
+            self.write_rules(self.rules)
+
+    def write_rules(self, rules):
+        """Write kwinrulesrc as System Settings' rules page does: rules in groups named by UUID,
+        listed in [General], values in KConfig's escaping (a backslash stored as \\\\)."""
+        self.rules = rules
+        ids = [str(uuid.uuid4()) for _ in rules]
+        text = ["[General]", "count=%d" % len(ids), "rules=" + ",".join(ids), ""]
+        for rid, rule in zip(ids, rules):
+            text += ["[%s]" % rid] + ["%s=%s" % (k, v.replace("\\", "\\\\")) for k, v in rule.items()] + [""]
+        (self.root / "config" / "kwinrulesrc").write_text("\n".join(text))
+
+    def change_rules(self, rules):
+        """Change the rules while KWin runs, and tell KWin, as System Settings does."""
+        self.write_rules(rules)
+        self.qdbus("org.kde.KWin", "/KWin", "org.kde.KWin.reconfigure")
+        self.settle(0.5)
 
     def start(self):
         for d in ("home", "config", "data", "cache", "state", "run"):
@@ -243,9 +259,10 @@ class Sandbox:
         self.pointer = Pointer(self.root / "run" / "wayland-wgr", self.root / "proto")
         self.settle(0.3)
 
-    def restart_kwin(self):
+    def restart_kwin(self, store=None):
         """Log out and back in: KWin quits (the script saves the windows still
-        open, and the apps go with it), then starts again in the same HOME."""
+        open, and the apps go with it), then starts again in the same HOME.
+        `store` replaces the script's saved data in between."""
         self.pointer.close()
         self.pointer = None
         self.kwin.terminate()
@@ -254,6 +271,10 @@ class Sandbox:
             if p.poll() is None:
                 p.kill()
         self.clients = []
+        if store is not None:
+            path = self.root / "config" / "kde.org" / "kwin.conf"
+            escaped = store.replace("\\", "\\\\").replace('"', '\\"')
+            path.write_text("[General]\n" + STORE_KEY + '="' + escaped + '"\n')
         self.settle(0.3)
         self._start_kwin()
 
@@ -300,6 +321,12 @@ class Sandbox:
 
     def log_text(self):
         return self.log_path.read_text(errors="replace")
+
+    def script_errors(self):
+        """Failures the script logged, and QML errors KWin reported from its files."""
+        return [l for l in self.log_text().splitlines()
+                if (LOG_PREFIX in l and ("failed" in l or "unreadable" in l))
+                or re.search(r"windowgeometryrestore[^ ]*/(main\.qml|engine\.js):\d+", l)]
 
     def script_log(self):
         """The script's log lines written since the previous call."""
