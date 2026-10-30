@@ -1,17 +1,7 @@
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-
-const source = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
-    .replace(/^\s*\.pragma library.*$/m, '')
-
-const engine = new Function(`
-    ${source}
-    return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
-             MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
-             parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, newState,
-             decodeState, encodeState, pruneExpired, mergeDiskApps };
-`)()
+import engine from './load-engine.mjs'
 
 function save(overrides = {}) {
     return engine.makeSave({
@@ -29,7 +19,6 @@ function live(overrides = {}) {
 test('captionScore: exact, numeric drift, prefix/suffix drift, unrelated', () => {
     assert.equal(engine.captionScore('Same', 'Same'), 100)
     assert.equal(engine.captionScore('Inbox (12) - Mail', 'Inbox (3) - Mail'), 100)
-    assert.ok(engine.captionScore('Konsole', 'Konsole') === 100)
     const drifted = engine.captionScore('text editor - main.py', 'text editor - utils.py')
     assert.ok(drifted > 50 && drifted < 100, `drift score ${drifted}`)
     assert.ok(drifted < engine.CAPTION_FALLBACK, 'different files must stay below tier-3 threshold')
@@ -102,16 +91,13 @@ test('single-save fallback: the lone save always applies to the next window (tie
 })
 
 test('decodeState: rejects garbage without throwing, returns empty state', () => {
-    for (const garbage of ['', '   ', 'not json', '{"apps": 5}', '[]', 'null', '{"apps": {"a": {"w": "nope"}}}']) {
+    const cases = { '': false, '   ': false, '{}': false, 'not json': true, '[]': true, 'null': true, '{"apps": 5}': true,
+                    '{"apps": {"a": {"w": "nope"}}}': false }
+    for (const [garbage, isError] of Object.entries(cases)) {
         const r = engine.decodeState(garbage)
-        assert.equal(r.error === null || typeof r.error === 'string', true)
-        assert.deepEqual(Object.keys(r.state.apps).length >= 0, true)
+        assert.equal(typeof r.error === 'string', isError, `error for ${JSON.stringify(garbage)}`)
+        assert.deepEqual(Object.keys(r.state.apps), [], `no apps for ${JSON.stringify(garbage)}`)
     }
-    const r = engine.decodeState('not json')
-    assert.ok(r.error)
-    assert.deepEqual(r.state.apps, {})
-    const empty = engine.decodeState('{}')
-    assert.equal(empty.error, null)
 })
 
 test('encode/decode round-trip preserves geometry fields, drops runtime flags', () => {
@@ -134,11 +120,86 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'height', 'output', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
+    assert.equal(a.tile, null)
+    assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))
     assert.equal(blob.version, 2)
     assert.equal(blob.apps['firefox'].w[0].d, undefined)
     assert.equal(blob.apps['firefox'].w[0].m, undefined)
+    assert.ok(!('t' in blob.apps['firefox'].w[0]) && !('f' in blob.apps['firefox'].w[0]), 'untiled saves stay compact')
+})
+
+function roundTrip(saves) {
+    const state = engine.newState()
+    state.apps['app'] = { lastAccess: 1, saves }
+    return engine.decodeState(engine.encodeState(state)).state.apps['app'].saves
+}
+
+function decodeOne(raw) {
+    const r = engine.decodeState(JSON.stringify({ version: 2, apps: { app: { t: 1, w: [raw] } } }))
+    assert.equal(r.error, null)
+    return r.state.apps['app'] ? r.state.apps['app'].saves[0] : null
+}
+
+test('tiled saves round-trip their tile and pre-tile geometry', () => {
+    const free = { x: 300, y: 200, width: 1000, height: 700, output: { x: 300, y: 200, serial: 'SER1', name: 'DP-1' } }
+    const [quick, custom] = roundTrip([
+        save({ tile: { kind: 'quick', index: 4, rel: { x: 0, y: 0, width: 0.68, height: 0.5 } }, free }),
+        save({ tile: { kind: 'custom', path: [1, 0], rel: { x: 0.5, y: 0, width: 0.5, height: 0.5 } }, free: { ...free, output: null } })
+    ])
+    assert.deepEqual(quick.tile, { kind: 'quick', index: 4, rel: { x: 0, y: 0, width: 0.68, height: 0.5 } })
+    assert.deepEqual(quick.free, free)
+    assert.deepEqual(custom.tile, { kind: 'custom', path: [1, 0], rel: { x: 0.5, y: 0, width: 0.5, height: 0.5 } })
+    assert.equal(custom.free.output, null)
+    assert.equal(custom.free.width, 1000)
+})
+
+test('a quick tile without a recorded size keeps its index (older saves)', () => {
+    assert.deepEqual(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'q', i: 3 } }).tile, { kind: 'quick', index: 3, rel: null })
+    for (const g of ['x', { x: 0, y: 0, w: 0, h: 1 }, { x: 0.8, y: 0, w: 0.5, h: 1 }]) {
+        assert.deepEqual(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'q', i: 3, g } }).tile, { kind: 'quick', index: 3, rel: null }, JSON.stringify(g))
+    }
+})
+
+test('a tiled save without a known pre-tile geometry keeps its tile', () => {
+    const [s] = roundTrip([save({ tile: { kind: 'quick', index: 0, rel: null } })])
+    assert.deepEqual(s.tile, { kind: 'quick', index: 0, rel: null })
+    assert.equal(s.free, null)
+})
+
+test('malformed tile or pre-tile data is dropped, the plain geometry still restores', () => {
+    const base = { c: 'Win', x: 1, y: 2, w: 800, h: 600, o: null }
+    const badTiles = [
+        'q', 7, [], { k: 'x', i: 0 },
+        { k: 'q' }, { k: 'q', i: -1 }, { k: 'q', i: 8 }, { k: 'q', i: 1.5 }, { k: 'q', i: '2' },
+        { k: 'c', g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: 'nope', g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0, -1], g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0.5], g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: new Array(33).fill(0), g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0] },
+        { k: 'c', p: [0], g: { x: 0, y: 0, w: 0, h: 1 } },
+        { k: 'c', p: [0], g: { x: 0.6, y: 0, w: 0.6, h: 1 } },
+        { k: 'c', p: [0], g: { x: -0.1, y: 0, w: 0.5, h: 1 } },
+        { k: 'c', p: [0], g: { x: 'a', y: 0, w: 0.5, h: 1 } }
+    ]
+    for (const t of badTiles) {
+        const s = decodeOne({ ...base, t, f: { x: 5, y: 5, w: 900, h: 700, o: null } })
+        assert.ok(s, `save kept for tile ${JSON.stringify(t)}`)
+        assert.equal(s.tile, null, `tile rejected: ${JSON.stringify(t)}`)
+        assert.equal(s.width, 800)
+    }
+    for (const f of ['x', [], { x: 1, y: 1, w: 0, h: 500 }, { x: 1, y: 1, w: 500 }]) {
+        const s = decodeOne({ ...base, t: { k: 'q', i: 1 }, f })
+        assert.deepEqual(s.tile, { kind: 'quick', index: 1, rel: null })
+        assert.equal(s.free, null, `pre-tile geometry rejected: ${JSON.stringify(f)}`)
+    }
+})
+
+test('an empty custom path (a layout with no splits) is a valid tile', () => {
+    const s = decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'c', p: [], g: { x: 0, y: 0, w: 1, h: 1 } } })
+    assert.deepEqual(s.tile, { kind: 'custom', path: [], rel: { x: 0, y: 0, width: 1, height: 1 } })
 })
 
 test('v1 blobs (with desktop/activities/state fields) decode cleanly - fields ignored', () => {
@@ -229,12 +290,205 @@ test('mergeDiskApps: adopts disk-only apps, memory wins for known apps', () => {
     assert.equal(memory.apps['lost'].saves[0].caption, 'lost', 'disk-only app re-adopted')
 })
 
+function desktopState() {
+    const state = engine.newState()
+    engine.recordLayout(state, 'konsole', 'uuid-desk-1', [save({ caption: 'On one' })], 100)
+    engine.recordLayout(state, 'konsole', '*', [save({ caption: 'Everywhere' })], 200)
+    engine.recordLayout(state, 'konsole', 'uuid-desk-2', [save({ caption: 'On two' }), save({ caption: 'Also two' })], 300)
+    return state
+}
+
+test('recordLayout keeps one layout per desktop, and the latest one for older versions', () => {
+    const state = desktopState()
+    const app = state.apps['konsole']
+    assert.equal(app.lastAccess, 300)
+    assert.deepEqual(app.saves.map((s) => s.caption), ['On two', 'Also two'], 'w: the latest layout, any desktop')
+    assert.deepEqual(engine.layoutFor(state, 'konsole', 'uuid-desk-1').saves.map((s) => s.caption), ['On one'])
+    assert.equal(engine.layoutFor(state, 'konsole', 'uuid-desk-1').lastAccess, 100)
+    assert.deepEqual(engine.layoutFor(state, 'konsole', '*').saves.map((s) => s.caption), ['Everywhere'])
+    assert.equal(engine.layoutFor(state, 'konsole', 'uuid-desk-3'), null)
+    assert.equal(engine.layoutFor(state, 'dolphin', 'uuid-desk-1'), null)
+})
+
+test('per-desktop layouts round-trip; older versions still read w', () => {
+    const blob = JSON.parse(engine.encodeState(desktopState()))
+    assert.equal(blob.version, 2, 'additive: no version bump')
+    const app = blob.apps['konsole']
+    assert.deepEqual(app.w.map((s) => s.c), ['On two', 'Also two'])
+    assert.deepEqual(Object.keys(app.d).sort(), ['*', 'uuid-desk-1', 'uuid-desk-2'])
+    assert.equal(app.d['uuid-desk-1'].t, 100)
+
+    const decoded = engine.decodeState(JSON.stringify(blob))
+    assert.equal(decoded.error, null)
+    assert.deepEqual(engine.layoutFor(decoded.state, 'konsole', 'uuid-desk-2').saves.map((s) => s.caption), ['On two', 'Also two'])
+    assert.equal(engine.layoutFor(decoded.state, 'konsole', '*').lastAccess, 200)
+})
+
+test('data from older versions has no per-desktop layout, so it restores nothing', () => {
+    const r = engine.decodeState(JSON.stringify({ version: 2, apps: { konsole: { t: 5, w: [{ c: 'Old', x: 1, y: 2, w: 800, h: 600 }] } } }))
+    assert.equal(r.error, null)
+    assert.equal(r.state.apps['konsole'].saves.length, 1, 'kept, and written back for older versions')
+    assert.equal(engine.layoutFor(r.state, 'konsole', 'uuid-desk-1'), null)
+    assert.equal(engine.layoutFor(r.state, 'konsole', '*'), null)
+    assert.ok(!('d' in JSON.parse(engine.encodeState(r.state)).apps['konsole']), 'no empty d written')
+})
+
+test('malformed per-desktop data is dropped, valid layouts are kept', () => {
+    const good = { c: 'Win', x: 1, y: 2, w: 800, h: 600 }
+    const blob = JSON.stringify({ version: 2, apps: {
+        a: { t: 1, w: [good], d: 'nope' },
+        b: { t: 1, w: [good], d: { '': { t: 1, w: [good] }, ['x'.repeat(engine.MAX_DESKTOP_KEY + 1)]: { t: 1, w: [good] },
+                                   bad: 7, empty: { t: 1, w: [] }, junk: { t: 1, w: [{ c: 'no size' }] }, ok: { t: 'x', w: [good] } } },
+        onlyDesktops: { t: 9, d: { 'uuid-desk-1': { t: 9, w: [good] } } },
+        nothing: { t: 9, d: { 'uuid-desk-1': { t: 9, w: [] } } }
+    } })
+    const r = engine.decodeState(blob)
+    assert.equal(r.error, null)
+    assert.equal(engine.layoutFor(r.state, 'a', 'nope'), null)
+    assert.deepEqual(Object.keys(r.state.apps['b'].desktops), ['ok'])
+    assert.equal(engine.layoutFor(r.state, 'b', 'ok').lastAccess, 1, 'no valid time: the app\'s')
+    assert.equal(engine.layoutFor(r.state, 'onlyDesktops', 'uuid-desk-1').saves.length, 1, 'an app with only per-desktop layouts is kept')
+    assert.equal(r.state.apps['onlyDesktops'].saves.length, 0)
+    assert.equal(r.state.apps['nothing'], undefined)
+    const reencoded = JSON.parse(engine.encodeState(r.state))
+    assert.equal(reencoded.apps['onlyDesktops'].w, undefined, 'no empty w written')
+})
+
+test('pruneExpired drops stale desktop layouts and keeps fresh ones', () => {
+    const now = 1_000_000_000
+    const state = engine.newState()
+    engine.recordLayout(state, 'konsole', 'gone-desktop', [save()], now - engine.EXPIRY_MS - 1)
+    engine.recordLayout(state, 'konsole', 'uuid-desk-1', [save()], now - 1000)
+    engine.recordLayout(state, 'old', 'uuid-desk-1', [save()], now - engine.EXPIRY_MS - 1)
+
+    assert.equal(engine.pruneExpired(state, now), 1, 'counts removed apps')
+    assert.equal(state.apps['old'], undefined)
+    assert.equal(engine.layoutFor(state, 'konsole', 'gone-desktop'), null)
+    assert.ok(engine.layoutFor(state, 'konsole', 'uuid-desk-1'))
+})
+
+test('mergeDiskApps adopts desktop layouts missing from memory; memory wins per desktop', () => {
+    const memory = engine.newState()
+    engine.recordLayout(memory, 'konsole', 'uuid-desk-1', [save({ caption: 'memory' })], 50)
+    const disk = engine.newState()
+    engine.recordLayout(disk, 'konsole', 'uuid-desk-1', [save({ caption: 'stale on disk' })], 10)
+    engine.recordLayout(disk, 'konsole', 'uuid-desk-2', [save({ caption: 'other instance' })], 20)
+
+    assert.equal(engine.mergeDiskApps(memory, disk), 1)
+    assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-1').saves[0].caption, 'memory')
+    assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-2').saves[0].caption, 'other instance')
+    assert.equal(memory.apps['konsole'].saves[0].caption, 'memory', 'w stays the in-memory latest')
+})
+
+// A kwinrulesrc as QSettings reads it: [General] keys at the top level, groups as prefixes.
+function rulesFile(groups, general = null) {
+    const values = {}
+    const ids = Object.keys(groups)
+    if (general) Object.assign(values, general)
+    else values.rules = ids.join(',')
+    for (const id of ids) for (const [k, v] of Object.entries(groups[id])) values[id + '/' + k] = v
+    return (key) => values[key]
+}
+
+const konsole = { resourceClass: 'org.kde.konsole', resourceName: 'org.kde.konsole', caption: 'Shell - Konsole' }
+
+test('parseRules keeps only rules that place or size windows, in the ways that last', () => {
+    const rules = engine.parseRules(rulesFile({
+        pos: { Description: 'pos', wmclass: 'org.kde.konsole', wmclassmatch: '1', position: '1,1', positionrule: '3' },
+        size: { wmclass: 'a', wmclassmatch: '1', sizerule: '2' },
+        screen: { wmclass: 'a', wmclassmatch: '1', screenrule: '4' },
+        place: { wmclass: 'a', wmclassmatch: '1', placementrule: '6' },
+        dontAffect: { wmclass: 'a', wmclassmatch: '1', positionrule: '1' },
+        applyNow: { wmclass: 'a', wmclassmatch: '1', positionrule: '5' },
+        other: { wmclass: 'a', wmclassmatch: '1', desktopsrule: '2', opacityactiverule: '2' }
+    }))
+    assert.deepEqual(rules.map((r) => r.id), ['pos', 'size', 'screen', 'place'])
+    assert.deepEqual(rules[0].geometry, ['position'])
+    assert.equal(rules[0].description, 'pos')
+})
+
+test('parseRules reads both the list of rule ids and the older numbered groups', () => {
+    assert.equal(engine.parseRules(rulesFile({ a: { positionrule: '2' } }, { rules: ['a'] })).length, 1, 'QSettings may give a list')
+    const numbered = engine.parseRules(rulesFile({ 1: { positionrule: '2' }, 2: { sizerule: '3' } }, { count: '2' }))
+    assert.deepEqual(numbered.map((r) => r.id), ['1', '2'])
+    assert.deepEqual(engine.parseRules(() => undefined), [], 'no rules file content')
+})
+
+test('geometryRuleFor matches the app the way KWin does: exact, substring or regular expression', () => {
+    const rule = (wmclass, wmclassmatch, extra = {}) => engine.parseRules(rulesFile({ r: { wmclass, wmclassmatch, positionrule: '3', ...extra } }))
+    assert.ok(engine.geometryRuleFor(rule('org.kde.konsole', '1'), konsole))
+    assert.ok(engine.geometryRuleFor(rule('ORG.KDE.Konsole', '1'), konsole), 'case does not matter')
+    assert.equal(engine.geometryRuleFor(rule('org.kde.kons', '1'), konsole), null)
+    assert.ok(engine.geometryRuleFor(rule('konsole', '2'), konsole))
+    assert.ok(engine.geometryRuleFor(rule('^org\\.kde\\.k', '3'), konsole))
+    assert.equal(engine.geometryRuleFor(rule('^dolphin', '3'), konsole), null)
+    assert.equal(engine.geometryRuleFor(rule('([', '3'), konsole), null, 'an unreadable pattern without literal text matches nothing')
+    assert.ok(engine.geometryRuleFor(rule('', '0'), konsole), 'no app condition: the rule is for every window')
+    assert.ok(engine.geometryRuleFor(rule('org.kde.konsole org.kde.konsole', '1', { wmclasscomplete: 'true' }), konsole), 'whole class')
+})
+
+test('geometryRuleFor honours title conditions and window types', () => {
+    const rules = (extra) => engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', positionrule: '2', ...extra } }))
+    assert.ok(engine.geometryRuleFor(rules({ title: 'Shell', titlematch: '2' }), konsole))
+    assert.equal(engine.geometryRuleFor(rules({ title: 'Other', titlematch: '1' }), konsole), null)
+    assert.ok(engine.geometryRuleFor(rules({ types: '1' }), konsole), 'normal windows')
+    assert.equal(engine.geometryRuleFor(rules({ types: '32' }), konsole), null, 'dialogs only')
+    assert.ok(engine.geometryRuleFor(rules({ types: '' }), konsole))
+})
+
+// QML hands a QStringList to JS as a sequence object: indexable, with a length, but no Array.
+const sequence = (...items) => Object.assign(Object.create({}), items, { length: items.length })
+
+test('parseRules reads the list of rule ids as QML gives it (a sequence, not an Array)', () => {
+    const rules = engine.parseRules(rulesFile({ a: { positionrule: '2' }, b: { sizerule: '3' } }, { rules: sequence('a', 'b'), count: '2' }))
+    assert.deepEqual(rules.map((r) => r.id), ['a', 'b'])
+})
+
+test('rule values QSettings split at commas are joined back', () => {
+    const rules = engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', title: sequence('Shell', 'Konsole'), titlematch: '1', positionrule: '2' } }))
+    assert.ok(engine.geometryRuleFor(rules, { ...konsole, caption: 'Shell, Konsole' }), 'exact title with a comma')
+    assert.equal(engine.geometryRuleFor(rules, { ...konsole, caption: 'Shell Konsole' }), null)
+})
+
+test('regular expressions: inline flags are understood, unreadable ones fall back to their literal text', () => {
+    const rule = (pattern) => engine.parseRules(rulesFile({ r: { wmclass: pattern, wmclassmatch: '3', positionrule: '2' } }))
+    const dolphin = { resourceClass: 'org.kde.dolphin', resourceName: 'org.kde.dolphin', caption: 'Home' }
+    assert.ok(engine.geometryRuleFor(rule('(?i)KONSOLE'), konsole), '(?i) as KWin users write it')
+    assert.equal(engine.geometryRuleFor(rule('(?i)KONSOLE'), dolphin), null, 'and only for that app')
+    const atomic = rule('(?>konsole)+') // PCRE only
+    assert.equal(atomic[0].unreadable, 'wmclass')
+    assert.ok(engine.geometryRuleFor(atomic, konsole), 'its literal text still matches konsole')
+    assert.equal(engine.geometryRuleFor(atomic, dolphin), null, 'one unreadable rule does not cover every app')
+})
+
+test('a maximized save round-trips its maximize mode; bad values are dropped', () => {
+    const [full, vertical, plain] = roundTrip([save({ maximized: 3 }), save({ maximized: 1 }), save()])
+    assert.equal(full.maximized, 3)
+    assert.equal(vertical.maximized, 1)
+    assert.equal(plain.maximized, 0)
+    assert.ok(!('max' in JSON.parse(engine.encodeState({ apps: { a: { lastAccess: 1, saves: [save()] } } })).apps.a.w[0]), 'not written when not maximized')
+    for (const max of [0, 4, -1, 1.5, '3', null]) {
+        assert.equal(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, max }).maximized, 0, JSON.stringify(max))
+    }
+})
+
+test('a maximize rule counts as a rule that sizes the window', () => {
+    const rules = engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', maximizevert: 'true', maximizevertrule: '3' } }))
+    assert.deepEqual(rules[0].geometry, ['maximizevert'])
+})
+
 test('default exclusion list is identical in main.qml and config/main.xml', () => {
     const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
     const xml = readFileSync(new URL('../src/contents/config/main.xml', import.meta.url), 'utf8')
-    const qmlBlock = qml.match(/defaultBlacklist: \[([\s\S]*?)\]\.join/)[1]
+    const qmlBlock = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
     const fromQml = [...qmlBlock.matchAll(/'([^']+)'/g)].map((m) => m[1])
     const fromXml = xml.match(/<entry name="blacklist"[\s\S]*?<default>([\s\S]*?)<\/default>/)[1].split('\n').map((l) => l.trim()).filter(Boolean)
     assert.ok(fromQml.length > 0)
     assert.deepEqual(fromQml, fromXml)
+})
+
+test('System Settings is not excluded by default: it is an ordinary app window', () => {
+    const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
+    const list = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
+    assert.ok(!engine.isListed('systemsettings', engine.parseList(list.replace(/['\s]/g, '').split(',').join('\n'))))
 })

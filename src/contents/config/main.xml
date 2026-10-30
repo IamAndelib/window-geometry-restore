@@ -9,12 +9,14 @@ steam*
 org.kde.plasmashell
 kwin
 ksmserver
-systemsettings
 kcm_kwinrules
 org.kde.kmenuedit
 org.kde.ark
 org.kde.plasma.emojier
 org.freedesktop.impl.portal.desktop.kde</default>
+        </entry>
+        <entry name="restoreTiles" type="Bool">
+            <default>true</default>
         </entry>
         <entry name="debug" type="Bool">
             <default>false</default>

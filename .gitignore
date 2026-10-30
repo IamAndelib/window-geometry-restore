@@ -1,2 +1,4 @@
 *.kwinscript
 src.*/
+__pycache__/
+*.pyc
