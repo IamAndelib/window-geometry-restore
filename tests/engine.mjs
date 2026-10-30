@@ -134,11 +134,86 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'height', 'output', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'output', 'tile', 'width', 'x', 'y'])
+    assert.equal(a.tile, null)
+    assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))
     assert.equal(blob.version, 2)
     assert.equal(blob.apps['firefox'].w[0].d, undefined)
     assert.equal(blob.apps['firefox'].w[0].m, undefined)
+    assert.ok(!('t' in blob.apps['firefox'].w[0]) && !('f' in blob.apps['firefox'].w[0]), 'untiled saves stay compact')
+})
+
+function roundTrip(saves) {
+    const state = engine.newState()
+    state.apps['app'] = { lastAccess: 1, saves }
+    return engine.decodeState(engine.encodeState(state)).state.apps['app'].saves
+}
+
+function decodeOne(raw) {
+    const r = engine.decodeState(JSON.stringify({ version: 2, apps: { app: { t: 1, w: [raw] } } }))
+    assert.equal(r.error, null)
+    return r.state.apps['app'] ? r.state.apps['app'].saves[0] : null
+}
+
+test('tiled saves round-trip their tile and pre-tile geometry', () => {
+    const free = { x: 300, y: 200, width: 1000, height: 700, output: { x: 300, y: 200, serial: 'SER1', name: 'DP-1' } }
+    const [quick, custom] = roundTrip([
+        save({ tile: { kind: 'quick', index: 4, rel: { x: 0, y: 0, width: 0.68, height: 0.5 } }, free }),
+        save({ tile: { kind: 'custom', path: [1, 0], rel: { x: 0.5, y: 0, width: 0.5, height: 0.5 } }, free: { ...free, output: null } })
+    ])
+    assert.deepEqual(quick.tile, { kind: 'quick', index: 4, rel: { x: 0, y: 0, width: 0.68, height: 0.5 } })
+    assert.deepEqual(quick.free, free)
+    assert.deepEqual(custom.tile, { kind: 'custom', path: [1, 0], rel: { x: 0.5, y: 0, width: 0.5, height: 0.5 } })
+    assert.equal(custom.free.output, null)
+    assert.equal(custom.free.width, 1000)
+})
+
+test('a quick tile without a recorded size keeps its index (older saves)', () => {
+    assert.deepEqual(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'q', i: 3 } }).tile, { kind: 'quick', index: 3, rel: null })
+    for (const g of ['x', { x: 0, y: 0, w: 0, h: 1 }, { x: 0.8, y: 0, w: 0.5, h: 1 }]) {
+        assert.deepEqual(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'q', i: 3, g } }).tile, { kind: 'quick', index: 3, rel: null }, JSON.stringify(g))
+    }
+})
+
+test('a tiled save without a known pre-tile geometry keeps its tile', () => {
+    const [s] = roundTrip([save({ tile: { kind: 'quick', index: 0, rel: null } })])
+    assert.deepEqual(s.tile, { kind: 'quick', index: 0, rel: null })
+    assert.equal(s.free, null)
+})
+
+test('malformed tile or pre-tile data is dropped, the plain geometry still restores', () => {
+    const base = { c: 'Win', x: 1, y: 2, w: 800, h: 600, o: null }
+    const badTiles = [
+        'q', 7, [], { k: 'x', i: 0 },
+        { k: 'q' }, { k: 'q', i: -1 }, { k: 'q', i: 8 }, { k: 'q', i: 1.5 }, { k: 'q', i: '2' },
+        { k: 'c', g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: 'nope', g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0, -1], g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0.5], g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: new Array(33).fill(0), g: { x: 0, y: 0, w: 1, h: 1 } },
+        { k: 'c', p: [0] },
+        { k: 'c', p: [0], g: { x: 0, y: 0, w: 0, h: 1 } },
+        { k: 'c', p: [0], g: { x: 0.6, y: 0, w: 0.6, h: 1 } },
+        { k: 'c', p: [0], g: { x: -0.1, y: 0, w: 0.5, h: 1 } },
+        { k: 'c', p: [0], g: { x: 'a', y: 0, w: 0.5, h: 1 } }
+    ]
+    for (const t of badTiles) {
+        const s = decodeOne({ ...base, t, f: { x: 5, y: 5, w: 900, h: 700, o: null } })
+        assert.ok(s, `save kept for tile ${JSON.stringify(t)}`)
+        assert.equal(s.tile, null, `tile rejected: ${JSON.stringify(t)}`)
+        assert.equal(s.width, 800)
+    }
+    for (const f of ['x', [], { x: 1, y: 1, w: 0, h: 500 }, { x: 1, y: 1, w: 500 }]) {
+        const s = decodeOne({ ...base, t: { k: 'q', i: 1 }, f })
+        assert.deepEqual(s.tile, { kind: 'quick', index: 1, rel: null })
+        assert.equal(s.free, null, `pre-tile geometry rejected: ${JSON.stringify(f)}`)
+    }
+})
+
+test('an empty custom path (a layout with no splits) is a valid tile', () => {
+    const s = decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, t: { k: 'c', p: [], g: { x: 0, y: 0, w: 1, h: 1 } } })
+    assert.deepEqual(s.tile, { kind: 'custom', path: [], rel: { x: 0, y: 0, width: 1, height: 1 } })
 })
 
 test('v1 blobs (with desktop/activities/state fields) decode cleanly - fields ignored', () => {

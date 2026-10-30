@@ -104,3 +104,25 @@ New tests cover:
   3. Open the app in the background: it stays plain-placed until focused, then tiles. Focus is never stolen.
   4. Edit the custom layout and reopen: no wrong tile is applied; the window gets a plain restore.
   5. Untick the new setting: windows reopen floating, as before.
+
+## Status (2026-10-30): implemented, tested live on Plasma 6.7.5 Wayland
+
+**Built as planned:**
+- quick and custom tiles are saved (`t`) along with the pre-tile geometry (`f`);
+- on restore, the window goes to `f` first and is then tiled;
+- a "Restore tiled windows into their tile" setting.
+
+**Changes from the plan, all found in live testing or in KWin's source:**
+- **When the tile is read.** The tile and the floating geometry are recorded while the window is open (`noteTile`/`noteGeometry`), not read at close.
+- **Quick-tile sizes are saved.** A quick tile saves its size too (`t.g`). Resizing a quick-tiled window moves the split that all quick tiles on that screen share. On close, KWin resets that split to 0.5 before scripts hear about the close, so the size is taken from what was recorded while the window was open. On restore, the split is written back through `tile.relativeGeometry`, and windows in the other quick tiles follow it.
+- **Quick tiles reuse a neighbour's layout first.** They go through the quick root of another window that is already quick-tiled on the same screen and desktop. Only without one does the script wait for activation and use KWin's quick-tile action. Both work without focusing the window.
+- **No focus within 10 s:** the window stays at its pre-tile size, not the tile rect.
+- **Wayland timing.** The pre-tile geometry is recorded when the script writes it, because its frame arrives after the window is tiled. A quick tile also waits for the window to reach its screen.
+
+**Confirmed in KWin 6.7.5's source (`src/tiles`, `window.cpp`):**
+- the quick tiles are created in the order L, R, T, B, TL, TR, BL, BR;
+- `Tile.parent` and `Tile.tiles` exist, `relativeGeometry` is writable from scripts, and `manage()` adds the window to the tile before requesting it;
+- on close, tiles unmanage the window before the script's `windowRemoved` handler runs;
+- `requestTile()` ignores deleted windows, so `w.tile` is still set at close.
+
+**Open:** a restored window should not resize a quick tile that already holds another window (option A: join at the tile's current size). One tile can only have one size in KWin. This is planned together with per-desktop restore.

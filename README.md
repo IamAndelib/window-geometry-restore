@@ -32,17 +32,19 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
 
 - When an app's **last window closes**, all its windows that closed together are remembered. Windows still open when you log out, shut down or reload the script are remembered too.
 - On the next launch, each window is matched to its remembered slot (caption + size, then size, then caption) and restored — instantly when the match is unambiguous, otherwise within a few seconds. If you move a window yourself first, your placement wins.
+- **Tiles.** A window that was tiled when it closed (a quick tile or a custom Meta+T tile) reopens in the same tile, and dragging it out gives back the size it had before you tiled it. Custom tiles apply right away; quick tiles apply as soon as the window has focus — the script never focuses it for you. If the tile layout changed in the meantime, the window reopens at the tile's position and size instead.
 - **Geometry only.** Windows open on the current desktop, in front of you, never minimized or forced above/below. Focus, stacking and desktops stay 100% native KWin.
 - **Native-first.** If a window is already where it should be (app self-restore, a KWin window rule, Plasma session restore), or it is maximized, tiled or fullscreen, the script does nothing. Windows that were already open when the script started are never moved. Restores are clamped so nothing lands off-screen; if the remembered screen is missing, windows land on the screen under your cursor and move to their own screen if it shows up within a few seconds (e.g. a monitor that wakes late after login).
 - **Reliable storage.** Saves are written the moment the last window closes and flushed to disk immediately, and they are kept until the app's next close replaces them — so a crash or power loss still restores the last layout. Unreadable data is set aside (not destroyed), apps already on disk are never erased by a stale reload, and entries unused for 30 days expire.
 
 ## Configuration
 
-Two settings (⚙ next to the script in KWin Scripts):
+Three settings (⚙ next to the script in KWin Scripts):
 
 | Setting | Default | Purpose |
 |---|---|---|
 | Excluded applications | a short safe list | Apps to never remember; one per line, `*` acts as a wildcard |
+| Restore tiled windows into their tile | on | Off: tiled windows reopen floating at the tile's position and size |
 | Verbose debug logging | off | Per-window detail for troubleshooting |
 
 ## Troubleshooting

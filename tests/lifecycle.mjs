@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -40,11 +40,13 @@ const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
-    'loadConfig', 'loadPersisted', 'persist', 'trackWindow', 'untrack', 'snapshotWindow',
+    'loadConfig', 'loadPersisted', 'persist', 'trackWindow', 'untrack', 'geometryOf', 'describeTile',
+    'noteTile', 'noteGeometry', 'snapshotWindow',
     'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
     'resolveOutput', 'outputUnderCursor', 'isOnScreen', 'isMaximizedLike', 'canPlace', 'fitLength',
-    'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'reapplyProvisional',
+    'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'rootTileFor', 'isTileAt', 'findCustomTile',
+    'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive', 'restoreQuickSplit', 'cancelPendingTile', 'reapplyProvisional',
     'sweepRetries', 'sweepSessions', 'isIdle', 'ensureTick', 'onTick',
     'handleAdded', 'handleRemoved', 'startup', 'shutdown'
 ]
@@ -68,6 +70,93 @@ const outputs = [
 ]
 outputs.push(makeOutput('DP-3', 'SER-3', 2000, 0, 1280, 1024))
 
+// KWin's tile trees (src/tiles in KWin 6.7). Quick tiles are plain Tiles (no layoutDirection)
+// under a QuickRootTile, created in a fixed order; custom (Meta+T) tiles are CustomTiles,
+// which have a layoutDirection.
+function makeTile(output, parent, rel, custom) {
+    const tile = {
+        parent,
+        tiles: [],
+        windows: [],
+        _rel: { ...rel },
+        get relativeGeometry() { return { ...this._rel } },
+        // Tile::setRelativeGeometry: managed windows follow, and a quick root moves its splits.
+        set relativeGeometry(r) {
+            this._set(r)
+            if (parent && parent._relayout) parent._relayout(this)
+        },
+        _set(r) {
+            this._rel = { x: r.x, y: r.y, width: r.width, height: r.height }
+            for (const w of [...this.windows]) w._setFrame(this.absoluteGeometry)
+        },
+        get absoluteGeometry() {
+            const g = output.geometry
+            const r = this._rel
+            return {
+                x: Math.round(g.x + r.x * g.width), y: Math.round(g.y + r.y * g.height),
+                width: Math.round(r.width * g.width), height: Math.round(r.height * g.height)
+            }
+        }
+    }
+    tile.manage = (w) => w._tileTo(tile)
+    if (custom) tile.layoutDirection = 1
+    if (parent) parent.tiles.push(tile)
+    return tile
+}
+
+const QUICK_RECTS = [
+    { x: 0, y: 0, width: 0.5, height: 1 }, { x: 0.5, y: 0, width: 0.5, height: 1 },
+    { x: 0, y: 0, width: 1, height: 0.5 }, { x: 0, y: 0.5, width: 1, height: 0.5 },
+    { x: 0, y: 0, width: 0.5, height: 0.5 }, { x: 0.5, y: 0, width: 0.5, height: 0.5 },
+    { x: 0, y: 0.5, width: 0.5, height: 0.5 }, { x: 0.5, y: 0.5, width: 0.5, height: 0.5 }
+]
+
+// QuickRootTile: the eight tiles share one horizontal and one vertical split. Resizing one
+// moves the split for all (relayoutToFit); once no quick tile holds a window, both splits
+// go back to 0.5 (tryReset).
+function makeQuickRoot(output) {
+    const root = makeTile(output, null, { x: 0, y: 0, width: 1, height: 1 }, false)
+    for (const rect of QUICK_RECTS) makeTile(output, root, rect, false)
+    const [L, R, T, B, TL, TR, BL, BR] = root.tiles
+    const setH = (s) => {
+        for (const t of [L, TL, BL]) t._set({ ...t._rel, width: s - t._rel.x })
+        for (const t of [R, TR, BR]) t._set({ ...t._rel, x: s, width: 1 - s })
+    }
+    const setV = (s) => {
+        for (const t of [T, TL, TR]) t._set({ ...t._rel, height: s - t._rel.y })
+        for (const t of [B, BL, BR]) t._set({ ...t._rel, y: s, height: 1 - s })
+    }
+    root._relayout = (t) => {
+        const g = t._rel
+        const right = g.x + g.width
+        const bottom = g.y + g.height
+        if (t === T) setV(bottom)
+        else if (t === B) setV(g.y)
+        else if (t === L) setH(right)
+        else if (t === R) setH(g.x)
+        else if (t === TL) { setH(right); setV(bottom) }
+        else if (t === TR) { setH(g.x); setV(bottom) }
+        else if (t === BR) { setH(g.x); setV(g.y) }
+        else if (t === BL) { setH(right); setV(g.y) }
+    }
+    root._tryReset = () => {
+        if ([TL, TR, BL, BR].some((t) => t.windows.length)) return
+        if (!L.windows.length && !R.windows.length) setH(0.5)
+        if (!T.windows.length && !B.windows.length) setV(0.5)
+    }
+    return root
+}
+
+// A left column (0.4) and a right column split into top and bottom halves.
+function makeCustomRoot(output) {
+    const root = makeTile(output, null, { x: 0, y: 0, width: 1, height: 1 }, true)
+    makeTile(output, root, { x: 0, y: 0, width: 0.4, height: 1 }, true)
+    const right = makeTile(output, root, { x: 0.4, y: 0, width: 0.6, height: 1 }, true)
+    makeTile(output, right, { x: 0.4, y: 0, width: 0.6, height: 0.5 }, true)
+    makeTile(output, right, { x: 0.4, y: 0.5, width: 0.6, height: 0.5 }, true)
+    return root
+}
+
 const fakeWorkspace = {
     screens: [outputs[0], outputs[1]],
     stackingOrder: [],
@@ -83,14 +172,30 @@ const fakeWorkspace = {
         const out = this.screens.find((o) => o === target || o === (target && target._output)) || this.screens[0]
         return { x: out.x, y: out.y, width: out.width, height: out.height }
     },
+    activeWindow: null,
+    // Per screen: the custom (Meta+T) layout, and the quick-tile root KWin keeps internally.
+    _customRoots: new Map(),
+    _quickRoots: new Map(),
+    rootTile(output, _desktop) { return this._customRoots.get(output) || null },
     // Set by buildRuntime: what Workspace.windowRemoved would call.
     removed: null
 }
+fakeWorkspace.currentDesktop = fakeWorkspace.desktops[0]
+const quickRootOf = (output) => {
+    if (!fakeWorkspace._quickRoots.has(output)) fakeWorkspace._quickRoots.set(output, makeQuickRoot(output))
+    return fakeWorkspace._quickRoots.get(output)
+}
+Engine.QUICK_TILE_ACTIONS.forEach((name, i) => {
+    fakeWorkspace[name] = function () {
+        if (this.activeWindow) this.activeWindow._tileTo(quickRootOf(this.activeWindow._output).tiles[i])
+    }
+})
 
 const fakeKWin = {
     MaximizeArea: 3,
-    readConfig: (key, fallback) => (key === 'blacklist'
-        ? 'org.kde.spectacle\nsteam*'
+    config: {},
+    readConfig: (key, fallback) => (key in fakeKWin.config ? fakeKWin.config[key]
+        : key === 'blacklist' ? 'org.kde.spectacle\nsteam*'
         : key === 'debug' ? true : fallback)
 }
 
@@ -127,6 +232,11 @@ function makeWindow(fields) {
         _ignoreGeometry: false,
         _captionHandlers: [],
         _moveResizeHandlers: [],
+        _handlers: {},
+        _restoreGeometry: null,
+        _async: false,
+        _requested: null,
+        active: false,
         get x() { return this._g.x },
         get y() { return this._g.y },
         get width() { return this._g.width },
@@ -134,8 +244,14 @@ function makeWindow(fields) {
         get pos() { return { x: this._g.x, y: this._g.y } },
         set frameGeometry(rect) {
             this._geometryWrites++
-            if (!this._ignoreGeometry) this._g = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+            if (this._ignoreGeometry) return
+            // Wayland: the frame only changes once the app acknowledges the new size.
+            if (this._async) this._requested = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+            else this._setFrame(rect)
         },
+        get frameGeometryChanged() { return this._signal('frameGeometryChanged') },
+        get tileChanged() { return this._signal('tileChanged') },
+        get activeChanged() { return this._signal('activeChanged') },
         get output() { return this._output },
         get captionChanged() {
             const handlers = this._captionHandlers
@@ -151,7 +267,68 @@ function makeWindow(fields) {
                 disconnect: (fn) => { const i = handlers.indexOf(fn); if (i !== -1) handlers.splice(i, 1) }
             }
         },
-        emitClosed() { fakeWorkspace.removed(this) },
+        _signal(name) {
+            const handlers = this._handlers[name] || (this._handlers[name] = [])
+            return {
+                connect: (fn) => handlers.push(fn),
+                disconnect: (fn) => { const i = handlers.indexOf(fn); if (i !== -1) handlers.splice(i, 1) }
+            }
+        },
+        _emit(name) { for (const fn of [...(this._handlers[name] || [])]) fn() },
+        _connected(name) { return (this._handlers[name] || []).length },
+        // A geometry change made by KWin, the app or the user (not a script write).
+        _setFrame(rect) {
+            const g = this._g
+            this._g = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+            if (g.x !== rect.x || g.y !== rect.y || g.width !== rect.width || g.height !== rect.height) this._emit('frameGeometryChanged')
+        },
+        // KWin's Window::requestTile: the free geometry at tiling time becomes the restore
+        // geometry, and the tile is set before the window is moved into it.
+        _tileTo(tile) {
+            if (!this.tile) this._restoreGeometry = { ...(this._requested || this._g) }
+            this._requested = null
+            this._leaveTile()
+            tile.windows.push(this)
+            this.tile = tile
+            this._emit('tileChanged')
+            this._setFrame(tile.absoluteGeometry)
+        },
+        // Dragging out of a tile: a user move that untiles first, then resizes to the restore
+        // geometry under the cursor.
+        _dragOut(x, y) {
+            this.emitMoveResizeStarted()
+            this._leaveTile()
+            this.tile = null
+            this._emit('tileChanged')
+            this._setFrame({ x, y, width: this._restoreGeometry.width, height: this._restoreGeometry.height })
+        },
+        // The app acknowledges the size the script asked for (Wayland).
+        _commit(output) {
+            if (output) this._output = output
+            const rect = this._requested
+            this._requested = null
+            if (rect) this._setFrame(rect)
+        },
+        // The user (or KWin's focus policy) activates the window; the script never does.
+        _activate() {
+            if (fakeWorkspace.activeWindow) fakeWorkspace.activeWindow.active = false
+            fakeWorkspace.activeWindow = this
+            this.active = true
+            this._emit('activeChanged')
+        },
+        _leaveTile() {
+            const tile = this.tile
+            if (!tile || !tile.windows.includes(this)) return
+            tile.windows.splice(tile.windows.indexOf(this), 1)
+            if (tile.parent && tile.parent._tryReset) tile.parent._tryReset()
+        },
+        // KWin's tiles connect to Workspace::windowRemoved at startup, before any script, so
+        // the tile lets go first (and a quick root may reset its splits). `tile` keeps its
+        // value: requestTile() ignores deleted windows.
+        emitClosed() {
+            this._leaveTile()
+            fakeWorkspace.removed(this)
+        },
         emitCaptionChanged() { for (const fn of [...this._captionHandlers]) fn() },
         emitMoveResizeStarted() { for (const fn of [...this._moveResizeHandlers]) fn() }
     }
@@ -159,7 +336,11 @@ function makeWindow(fields) {
     return w
 }
 
-function buildRuntime(initialBlob = '{}') {
+function buildRuntime(initialBlob = '{}', config = {}) {
+    fakeKWin.config = config
+    fakeWorkspace.activeWindow = null
+    fakeWorkspace._customRoots = new Map()
+    fakeWorkspace._quickRoots = new Map()
     const Qt = {
         rect: (x, y, w, h) => ({ x, y, width: w, height: h }),
         point: (x, y) => ({ x, y })
@@ -187,6 +368,7 @@ function buildRuntime(initialBlob = '{}') {
         var Date = { now: function () { return now } };
         var console = { warn: function (m) { logs.push(String(m)) } };
         var debugMode = true;
+        var restoreTiles = true;
         var storeKey = 'windowgeometryrestore_windows';
         var defaultBlacklist = '';
         var blacklist = Engine.parseList('');
@@ -852,4 +1034,500 @@ test('a failing geometry retry does not stop other sessions from ending', () => 
     rt.tick()
     assert.equal(rt.liveRef().q.session, null, 'q session ended at its deadline')
     assert.equal(rt.tickRef().running, false, 'timer stops once idle')
+})
+
+const savedApp = (rt, cls) => JSON.parse(rt.blobRef()).apps[cls]
+
+test('a quick-tiled window saves its tile and the size it had before tiling', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(makeQuickRoot(outputs[0]).tiles[0])
+    assert.equal(w.width, 960, 'window sits in the left half')
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.deepEqual(s.t, { k: 'q', i: 0, g: { x: 0, y: 0, w: 0.5, h: 1 } })
+    assert.deepEqual(s.f, { x: 300, y: 200, w: 1000, h: 700, o: { x: 300, y: 200, s: 'SER-1', n: 'DP-1' } })
+    assert.deepEqual([s.x, s.y, s.w, s.h], [0, 0, 960, 1080], 'plain geometry is the tile rect, as before')
+})
+
+test('a custom-tiled window saves the tile path and its relative geometry', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'term', caption: 'Term', x: 50, y: 60, width: 640, height: 480 })
+    rt.trackWindow(w)
+    w._tileTo(makeCustomRoot(outputs[0]).tiles[1].tiles[1])
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'term').w
+    assert.deepEqual(s.t, { k: 'c', p: [1, 1], g: { x: 0.4, y: 0.5, w: 0.6, h: 0.5 } })
+    assert.equal(s.f.w, 640)
+    assert.equal(s.f.h, 480)
+})
+
+test('a tile KWin drops while closing the window is still saved', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(makeQuickRoot(outputs[0]).tiles[1])
+    w.tile = null
+    w._emit('tileChanged')
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.deepEqual(s.t, { k: 'q', i: 1, g: { x: 0.5, y: 0, w: 0.5, h: 1 } })
+    assert.equal(s.f.w, 1000)
+})
+
+test('frames seen while tiled never replace the pre-tile size', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    const quick = makeQuickRoot(outputs[0])
+    w._tileTo(quick.tiles[0])
+    w._tileTo(quick.tiles[4])
+    quick.tiles[4].relativeGeometry = { x: 0, y: 0, width: 0.6, height: 0.5 } // the user resizes the tile
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.deepEqual(s.t, { k: 'q', i: 4, g: { x: 0, y: 0, w: 0.6, h: 0.5 } })
+    assert.deepEqual([s.f.w, s.f.h], [1000, 700])
+})
+
+test('a window dragged out of its tile saves as a plain floating window', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(makeQuickRoot(outputs[0]).tiles[0])
+    w._dragOut(500, 300)
+    assert.deepEqual([w.width, w.height], [1000, 700], 'KWin gave back the pre-tile size')
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.equal(s.t, undefined)
+    assert.equal(s.f, undefined)
+    assert.deepEqual([s.x, s.y, s.w, s.h], [500, 300, 1000, 700])
+})
+
+test('maximized and fullscreen frames are not taken as the pre-tile size', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 }) // maximized
+    w.fullScreen = true
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1081 })
+    w.fullScreen = false
+    w._setFrame({ x: 300, y: 200, width: 1000, height: 700 })
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w._tileTo(makeQuickRoot(outputs[0]).tiles[1])
+
+    w.emitClosed()
+    assert.deepEqual([savedApp(rt, 'editor').w[0].f.w, savedApp(rt, 'editor').w[0].f.h], [1000, 700])
+})
+
+test('a window already tiled when the script starts saves its tile without a pre-tile size', () => {
+    const existing = makeWindow({ cls: 'editor', caption: 'Editor', x: 0, y: 0, width: 960, height: 1080 })
+    existing.tile = makeQuickRoot(outputs[0]).tiles[0]
+    fakeWorkspace.stackingOrder = [existing]
+    let rt
+    try {
+        rt = buildRuntime()
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+
+    existing.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.deepEqual(s.t, { k: 'q', i: 0, g: { x: 0, y: 0, w: 0.5, h: 1 } })
+    assert.equal(s.f, undefined, 'unknown: the restore falls back to the tile rect')
+})
+
+test('a tile that cannot be identified saves the window as plain geometry', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    const quick = makeQuickRoot(outputs[0])
+    const stray = quick.tiles.pop() // detached from its parent: no index to save
+    w._tileTo(stray)
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'editor').w
+    assert.equal(s.t, undefined)
+    assert.equal(s.w, 960)
+})
+
+test('shutdown saves tiles too and disconnects the geometry and tile handlers', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'editor', caption: 'Editor', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(makeCustomRoot(outputs[0]).tiles[0])
+    assert.equal(w._connected('frameGeometryChanged'), 1)
+    assert.equal(w._connected('tileChanged'), 1)
+
+    rt.shutdown()
+    assert.deepEqual(savedApp(rt, 'editor').w[0].t, { k: 'c', p: [0], g: { x: 0, y: 0, w: 0.4, h: 1 } })
+    assert.equal(w._connected('frameGeometryChanged'), 0)
+    assert.equal(w._connected('tileChanged'), 0)
+})
+
+// Saves a window tiled into `tile` from a floating 1000x700 at (300, 200) on DP-1.
+function saveTiled(rt, cls, tile) {
+    const w = makeWindow({ cls, caption: 'Doc', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    w._tileTo(tile)
+    w.emitClosed()
+}
+
+const reopen = (rt, cls, fields = {}) => {
+    const w = makeWindow({ cls, caption: 'Doc', x: 40, y: 40, width: 960, height: 1080, ...fields })
+    if (fields.active) {
+        w.active = true
+        fakeWorkspace.activeWindow = w
+    }
+    rt.trackWindow(w)
+    return w
+}
+
+test('a custom-tiled window reopens in its tile, and a drag out gives back the pre-tile size', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set(outputs[0], layout)
+    saveTiled(rt, 'doc', layout.tiles[1].tiles[0])
+
+    const w = reopen(rt, 'doc')
+    assert.equal(w.tile, layout.tiles[1].tiles[0], 'back in the same tile')
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 }, 'KWin holds the pre-tile geometry')
+    assert.equal(rt.retriesRef().length, 1)
+    rt.tick()
+    assert.equal(rt.retriesRef().length, 0, 'the pre-tile geometry retry stops once the window is tiled')
+    w._dragOut(600, 400)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [600, 400, 1000, 700])
+})
+
+test('a quick-tiled window reopens in its quick tile once it is active', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[5])
+
+    const w = reopen(rt, 'doc', { active: true })
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[5], 'top-right quarter')
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 })
+})
+
+test('quick-tiling waits for the window to become active and never activates it', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const other = makeWindow({ cls: 'other', caption: 'Other' })
+    other._activate()
+
+    const w = reopen(rt, 'doc')
+    assert.equal(w.tile, null, 'not tiled while in the background')
+    assert.deepEqual([w.x, w.y, w.width, w.height], [300, 200, 1000, 700], 'waits at its pre-tile geometry')
+    assert.equal(fakeWorkspace.activeWindow, other, 'focus untouched')
+
+    sleepTick(rt, 2000)
+    w._activate()
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0])
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 })
+    assert.equal(w._connected('activeChanged'), 0, 'stops listening once tiled')
+})
+
+test('a window that becomes active after the restore window is not quick-tiled', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+
+    const w = reopen(rt, 'doc')
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    w._activate()
+    assert.equal(w.tile, null)
+    assert.deepEqual([w.width, w.height], [1000, 700], 'keeps its floating size')
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a window the user moves before it is active is not quick-tiled', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+
+    const w = reopen(rt, 'doc')
+    w.emitMoveResizeStarted()
+    w._activate()
+    assert.equal(w.tile, null)
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a window already quick-tiled on the same screen lets a background window tile at once', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    const neighbour = makeWindow({ cls: 'other', caption: 'Other' })
+    neighbour._tileTo(quickRootOf(outputs[0]).tiles[0])
+    fakeWorkspace.stackingOrder = [neighbour]
+    let w
+    try {
+        w = reopen(rt, 'doc')
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[1], 'tiled without being active')
+    assert.equal(w._restoreGeometry.width, 1000)
+})
+
+test('a quick-tiled neighbour on another desktop or screen is not used', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    const elsewhere = makeWindow({ cls: 'a', caption: 'A', desktop: 2 })
+    elsewhere._tileTo(makeQuickRoot(outputs[0]).tiles[0])
+    const otherScreen = makeWindow({ cls: 'b', caption: 'B', outputIndex: 1 })
+    otherScreen._tileTo(makeQuickRoot(outputs[1]).tiles[0])
+    fakeWorkspace.stackingOrder = [elsewhere, otherScreen]
+    let w
+    try {
+        w = reopen(rt, 'doc')
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(w.tile, null, 'waits for activation instead')
+})
+
+test('after a layout edit the custom tile is found again by its geometry', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeCustomRoot(outputs[0]).tiles[1].tiles[1])
+    // Same right-bottom tile, but the left column is now split, so the path moved.
+    const edited = makeTile(outputs[0], null, { x: 0, y: 0, width: 1, height: 1 }, true)
+    const right = makeTile(outputs[0], edited, { x: 0.4, y: 0, width: 0.6, height: 1 }, true)
+    const left = makeTile(outputs[0], edited, { x: 0, y: 0, width: 0.4, height: 1 }, true)
+    makeTile(outputs[0], left, { x: 0, y: 0, width: 0.4, height: 0.5 }, true)
+    makeTile(outputs[0], left, { x: 0, y: 0.5, width: 0.4, height: 0.5 }, true)
+    makeTile(outputs[0], right, { x: 0.4, y: 0, width: 0.6, height: 0.5 }, true)
+    const target = makeTile(outputs[0], right, { x: 0.4, y: 0.5, width: 0.6, height: 0.5 }, true)
+    fakeWorkspace._customRoots.set(outputs[0], edited)
+
+    const w = reopen(rt, 'doc')
+    assert.equal(w.tile, target)
+})
+
+test('a custom tile that no longer exists restores plain geometry at the tile rect', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeCustomRoot(outputs[0]).tiles[0])
+    const other = makeTile(outputs[0], null, { x: 0, y: 0, width: 1, height: 1 }, true)
+    makeTile(outputs[0], other, { x: 0, y: 0, width: 0.5, height: 1 }, true)
+    makeTile(outputs[0], other, { x: 0.5, y: 0, width: 0.5, height: 1 }, true)
+    fakeWorkspace._customRoots.set(outputs[0], other)
+
+    const w = reopen(rt, 'doc', { x: 500, y: 500, width: 640, height: 480 })
+    assert.equal(w.tile, null)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [0, 0, 768, 1080], 'today\'s behaviour: the tile rect')
+    assert.ok(rt.getLogs().some((l) => l.includes('saved tile is not in the current layout')))
+})
+
+test('with tile restore turned off, tiled saves reopen floating at the tile rect', () => {
+    const rt = buildRuntime('{}', { restoreTiles: false })
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    assert.ok(savedApp(rt, 'doc').w[0].t, 'tiles are still saved, so turning it back on works at once')
+
+    const w = reopen(rt, 'doc', { active: true, x: 10, y: 10, width: 640, height: 480 })
+    assert.equal(w.tile, null)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [960, 0, 960, 1080])
+})
+
+test('a tiled save whose screen is missing restores plain geometry, then tiles once the screen is back', () => {
+    const rt = buildRuntime()
+    const w0 = makeWindow({ cls: 'doc', caption: 'Doc', x: 2100, y: 100, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w0)
+    const layout = makeCustomRoot(outputs[1])
+    w0._tileTo(layout.tiles[0])
+    w0.emitClosed()
+    fakeWorkspace._customRoots.set(outputs[1], layout)
+
+    fakeWorkspace.screens = [outputs[0]]
+    let w
+    try {
+        w = reopen(rt, 'doc', { width: 640, height: 480 })
+        assert.equal(w.tile, null, 'not tiled on the fallback screen')
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+        w._output = outputs[1]
+        rt.reapplyProvisional()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    assert.equal(w.tile, layout.tiles[0], 'tiled once its own screen showed up')
+    assert.equal(w._restoreGeometry.width, 900)
+})
+
+test('a tiled save without a pre-tile size goes to the tile rect, then into the tile', () => {
+    const existing = makeWindow({ cls: 'doc', caption: 'Doc', x: 0, y: 0, width: 960, height: 1080 })
+    existing.tile = makeQuickRoot(outputs[0]).tiles[0]
+    fakeWorkspace.stackingOrder = [existing]
+    let rt
+    try {
+        rt = buildRuntime()
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    existing.emitClosed()
+
+    const w = reopen(rt, 'doc', { active: true, x: 300, y: 300, width: 640, height: 480 })
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0])
+    assert.deepEqual(w._restoreGeometry, { x: 0, y: 0, width: 960, height: 1080 })
+})
+
+test('fixed-size windows are not tiled', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', x: 40, y: 40, width: 1000, height: 700 })
+    w.resizeable = false
+    w.active = true
+    fakeWorkspace.activeWindow = w
+    rt.trackWindow(w)
+    assert.equal(w.tile, null)
+    assert.deepEqual([w.x, w.y], [0, 0], 'position restored as before')
+})
+
+test('closing a window that waits for its quick tile stops listening for activation', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const w = reopen(rt, 'doc')
+    assert.equal(w._connected('activeChanged'), 1)
+    w.emitClosed()
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a pre-tile geometry on a missing screen still tiles, starting from the tile rect', () => {
+    const rt = buildRuntime()
+    const w0 = makeWindow({ cls: 'doc', caption: 'Doc', x: 2100, y: 100, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w0)
+    w0._output = outputs[0] // dragged over to DP-1 and into its left quick tile
+    w0._tileTo(makeQuickRoot(outputs[0]).tiles[0])
+    w0.emitClosed()
+    assert.equal(savedApp(rt, 'doc').w[0].f.o.n, 'HDMI-A-1')
+
+    fakeWorkspace.screens = [outputs[0]]
+    let w
+    try {
+        w = reopen(rt, 'doc', { active: true, width: 640, height: 480 })
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0])
+    assert.deepEqual(w._restoreGeometry, { x: 0, y: 0, width: 960, height: 1080 })
+})
+
+test('a window that changed screens while waiting is not quick-tiled on the wrong one', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const w = reopen(rt, 'doc')
+    w._output = outputs[1] // a window rule or the app moved it
+    w._activate()
+    assert.equal(w.tile, null)
+    w._output = outputs[0]
+    w._setFrame({ x: 310, y: 200, width: 1000, height: 700 })
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[0], 'tiles once it is back on its screen')
+})
+
+test('on Wayland a window opening on another screen is quick-tiled once it reaches its own', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[1])
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', x: 2100, y: 100, width: 640, height: 480, outputIndex: 1 })
+    w._async = true
+    w._activate()
+    rt.trackWindow(w)
+    assert.equal(w.tile, null, 'still on HDMI-A-1 until the frame arrives')
+
+    w._commit(outputs[0])
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[1])
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 })
+    assert.equal(w._connected('activeChanged'), 0)
+})
+
+test('a saved custom tile that was split since is not used as a tile', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeCustomRoot(outputs[0]).tiles[0])
+    const edited = makeCustomRoot(outputs[0])
+    makeTile(outputs[0], edited.tiles[0], { x: 0, y: 0, width: 0.4, height: 0.5 }, true)
+    makeTile(outputs[0], edited.tiles[0], { x: 0, y: 0.5, width: 0.4, height: 0.5 }, true)
+    fakeWorkspace._customRoots.set(outputs[0], edited)
+
+    const w = reopen(rt, 'doc', { x: 500, y: 500, width: 640, height: 480 })
+    assert.equal(w.tile, null)
+    assert.equal(w.width, 768, 'plain restore at the tile rect')
+})
+
+test('on Wayland the pre-tile geometry is kept although its frame arrives after tiling', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set(outputs[0], layout)
+    saveTiled(rt, 'doc', layout.tiles[0])
+
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', x: 40, y: 40, width: 640, height: 480 })
+    w._async = true
+    rt.trackWindow(w)
+    assert.equal(w.tile, layout.tiles[0])
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 })
+
+    w.emitClosed()
+    const [s] = savedApp(rt, 'doc').w
+    assert.deepEqual(s.f, { x: 300, y: 200, w: 1000, h: 700, o: { x: 300, y: 200, s: 'SER-1', n: 'DP-1' } }, 'not the app\'s default placement')
+})
+
+test('a resized quick tile is saved at its size although KWin resets the split at close', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'mon', caption: 'Mon', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    const root = quickRootOf(outputs[0])
+    w._tileTo(root.tiles[0])
+    root.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.68, height: 1 } // the user drags the tile edge
+    assert.equal(w.width, 1306)
+
+    w.emitClosed()
+    assert.equal(root.tiles[0].relativeGeometry.width, 0.5, 'KWin reset the split before the script saw the close')
+    assert.deepEqual(savedApp(rt, 'mon').w[0].t, { k: 'q', i: 0, g: { x: 0, y: 0, w: 0.68, h: 1 } })
+})
+
+test('a resized quick tile reopens at its size, with the pre-tile size kept for a drag out', () => {
+    const rt = buildRuntime()
+    const w0 = makeWindow({ cls: 'mon', caption: 'Mon', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    const root = quickRootOf(outputs[0])
+    w0._tileTo(root.tiles[0])
+    root.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.68, height: 1 }
+    w0.emitClosed()
+
+    const w = reopen(rt, 'mon', { caption: 'Mon', active: true })
+    assert.equal(w.tile, root.tiles[0])
+    assert.deepEqual([w.x, w.y, w.width, w.height], [0, 0, 1306, 1080], 'the resized tile, not a half')
+    assert.deepEqual(w._restoreGeometry, { x: 300, y: 200, width: 1000, height: 700 })
+    w._dragOut(500, 300)
+    assert.deepEqual([w.width, w.height], [1000, 700])
+})
+
+test('the saved split comes back even when a neighbour shares the quick layout', () => {
+    const rt = buildRuntime()
+    const root = quickRootOf(outputs[0])
+    const neighbour = makeWindow({ cls: 'term', caption: 'Term' })
+    neighbour._tileTo(root.tiles[1])
+    const w0 = makeWindow({ cls: 'mon', caption: 'Mon', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    w0._tileTo(root.tiles[0])
+    root.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.68, height: 1 }
+    w0.emitClosed()
+    root.tiles[1].relativeGeometry = { x: 0.4932, y: 0, width: 0.5068, height: 1 } // later, the neighbour is resized
+    fakeWorkspace.stackingOrder = [neighbour]
+    let w
+    try {
+        w = reopen(rt, 'mon', { caption: 'Mon' })
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(w.tile, root.tiles[0], 'tiled through the neighbour, without focus')
+    assert.equal(w.width, 1306)
+    assert.equal(neighbour.x, 1306, 'the neighbour follows the shared split, as with a manual resize')
+    assert.equal(neighbour.width, 614)
+})
+
+test('saves from before quick tile sizes were recorded still restore into the tile', () => {
+    const blob = JSON.stringify({ version: 2, apps: { mon: { t: 1000000000, w: [
+        { c: 'Mon', x: 0, y: 0, w: 960, h: 1080, o: { x: 0, y: 0, s: 'SER-1', n: 'DP-1' }, t: { k: 'q', i: 1 }, f: { x: 300, y: 200, w: 1000, h: 700, o: null } }
+    ] } } })
+    const rt = buildRuntime(blob)
+    const w = reopen(rt, 'mon', { caption: 'Mon', active: true })
+    assert.equal(w.tile, quickRootOf(outputs[0]).tiles[1])
+    assert.equal(w.width, 960)
 })

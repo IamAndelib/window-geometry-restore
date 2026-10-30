@@ -3,8 +3,13 @@
 // Persisted key legend (compact on purpose - the blob lives in a single KConfig entry):
 //   app:  { t: lastAccessTime, w: [saves] }
 //   save: { c: caption, x: globalX, y: globalY, w: width, h: height,
-//           o: { x, y, s: outputSerial, n: outputName }  output-relative position }
-//   Only geometry is saved and restored; everything else is left to KWin.
+//           o: { x, y, s: outputSerial, n: outputName }  output-relative position,
+//           t: tile (only when tiled at close):
+//              { k: 'q', i: quickTileIndex, g: { x, y, w, h } }  KWin's order: L, R, T, B, TL, TR, BL, BR
+//              { k: 'c', p: [childIndexes], g: { x, y, w, h } }  custom tile, relativeGeometry
+//           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own }
+//   Only geometry (and the tile a window sat in) is saved and restored; everything
+//   else is left to KWin.
 //   Runtime save objects use the long names below and are never mutated.
 //   v1 blobs (which also stored desktop/activities/state flags) decode fine - those
 //   fields are simply ignored.
@@ -19,6 +24,14 @@ var TICK_MS = 250
 var MAX_BUFFER = 64
 var EXPIRY_MS = 30 * 24 * 60 * 60 * 1000
 var MAX_APPS = 500
+// KWin creates the quick tiles in this order; the actions quick-tile the active window.
+var QUICK_TILE_ACTIONS = [
+    'slotWindowQuickTileLeft', 'slotWindowQuickTileRight', 'slotWindowQuickTileTop', 'slotWindowQuickTileBottom',
+    'slotWindowQuickTileTopLeft', 'slotWindowQuickTileTopRight', 'slotWindowQuickTileBottomLeft', 'slotWindowQuickTileBottomRight'
+]
+var QUICK_TILES = QUICK_TILE_ACTIONS.length
+var TILE_TOLERANCE = 0.01
+var MAX_TILE_DEPTH = 32
 
 function numberOr(value, fallback) {
     var n = typeof value === 'number' ? value : parseFloat(value)
@@ -127,7 +140,9 @@ function makeSave(fields) {
         y: fields.y,
         width: fields.width,
         height: fields.height,
-        output: fields.output || null
+        output: fields.output || null,
+        tile: fields.tile || null,
+        free: fields.free || null
     }
 }
 
@@ -135,41 +150,87 @@ function newState() {
     return { apps: {} }
 }
 
-function encodeSave(s) {
-    var o = null
-    if (s.output) o = { x: s.output.x, y: s.output.y, s: s.output.serial, n: s.output.name }
+function encodeOutput(output) {
+    return output ? { x: output.x, y: output.y, s: output.serial, n: output.name } : null
+}
+
+function decodeOutput(o) {
+    if (!isObject(o)) return null
     return {
+        x: numberOr(o.x, 0),
+        y: numberOr(o.y, 0),
+        serial: typeof o.s === 'string' ? o.s : '',
+        name: typeof o.n === 'string' ? o.n : ''
+    }
+}
+
+// A rect with a usable size, or null.
+function decodeGeometry(g) {
+    if (!isObject(g)) return null
+    var width = numberOr(g.w, NaN)
+    var height = numberOr(g.h, NaN)
+    if (!(width >= 1) || !(height >= 1)) return null
+    return { x: numberOr(g.x, 0), y: numberOr(g.y, 0), width: width, height: height, output: decodeOutput(g.o) }
+}
+
+function isIndex(value, limit) {
+    return typeof value === 'number' && value >= 0 && value < limit && Math.floor(value) === value
+}
+
+function encodeTile(tile) {
+    var g = tile.rel ? { x: tile.rel.x, y: tile.rel.y, w: tile.rel.width, h: tile.rel.height } : undefined
+    if (tile.kind === 'quick') return g ? { k: 'q', i: tile.index, g: g } : { k: 'q', i: tile.index }
+    return { k: 'c', p: tile.path, g: g }
+}
+
+// A tile's relativeGeometry: fractions of the screen, inside it.
+function decodeRel(g) {
+    if (!isObject(g)) return null
+    var rel = { x: g.x, y: g.y, width: g.w, height: g.h }
+    for (var key in rel) {
+        if (typeof rel[key] !== 'number' || !isFinite(rel[key])) return null
+    }
+    var slack = 0.001
+    if (rel.x < 0 || rel.y < 0 || !(rel.width > 0) || !(rel.height > 0) ||
+            rel.x + rel.width > 1 + slack || rel.y + rel.height > 1 + slack) return null
+    return rel
+}
+
+// Anything unexpected is rejected: the save then restores as plain geometry. A quick tile
+// without a usable size (older saves) still restores into the tile, at KWin's current size.
+function decodeTile(t) {
+    if (!isObject(t)) return null
+    if (t.k === 'q') return isIndex(t.i, QUICK_TILES) ? { kind: 'quick', index: t.i, rel: decodeRel(t.g) } : null
+    if (t.k !== 'c' || !Array.isArray(t.p) || t.p.length > MAX_TILE_DEPTH) return null
+    for (var i = 0; i < t.p.length; i++) {
+        if (!isIndex(t.p[i], Infinity)) return null
+    }
+    var rel = decodeRel(t.g)
+    return rel ? { kind: 'custom', path: t.p.slice(), rel: rel } : null
+}
+
+function encodeSave(s) {
+    var out = {
         c: s.caption,
         x: s.x,
         y: s.y,
         w: s.width,
         h: s.height,
-        o: o
+        o: encodeOutput(s.output)
     }
+    if (s.tile) out.t = encodeTile(s.tile)
+    if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
+    return out
 }
 
 function decodeSave(s) {
-    if (!isObject(s)) return null
-    var width = numberOr(s.w, NaN)
-    var height = numberOr(s.h, NaN)
-    if (!(width >= 1) || !(height >= 1)) return null
-    var output = null
-    if (isObject(s.o)) {
-        output = {
-            x: numberOr(s.o.x, 0),
-            y: numberOr(s.o.y, 0),
-            serial: typeof s.o.s === 'string' ? s.o.s : '',
-            name: typeof s.o.n === 'string' ? s.o.n : ''
-        }
-    }
-    return makeSave({
-        caption: typeof s.c === 'string' ? s.c : '',
-        x: numberOr(s.x, 0),
-        y: numberOr(s.y, 0),
-        width: width,
-        height: height,
-        output: output
-    })
+    var geometry = decodeGeometry(s)
+    if (!geometry) return null
+    var tile = decodeTile(s.t)
+    geometry.caption = typeof s.c === 'string' ? s.c : ''
+    geometry.tile = tile
+    geometry.free = tile ? decodeGeometry(s.f) : null
+    return makeSave(geometry)
 }
 
 // Never throws. Returns { state, error } - error is null when the blob was usable.
