@@ -382,3 +382,71 @@ function mergeDiskApps(state, diskState) {
     }
     return adopted
 }
+
+// KWin window rules (kwinrulesrc) that place or size windows. KWin does not tell scripts which
+// rules apply to a window, so the rules file is read and matched here, erring towards "a rule
+// applies": the script then leaves that window to KWin.
+// Rule kinds that last: Force (2), Apply initially (3), Remember (4), Force temporarily (6).
+// Don't affect (1) and Apply now (5, a one-time change) leave new windows alone.
+var RULE_GEOMETRY = ['position', 'size', 'screen', 'placement']
+var RULE_KINDS = [2, 3, 4, 6]
+var NORMAL_WINDOW_TYPE = 1
+
+// `read(key)` returns a value from the rules file as QSettings reads it: [General] keys at
+// the top level, rule groups as "group/key". Rules ids come from General/rules, or, in older
+// files, the groups 1..count.
+function parseRules(read) {
+    var ids = read('rules')
+    if (typeof ids === 'string') ids = ids.length ? ids.split(',') : []
+    if (!Array.isArray(ids) || !ids.length) {
+        ids = []
+        var count = parseInt(read('count'), 10) || 0
+        for (var n = 1; n <= count; n++) ids.push(String(n))
+    }
+    var rules = []
+    for (var i = 0; i < ids.length; i++) {
+        var id = String(ids[i]).trim()
+        if (!id) continue
+        var geometry = []
+        for (var j = 0; j < RULE_GEOMETRY.length; j++) {
+            if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
+        }
+        if (!geometry.length) continue
+        var text = function (key) { var v = read(id + '/' + key); return v === undefined || v === null ? '' : String(v) }
+        rules.push({
+            id: id, description: text('Description'), geometry: geometry,
+            wmclass: text('wmclass'), wmclassmatch: text('wmclassmatch'), wmclasscomplete: text('wmclasscomplete') === 'true',
+            title: text('title'), titlematch: text('titlematch'), types: text('types')
+        })
+    }
+    return rules
+}
+
+// KWin's string matches: 0 unimportant, 1 exact, 2 substring, 3 regular expression.
+function matchesRuleText(value, pattern, mode) {
+    mode = parseInt(mode, 10) || 0
+    if (mode === 0) return true
+    value = String(value).toLowerCase()
+    if (mode === 1) return value === pattern.toLowerCase()
+    if (mode === 2) return value.indexOf(pattern.toLowerCase()) !== -1
+    try {
+        return new RegExp(pattern, 'i').test(value)
+    } catch (e) {
+        return true
+    }
+}
+
+// The first rule that places or sizes this window, or null. `win`: { resourceClass,
+// resourceName, caption }. Conditions the script can't check (window role, machine) are
+// treated as met.
+function geometryRuleFor(rules, win) {
+    for (var i = 0; i < rules.length; i++) {
+        var r = rules[i]
+        if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) continue
+        var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
+        if (!matchesRuleText(cls, r.wmclass, r.wmclassmatch)) continue
+        if (!matchesRuleText(win.caption, r.title, r.titlematch)) continue
+        return r
+    }
+    return null
+}

@@ -170,10 +170,42 @@ Item {
         entry.desktopsHandler = connectSignal(w, 'desktopsChanged', function () { onDesktopsChanged(id) })
         noteGeometry(id)
         dbg('tracking window for ' + entry.label)
+        var rule = adopted ? null : geometryRuleOf(w)
         if (adopted) {
             app.settled = true
+        } else if (rule) {
+            // Still saved, so removing the rule brings restores back; the app's other windows
+            // restore as usual.
+            entry.assigned = true
+            log(entry.label + ': a KWin window rule places this window (' + (rule.description || rule.id) + '), leaving it to KWin')
+            if (app.session || startSession(entry.group)) {
+                app.session.deadline = Math.max(app.session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
+            }
         } else if (app.session || startSession(entry.group)) {
             joinSession(entry.group, id)
+        }
+    }
+
+    // The first KWin window rule that places or sizes this window, or null. The rules file is
+    // read afresh, never created or written: StandardPaths finds it only if it exists.
+    function geometryRuleOf(w) {
+        try {
+            var url = String(StandardPaths.locate(StandardPaths.GenericConfigLocation, 'kwinrulesrc') || '')
+            if (!url) return null
+            var file = Qt.createQmlObject('import QtCore; Settings { location: ' + JSON.stringify(url) + ' }', root)
+            try {
+                var rules = Engine.parseRules(function (key) { return file.value(key, undefined) })
+                return Engine.geometryRuleFor(rules, {
+                    resourceClass: String(w.resourceClass),
+                    resourceName: String(w.resourceName || ''),
+                    caption: String(w.caption || '')
+                })
+            } finally {
+                file.destroy()
+            }
+        } catch (e) {
+            dbg('reading KWin window rules failed: ' + e)
+            return null
         }
     }
 

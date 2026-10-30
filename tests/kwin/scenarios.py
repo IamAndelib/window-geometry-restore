@@ -71,6 +71,7 @@ def s_returns_to_its_monitor():
         check(logged(log, "restored window to saved state (moved)"), "precondition: KWin placed it elsewhere: %s" % log)
         check(rect(w) == (2300, 150, 900, 600), "restored geometry %s" % (rect(w),))
         check(w["output"] == "Virtual-1", "back on monitor 2, got %s" % w["output"])
+        check(not (sb.root / "config" / "kwinrulesrc").exists(), "no KWin rules file created")
 
 
 def s_logout_login():

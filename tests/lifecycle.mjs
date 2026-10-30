@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE, layoutFor, recordLayout };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE, layoutFor, recordLayout, parseRules, geometryRuleFor };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -40,7 +40,7 @@ const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
-    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'copyGeometry', 'describeTile',
+    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'geometryRuleOf', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'copyGeometry', 'describeTile',
     'noteTile', 'noteGeometry', 'snapshotWindow',
     'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
@@ -347,14 +347,28 @@ function makeWindow(fields) {
     return w
 }
 
-function buildRuntime(initialBlob = '{}', config = {}) {
+// `rules`: the user's kwinrulesrc as QSettings reads it ({ 'rules': 'id', 'id/wmclass': ... }),
+// or null for no rules file.
+function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
     fakeKWin.config = config
     fakeWorkspace.activeWindow = null
     fakeWorkspace._customRoots = new Map()
     fakeWorkspace._quickRoots = new Map()
+    const rulesFiles = []
     const Qt = {
         rect: (x, y, w, h) => ({ x, y, width: w, height: h }),
-        point: (x, y) => ({ x, y })
+        point: (x, y) => ({ x, y }),
+        // Only a Settings object for the rules file is ever created.
+        createQmlObject: (source) => {
+            assert.match(source, /^import QtCore; Settings \{ location: "file:\/\/\/sandbox\/kwinrulesrc" \}$/)
+            const file = { destroyed: false, value: (key, fallback) => (key in rules ? rules[key] : fallback), destroy() { this.destroyed = true } }
+            rulesFiles.push(file)
+            return file
+        }
+    }
+    const StandardPaths = {
+        GenericConfigLocation: 13,
+        locate: (location, name) => (location === 13 && name === 'kwinrulesrc' && rules ? 'file:///sandbox/kwinrulesrc' : '')
     }
 
     const Workspace = fakeWorkspace
@@ -387,6 +401,7 @@ function buildRuntime(initialBlob = '{}', config = {}) {
         var live = {};
         var tracked = {};
         var retries = [];
+        var root = {};
         ${Object.keys(extracted).map((name) => {
             const fn = extracted[name]
             return `function ${name}(${fn.params}) ${fn.body}`
@@ -394,9 +409,10 @@ function buildRuntime(initialBlob = '{}', config = {}) {
         return { ${Object.keys(extracted).join(', ')}, trackedRef: () => tracked, storeRef: () => store, liveRef: () => live, retriesRef: () => retries, blobRef: () => settings.value(storeKey, '{}'), stored, getLogs: () => logs, nowRef: () => now, setNow: (n) => { now = n }, tick: onTick, tickRef: () => tickTimer };
     `
 
-    const runtime = new Function('Engine', 'Workspace', 'KWin', 'Qt', 'settings', 'tickTimer', 'stored', `
+    const runtime = new Function('Engine', 'Workspace', 'KWin', 'Qt', 'StandardPaths', 'settings', 'tickTimer', 'stored', `
         ${scope}
-    `)(Engine, Workspace, KWin, Qt, settings, tickTimer, stored)
+    `)(Engine, Workspace, KWin, Qt, StandardPaths, settings, tickTimer, stored)
+    runtime.rulesFiles = rulesFiles
 
     fakeWorkspace.removed = runtime.handleRemoved
     runtime.startup()
@@ -1881,4 +1897,67 @@ test('a monitor that comes back under another connector name counts as the windo
     }
     const [s] = savedApp(rt, 'app').w
     assert.deepEqual([s.x, s.y, s.o.n], [2300, 250, 'HDMI-A-2'])
+})
+
+const positionRule = (extra = {}) => ({ rules: 'r1', 'r1/Description': 'Konsole at 100,100', 'r1/wmclass': 'konsole',
+    'r1/wmclassmatch': '1', 'r1/position': '100,100', 'r1/positionrule': '3', ...extra })
+
+test('a window a KWin rule places is left to KWin, and still saved', () => {
+    const rt = buildRuntime('{}', {}, positionRule())
+    saveOn(rt, 'konsole', 1, { x: 900, y: 400, width: 700, height: 500 })
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 100, y: 100, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._geometryWrites, 0, 'the rule\'s placement stays')
+    assert.ok(rt.getLogs().some((l) => l.includes('a KWin window rule places this window (Konsole at 100,100), leaving it to KWin')))
+    assert.ok(rt.rulesFiles.length > 0 && rt.rulesFiles.every((f) => f.destroyed), 'the rules file was read, then let go')
+    w._setFrame({ x: 120, y: 130, width: 640, height: 480 })
+    w.emitClosed()
+    assert.equal(savedApp(rt, 'konsole').d['desk-uuid-1'].w[0].x, 120)
+})
+
+test('a rule for one window of an app leaves its other windows restoring', () => {
+    const rt = buildRuntime('{}', {}, positionRule({ 'r1/title': 'Pinned', 'r1/titlematch': '2' }))
+    const a = makeWindow({ cls: 'konsole', caption: 'Pinned', x: 100, y: 100, width: 640, height: 480 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Work', x: 900, y: 300, width: 800, height: 600 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    const pinned = makeWindow({ cls: 'konsole', caption: 'Pinned', x: 100, y: 100, width: 640, height: 480 })
+    rt.trackWindow(pinned)
+    const work = makeWindow({ cls: 'konsole', caption: 'Work', x: 0, y: 0, width: 800, height: 600 })
+    rt.trackWindow(work)
+    assert.equal(pinned._geometryWrites, 0)
+    assert.equal(work.x, 900, 'restored, although the ruled window opened first')
+})
+
+test('a rule for another app, or one that does not place windows, changes nothing', () => {
+    for (const rules of [positionRule({ 'r1/wmclass': 'dolphin' }), positionRule({ 'r1/positionrule': '1' })]) {
+        const rt = buildRuntime('{}', {}, rules)
+        saveOn(rt, 'konsole', 1, { x: 900, y: 400, width: 700, height: 500 })
+        const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+        assert.equal(w.x, 900)
+    }
+})
+
+test('without a rules file, nothing is read or created', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'konsole', 1, { x: 900, y: 400, width: 700, height: 500 })
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w.x, 900)
+    assert.equal(rt.rulesFiles.length, 0)
+})
+
+test('an app whose first window a rule places counts as running: later windows are not restored', () => {
+    const rt = buildRuntime('{}', {}, positionRule({ 'r1/title': 'Pinned', 'r1/titlematch': '2' }))
+    saveOn(rt, 'konsole', 1, { x: 900, y: 400, width: 700, height: 500 })
+    const pinned = makeWindow({ cls: 'konsole', caption: 'Pinned', x: 100, y: 100, width: 640, height: 480 })
+    rt.trackWindow(pinned)
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    const later = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(later)
+    assert.equal(later._geometryWrites, 0)
 })

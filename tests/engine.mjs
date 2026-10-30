@@ -10,7 +10,7 @@ const engine = new Function(`
     return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
              MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
              parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, newState,
-             decodeState, encodeState, pruneExpired, mergeDiskApps, layoutFor, recordLayout, MAX_DESKTOP_KEY };
+             decodeState, encodeState, pruneExpired, mergeDiskApps, layoutFor, recordLayout, MAX_DESKTOP_KEY, parseRules, geometryRuleFor };
 `)()
 
 function save(overrides = {}) {
@@ -392,6 +392,62 @@ test('mergeDiskApps adopts desktop layouts missing from memory; memory wins per 
     assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-1').saves[0].caption, 'memory')
     assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-2').saves[0].caption, 'other instance')
     assert.equal(memory.apps['konsole'].saves[0].caption, 'memory', 'w stays the in-memory latest')
+})
+
+// A kwinrulesrc as QSettings reads it: [General] keys at the top level, groups as prefixes.
+function rulesFile(groups, general = null) {
+    const values = {}
+    const ids = Object.keys(groups)
+    if (general) Object.assign(values, general)
+    else values.rules = ids.join(',')
+    for (const id of ids) for (const [k, v] of Object.entries(groups[id])) values[id + '/' + k] = v
+    return (key) => values[key]
+}
+
+const konsole = { resourceClass: 'org.kde.konsole', resourceName: 'org.kde.konsole', caption: 'Shell - Konsole' }
+
+test('parseRules keeps only rules that place or size windows, in the ways that last', () => {
+    const rules = engine.parseRules(rulesFile({
+        pos: { Description: 'pos', wmclass: 'org.kde.konsole', wmclassmatch: '1', position: '1,1', positionrule: '3' },
+        size: { wmclass: 'a', wmclassmatch: '1', sizerule: '2' },
+        screen: { wmclass: 'a', wmclassmatch: '1', screenrule: '4' },
+        place: { wmclass: 'a', wmclassmatch: '1', placementrule: '6' },
+        dontAffect: { wmclass: 'a', wmclassmatch: '1', positionrule: '1' },
+        applyNow: { wmclass: 'a', wmclassmatch: '1', positionrule: '5' },
+        other: { wmclass: 'a', wmclassmatch: '1', desktopsrule: '2', opacityactiverule: '2' }
+    }))
+    assert.deepEqual(rules.map((r) => r.id), ['pos', 'size', 'screen', 'place'])
+    assert.deepEqual(rules[0].geometry, ['position'])
+    assert.equal(rules[0].description, 'pos')
+})
+
+test('parseRules reads both the list of rule ids and the older numbered groups', () => {
+    assert.equal(engine.parseRules(rulesFile({ a: { positionrule: '2' } }, { rules: ['a'] })).length, 1, 'QSettings may give a list')
+    const numbered = engine.parseRules(rulesFile({ 1: { positionrule: '2' }, 2: { sizerule: '3' } }, { count: '2' }))
+    assert.deepEqual(numbered.map((r) => r.id), ['1', '2'])
+    assert.deepEqual(engine.parseRules(() => undefined), [], 'no rules file content')
+})
+
+test('geometryRuleFor matches the app the way KWin does: exact, substring or regular expression', () => {
+    const rule = (wmclass, wmclassmatch, extra = {}) => engine.parseRules(rulesFile({ r: { wmclass, wmclassmatch, positionrule: '3', ...extra } }))
+    assert.ok(engine.geometryRuleFor(rule('org.kde.konsole', '1'), konsole))
+    assert.ok(engine.geometryRuleFor(rule('ORG.KDE.Konsole', '1'), konsole), 'case does not matter')
+    assert.equal(engine.geometryRuleFor(rule('org.kde.kons', '1'), konsole), null)
+    assert.ok(engine.geometryRuleFor(rule('konsole', '2'), konsole))
+    assert.ok(engine.geometryRuleFor(rule('^org\\.kde\\.k', '3'), konsole))
+    assert.equal(engine.geometryRuleFor(rule('^dolphin', '3'), konsole), null)
+    assert.ok(engine.geometryRuleFor(rule('([', '3'), konsole), 'an unreadable pattern counts as matching: leave it to KWin')
+    assert.ok(engine.geometryRuleFor(rule('', '0'), konsole), 'no app condition: the rule is for every window')
+    assert.ok(engine.geometryRuleFor(rule('org.kde.konsole org.kde.konsole', '1', { wmclasscomplete: 'true' }), konsole), 'whole class')
+})
+
+test('geometryRuleFor honours title conditions and window types', () => {
+    const rules = (extra) => engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', positionrule: '2', ...extra } }))
+    assert.ok(engine.geometryRuleFor(rules({ title: 'Shell', titlematch: '2' }), konsole))
+    assert.equal(engine.geometryRuleFor(rules({ title: 'Other', titlematch: '1' }), konsole), null)
+    assert.ok(engine.geometryRuleFor(rules({ types: '1' }), konsole), 'normal windows')
+    assert.equal(engine.geometryRuleFor(rules({ types: '32' }), konsole), null, 'dialogs only')
+    assert.ok(engine.geometryRuleFor(rules({ types: '' }), konsole))
 })
 
 test('default exclusion list is identical in main.qml and config/main.xml', () => {
