@@ -1,6 +1,10 @@
 .pragma library
 
-// Persisted key legend (compact on purpose - the blob lives in a single KConfig entry):
+// Pure logic for main.qml (no KWin): the saved-data format, matching windows to saves, the
+// exclusion list and KWin window rules, plus the timings main.qml runs on.
+//
+// Saved data, compact on purpose (it lives in a single KConfig entry):
+//   root: { version: SCHEMA_VERSION, apps: { resourceClass: app } }
 //   app:  { t: lastAccessTime, w: [saves], d: { desktopKey: { t, w: [saves] } } }
 //         d holds one layout per virtual desktop (key: the desktop's id, or '*' for windows on
 //         all or several desktops); restores read only d. w is the latest layout from any
@@ -8,16 +12,23 @@
 //   save: { c: caption, x: globalX, y: globalY, w: width, h: height,
 //           o: { x, y, s: outputSerial, n: outputName }  output-relative position,
 //           t: tile (only when tiled at close):
-//              { k: 'q', i: quickTileIndex, g: { x, y, w, h } }  KWin's order: L, R, T, B, TL, TR, BL, BR
+//              { k: 'q', i: quickTileIndex, g: { x, y, w, h } }  KWin's order: L, R, T, B, TL,
+//                 TR, BL, BR; g is the tile's relativeGeometry (where the shared split was)
 //              { k: 'c', p: [childIndexes], g: { x, y, w, h } }  custom tile, relativeGeometry
 //           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own }
-//   Only geometry (and the tile a window sat in) is saved and restored; everything
-//   else is left to KWin.
-//   Runtime save objects use the long names below and are never mutated.
-//   v1 blobs (which also stored desktop/activities/state flags) decode fine - those
-//   fields are simply ignored.
+// Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free.
+// v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
+// ignored.
 
+// Saved data
 var SCHEMA_VERSION = 2
+var EXPIRY_MS = 30 * 24 * 60 * 60 * 1000
+var MAX_APPS = 500
+var MAX_DESKTOP_KEY = 64
+var MAX_TILE_DEPTH = 32
+
+// Matching and timings (main.qml)
 var CAPTION_FALLBACK = 80
 var BURST_MS = 1500
 var RESTORE_TIMEOUT_MS = 10000
@@ -25,17 +36,14 @@ var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
 var TICK_MS = 250
 var MAX_BUFFER = 64
-var EXPIRY_MS = 30 * 24 * 60 * 60 * 1000
-var MAX_APPS = 500
-var MAX_DESKTOP_KEY = 64
-// KWin creates the quick tiles in this order; the actions quick-tile the active window.
+
+// Tiles. KWin creates the quick tiles in this order; the actions quick-tile the active window.
 var QUICK_TILE_ACTIONS = [
     'slotWindowQuickTileLeft', 'slotWindowQuickTileRight', 'slotWindowQuickTileTop', 'slotWindowQuickTileBottom',
     'slotWindowQuickTileTopLeft', 'slotWindowQuickTileTopRight', 'slotWindowQuickTileBottomLeft', 'slotWindowQuickTileBottomRight'
 ]
 var QUICK_TILES = QUICK_TILE_ACTIONS.length
 var TILE_TOLERANCE = 0.01
-var MAX_TILE_DEPTH = 32
 
 function numberOr(value, fallback) {
     var n = typeof value === 'number' ? value : parseFloat(value)
@@ -68,7 +76,7 @@ function parseList(text) {
     return parsed
 }
 
-// Case-insensitive: KWin lowercases X11 classes, Wayland app ids keep their case.
+// Case-insensitive: Wayland app ids keep their case, XWayland window classes come lowercased.
 function isListed(name, parsed) {
     if (!name) return false
     name = String(name).toLowerCase()

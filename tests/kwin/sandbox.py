@@ -99,12 +99,10 @@ class Pointer:
             raise SandboxError("KWin offers no org_kde_kwin_fake_input")
         self.fake.authenticate("wgr-tests", "window-geometry-restore integration tests")
         self.display.roundtrip()
-        self.pos = (0.0, 0.0)
 
     def move(self, x, y):
         self.fake.pointer_motion_absolute(float(x), float(y))
         self.display.flush()
-        self.pos = (float(x), float(y))
 
     def button(self, pressed, button=BTN_LEFT):
         self.fake.button(button, 1 if pressed else 0)
@@ -120,9 +118,8 @@ class Pointer:
 class App:
     """One test window, in its own process."""
 
-    def __init__(self, sandbox, app_id, title, proc):
+    def __init__(self, sandbox, title, proc):
         self.sandbox = sandbox
-        self.app_id = app_id
         self.title = title
         self.proc = proc
 
@@ -254,7 +251,7 @@ class Sandbox:
         self.wait(lambda: self._dbus_ok(), 20, "kwin_wayland on D-Bus")
         self.wait(lambda: self.probe("return workspace.screens.length")["result"] == self.outputs,
                   10, "outputs")
-        self.wait(lambda: any(LOG_PREFIX + "loaded" in l for l in self.log_text().splitlines()[-200:]),
+        self.wait(lambda: any(LOG_PREFIX + "loaded" in line for line in self.log_text().splitlines()[-200:]),
                   10, "the script to load")
         self.pointer = Pointer(self.root / "run" / "wayland-wgr", self.root / "proto")
         self.settle(0.3)
@@ -324,16 +321,16 @@ class Sandbox:
 
     def script_errors(self):
         """Failures the script logged, and QML errors KWin reported from its files."""
-        return [l for l in self.log_text().splitlines()
-                if (LOG_PREFIX in l and ("failed" in l or "unreadable" in l))
-                or re.search(r"windowgeometryrestore[^ ]*/(main\.qml|engine\.js):\d+", l)]
+        return [line for line in self.log_text().splitlines()
+                if (LOG_PREFIX in line and ("failed" in line or "unreadable" in line))
+                or re.search(r"windowgeometryrestore[^ ]*/(main\.qml|engine\.js):\d+", line)]
 
     def script_log(self):
         """The script's log lines written since the previous call."""
         text = self.log_text()
         new = text[self._log_offset:]
         self._log_offset = len(text)
-        return [l.split(LOG_PREFIX, 1)[1] for l in new.splitlines() if LOG_PREFIX in l]
+        return [line.split(LOG_PREFIX, 1)[1] for line in new.splitlines() if LOG_PREFIX in line]
 
     def probe(self, body, timeout=5):
         """Run JS `body` inside KWin (a function body; `return` a JSON-able
@@ -427,7 +424,7 @@ class Sandbox:
         self.clients.append(p)
         self.wait(lambda: self.window(title) is not None, 10, "window " + title)
         self.settle(settle)
-        return App(self, app_id, title, p)
+        return App(self, title, p)
 
     def set_geometry(self, title, x, y, w, h):
         """Put a window somewhere, as the user would by moving and resizing it."""

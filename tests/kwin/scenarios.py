@@ -361,13 +361,15 @@ def s_tiled_sent_to_other_monitor():
         sb.probe("workspace.slotWindowToNextScreen(); return 1")
         sb.settle(0.6)
         w = sb.window("Alpha")
-        check(w["output"] == "Virtual-1" and w["tile"] and w["tile"]["rel"]["x"] == 0, "precondition: KWin re-tiled it on monitor 2: %s" % w)
+        check(w["output"] == "Virtual-1" and w["tile"] and w["tile"]["rel"]["x"] == 0,
+              "precondition: KWin re-tiled it on monitor 2: %s" % w)
         a.close()
         sb.pointer.move(400, 400)
         sb.open_app("org.example.alpha", "Alpha")
         sb.settle(0.5)
         w = sb.window("Alpha")
-        check(w["output"] == "Virtual-1" and w["tile"] and w["tile"]["rel"]["x"] == 0, "tiled left on monitor 2: %s on %s" % (w["tile"], w["output"]))
+        check(w["output"] == "Virtual-1" and w["tile"] and w["tile"]["rel"]["x"] == 0,
+              "tiled left on monitor 2: %s on %s" % (w["tile"], w["output"]))
         sb.drag(titlebar(w), (2600, 500))
         check(near(rect(sb.window("Alpha"))[2:], (1000, 650), tol=1), "pre-tile size back: %s" % (rect(sb.window("Alpha")),))
 
@@ -525,10 +527,6 @@ def s_unplugged_monitor_then_close():
               "back on monitor 2 like the window that stayed open: %s on %s" % (rect(w), w["output"]))
 
 
-
-
-
-
 def s_monitors_independent_while_running():
     """The app is open on monitor 1. Its window closed on monitor 2 comes back on monitor 2
     when reopened there, although the app is running."""
@@ -581,6 +579,7 @@ def s_fresh_start_both_monitors():
         l, r = sb.window("Left"), sb.window("Right")
         check(l["output"] == "Virtual-0" and rect(l)[:2] == (200, 150), "Left back on monitor 1: %s %s" % (rect(l), l["output"]))
         check(r["output"] == "Virtual-1" and rect(r)[:2] == (2400, 300), "Right back on monitor 2: %s %s" % (rect(r), r["output"]))
+
 
 def s_undock_two_of_three_monitors():
     """Three monitors, the app open on each; monitors 2 and 3 go at once (undocking), the

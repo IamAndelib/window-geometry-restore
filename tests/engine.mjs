@@ -1,17 +1,7 @@
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-
-const source = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
-    .replace(/^\s*\.pragma library.*$/m, '')
-
-const engine = new Function(`
-    ${source}
-    return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
-             MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
-             parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, newState,
-             decodeState, encodeState, pruneExpired, mergeDiskApps, layoutFor, recordLayout, MAX_DESKTOP_KEY, parseRules, geometryRuleFor };
-`)()
+import engine from './load-engine.mjs'
 
 function save(overrides = {}) {
     return engine.makeSave({
@@ -29,7 +19,6 @@ function live(overrides = {}) {
 test('captionScore: exact, numeric drift, prefix/suffix drift, unrelated', () => {
     assert.equal(engine.captionScore('Same', 'Same'), 100)
     assert.equal(engine.captionScore('Inbox (12) - Mail', 'Inbox (3) - Mail'), 100)
-    assert.ok(engine.captionScore('Konsole', 'Konsole') === 100)
     const drifted = engine.captionScore('text editor - main.py', 'text editor - utils.py')
     assert.ok(drifted > 50 && drifted < 100, `drift score ${drifted}`)
     assert.ok(drifted < engine.CAPTION_FALLBACK, 'different files must stay below tier-3 threshold')
@@ -102,16 +91,13 @@ test('single-save fallback: the lone save always applies to the next window (tie
 })
 
 test('decodeState: rejects garbage without throwing, returns empty state', () => {
-    for (const garbage of ['', '   ', 'not json', '{"apps": 5}', '[]', 'null', '{"apps": {"a": {"w": "nope"}}}']) {
+    const cases = { '': false, '   ': false, '{}': false, 'not json': true, '[]': true, 'null': true, '{"apps": 5}': true,
+                    '{"apps": {"a": {"w": "nope"}}}': false }
+    for (const [garbage, isError] of Object.entries(cases)) {
         const r = engine.decodeState(garbage)
-        assert.equal(r.error === null || typeof r.error === 'string', true)
-        assert.deepEqual(Object.keys(r.state.apps).length >= 0, true)
+        assert.equal(typeof r.error === 'string', isError, `error for ${JSON.stringify(garbage)}`)
+        assert.deepEqual(Object.keys(r.state.apps), [], `no apps for ${JSON.stringify(garbage)}`)
     }
-    const r = engine.decodeState('not json')
-    assert.ok(r.error)
-    assert.deepEqual(r.state.apps, {})
-    const empty = engine.decodeState('{}')
-    assert.equal(empty.error, null)
 })
 
 test('encode/decode round-trip preserves geometry fields, drops runtime flags', () => {
@@ -478,7 +464,7 @@ test('regular expressions: inline flags are understood, unreadable ones fall bac
 test('default exclusion list is identical in main.qml and config/main.xml', () => {
     const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
     const xml = readFileSync(new URL('../src/contents/config/main.xml', import.meta.url), 'utf8')
-    const qmlBlock = qml.match(/defaultBlacklist: \[([\s\S]*?)\]\.join/)[1]
+    const qmlBlock = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
     const fromQml = [...qmlBlock.matchAll(/'([^']+)'/g)].map((m) => m[1])
     const fromXml = xml.match(/<entry name="blacklist"[\s\S]*?<default>([\s\S]*?)<\/default>/)[1].split('\n').map((l) => l.trim()).filter(Boolean)
     assert.ok(fromQml.length > 0)
