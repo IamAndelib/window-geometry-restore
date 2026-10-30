@@ -20,7 +20,6 @@ Item {
         'org.kde.plasmashell',
         'kwin',
         'ksmserver',
-        'systemsettings',
         'kcm_kwinrules',
         'org.kde.kmenuedit',
         'org.kde.ark',

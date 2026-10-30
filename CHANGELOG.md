@@ -24,6 +24,7 @@ Tiles, virtual desktops and monitors, and working with KWin instead of around it
 - A window that KWin moved, or that was moved to another desktop, no longer loses the closes waiting to be saved on the monitor it left.
 - A window closed while still waiting for its quick tile keeps the tile.
 - A restore running for one monitor no longer takes a window that opens on another.
+- **System Settings is remembered** like any other app: it was on the default exclusion list (inherited from upstream) for no reason this script has.
 
 **Hardening**
 - **Errors are visible.** Errors in signal handlers are logged under the script's name, and failures that would lose a save are logged without verbose logging. `make logs` also shows QML errors from the script's files.

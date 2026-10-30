@@ -486,3 +486,9 @@ test('default exclusion list is identical in main.qml and config/main.xml', () =
     assert.ok(fromQml.length > 0)
     assert.deepEqual(fromQml, fromXml)
 })
+
+test('System Settings is not excluded by default: it is an ordinary app window', () => {
+    const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
+    const list = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
+    assert.ok(!engine.isListed('systemsettings', engine.parseList(list.replace(/['\s]/g, '').split(',').join('\n'))))
+})
