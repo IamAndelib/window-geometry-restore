@@ -47,7 +47,7 @@ const REQUIRED_FUNCTIONS = [
     'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
-    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'reapplyProvisional',
+    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
     'sweepRetries', 'sweepSessions', 'isIdle', 'ensureTick', 'onTick',
@@ -217,6 +217,7 @@ function makeWindow(fields) {
         caption: fields.caption || '',
         fullScreen: false,
         maximizeMode: 0,
+        maximizable: true,
         tile: null,
         move: false,
         resize: false,
@@ -279,6 +280,37 @@ function makeWindow(fields) {
             const g = this._g
             this._g = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
             if (g.x !== rect.x || g.y !== rect.y || g.width !== rect.width || g.height !== rect.height) this._emit('frameGeometryChanged')
+        },
+        // KWin's maximize (XdgToplevelWindow::maximize): a mode the window already has changes
+        // nothing, so a restore geometry is taken only when the mode changes. Without one, the
+        // geometry before maximizing is kept; unmaximizing returns to it.
+        _maxRestore: null,
+        _maximizeCalls: 0,
+        setMaximize(vertically, horizontally, restore) {
+            const mode = (vertically ? 1 : 0) | (horizontally ? 2 : 0)
+            if (mode === this.maximizeMode) return
+            this._maximizeCalls++
+            if (restore && restore.width) this._maxRestore = { x: restore.x, y: restore.y, width: restore.width, height: restore.height }
+            else if (!this.maximizeMode) this._maxRestore = { ...(this._requested || this._g) }
+            this.maximizeMode = mode
+            this._requested = null
+            if (mode === 3) {
+                const a = fakeWorkspace.clientArea(3, this)
+                this._setFrame({ x: a.x, y: a.y, width: a.width, height: a.height })
+            } else if (mode === 0 && this._maxRestore) {
+                this._setFrame(this._maxRestore)
+            }
+        },
+        // The user drags a maximized window out: KWin unmaximizes it and moves it under the
+        // pointer at once, but on Wayland its size only shrinks once the app acknowledges it.
+        _dragOutOfMaximize(x, y) {
+            const full = { ...this._g }
+            this.emitMoveResizeStarted()
+            this.move = true
+            this.maximizeMode = 0
+            this._setFrame({ x, y, width: full.width, height: full.height })
+            this._setFrame({ x, y, width: this._maxRestore.width, height: this._maxRestore.height })
+            this.move = false
         },
         // KWin's Window::requestTile: the free geometry at tiling time becomes the restore
         // geometry, and the tile is set before the window is moved into it.
@@ -2520,4 +2552,107 @@ test('a running app\'s new window next to its rule-placed window on another moni
     onMonitor(rt, 'konsole', 1, { x: 2100, y: 100, width: 640, height: 480 }, 'Pinned') // the rule puts it on monitor 2
     const next = onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 700, height: 500 }, 'Work')
     assert.equal(next._geometryWrites, 0, 'the app already has a window on monitor 2: the ruled one')
+})
+
+// ---- maximized windows ----
+
+// A window at 300,200 1000x650, maximized, then closed.
+function saveMaximized(rt, cls) {
+    const w = makeWindow({ cls, caption: 'Doc', x: 300, y: 200, width: 1000, height: 650 })
+    rt.trackWindow(w)
+    w.setMaximize(true, true)
+    w.emitClosed()
+}
+
+test('a window closed maximized reopens maximized, and unmaximizing gives back its normal size', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'app')
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.w, s.h, s.max], [300, 200, 1000, 650, 3])
+
+    const w = makeWindow({ cls: 'app', caption: 'Doc', x: 40, y: 40, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 3, 'maximized again')
+    assert.deepEqual(w._maxRestore, { x: 300, y: 200, width: 1000, height: 650 }, 'KWin holds its normal geometry')
+    w.setMaximize(false, false)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [300, 200, 1000, 650])
+    assert.ok(rt.getLogs().some((l) => l.includes('maximized again')))
+})
+
+test('an app that opens maximized by itself gets its normal size to return to', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'app')
+    const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 1920, height: 1080 })
+    w.maximizeMode = 3 // mapped maximized: KWin has no restore geometry for it
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 3)
+    assert.deepEqual(w._maxRestore, { x: 300, y: 200, width: 1000, height: 650 })
+    w._dragOutOfMaximize(500, 300)
+    assert.deepEqual([w.width, w.height], [1000, 650], 'a drag out gives back the normal size')
+})
+
+test('an app that opens at screen size by itself is maximized with its normal size to return to', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'mon')
+    // System Monitor stores its maximized size as its own size and opens floating at it.
+    const w = makeWindow({ cls: 'mon', caption: 'Doc', x: 0, y: 0, width: 1920, height: 1080 })
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 3)
+    assert.deepEqual(w._maxRestore, { x: 300, y: 200, width: 1000, height: 650 })
+})
+
+test('dragging a maximized window out does not take its maximized size for its normal size', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'Doc', x: 300, y: 200, width: 1000, height: 650 })
+    rt.trackWindow(w)
+    w.setMaximize(true, true)
+    w._dragOutOfMaximize(500, 300)
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.w, s.h, s.max], [500, 300, 1000, 650, undefined])
+})
+
+test('a screen-sized floating window moved by the user is not taken for its normal size', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'mon')
+    const w = makeWindow({ cls: 'mon', caption: 'Doc', x: 0, y: 0, width: 1920, height: 1080 })
+    rt.trackWindow(w)
+    w.setMaximize(false, false) // the user unmaximizes it...
+    w.setMaximize(true, true) // ...and maximizes it again before closing
+    w.emitClosed()
+    const [s] = savedApp(rt, 'mon').w
+    assert.deepEqual([s.w, s.h, s.max], [1000, 650, 3])
+})
+
+test('a window whose maximizing a KWin rule controls is left to KWin', () => {
+    const rt = buildRuntime('{}', {}, { rules: 'r1', 'r1/wmclass': 'app', 'r1/wmclassmatch': '1', 'r1/maximizehoriz': 'true', 'r1/maximizehorizrule': '2' })
+    saveMaximized(rt, 'app')
+    const w = makeWindow({ cls: 'app', caption: 'Doc', x: 40, y: 40, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._maximizeCalls, 0)
+    assert.equal(w._geometryWrites, 0)
+})
+
+test('with the window not maximizable, a maximized save restores its normal geometry', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'app')
+    const w = makeWindow({ cls: 'app', caption: 'Doc', x: 40, y: 40, width: 640, height: 480 })
+    w.maximizable = false
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 0)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [300, 200, 1000, 650])
+})
+
+test('a screen-sized floating window dragged by the user is not taken for its normal size', () => {
+    const rt = buildRuntime()
+    // System Monitor opening at its own stored, screen-sized size; then dragged and maximized.
+    const w = makeWindow({ cls: 'mon', caption: 'Doc', x: 0, y: 0, width: 1920, height: 1080 })
+    rt.trackWindow(w)
+    w.emitMoveResizeStarted()
+    w.move = true
+    w._setFrame({ x: -196, y: 94, width: 1920, height: 1080 })
+    w.move = false
+    w.setMaximize(true, true)
+    w.emitClosed()
+    assert.equal((JSON.parse(rt.blobRef()).apps || {}).mon, undefined, 'its normal size is unknown: nothing saved')
 })

@@ -43,11 +43,11 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - **Shared tiles:** if another window already sits in that tile, the reopened window takes the tile's current size, because in KWin one tile has one size.
   - **Changed layouts:** if the tile layout changed in the meantime, the window reopens at the tile's position and size instead.
 - **Works with KWin:**
-  - **Window rules win.** A window that a KWin window rule places or sizes (Apply initially, Force, Force temporarily, Remember) is left to KWin. Rules you add or remove apply to the next window, no reload needed.
-  - **Maximized windows** are remembered at their normal size; maximizing again is up to the app.
+  - **Window rules win.** A window that a KWin window rule places, sizes or maximizes (Apply initially, Force, Force temporarily, Remember) is left to KWin. Rules you add or remove apply to the next window, no reload needed.
+  - **Maximized windows come back maximized,** and dragging them out (or the maximize button) gives back the size they had before. That also works for apps that reopen maximized, or at their maximized size, by themselves: KWin gets the normal size from the script.
   - **Monitors.** While a monitor is unplugged, KWin moves its windows to another one and back when it returns. The script keeps their place on their own monitor in the meantime. If the remembered monitor is missing when an app opens, its windows land on the screen under your cursor and move to their monitor if it shows up within a few seconds, for example a monitor that wakes late after login.
   - **Windows already placed** stay as they are: by the app itself, by Plasma's session restore, maximized, tiled or fullscreen. So do windows already open when the script starts. Restores are clamped so nothing lands off-screen.
-  - **Geometry only.** Focus, stacking, desktops and window states stay KWin's.
+  - **Through KWin.** Tiles and maximizing are restored with KWin's own calls; focus, stacking and desktops stay KWin's.
 - **Reliable storage.**
   - Layouts are written to disk the moment a window closes, so a crash or power loss still restores the last layout.
   - Each monitor's part of a desktop's layout is kept until the app's next close on that monitor replaces it.

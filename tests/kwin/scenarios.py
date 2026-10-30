@@ -124,20 +124,89 @@ def s_fixed_size_window():
         check(rect(w)[2:] == size, "size kept: %s" % (rect(w),))
 
 
+def maximize_and_close(sb, title, x, y, w, h, app="org.example.alpha"):
+    """Open a window at x, y, w, h, maximize it, close it."""
+    a = sb.open_app(app, title)
+    sb.set_geometry(title, x, y, w, h)
+    sb.probe("win(%r).setMaximize(true, true); return 1" % title)
+    sb.settle(0.5)
+    check(sb.window(title)["maximized"] == 3, "precondition: maximized")
+    a.close()
+
+
+def drag_out(sb, title, to):
+    """The user drags a maximized window by its title bar: KWin unmaximizes it."""
+    sb.drag(titlebar(sb.window(title)), to)
+    sb.settle(0.5)
+    return sb.window(title)
+
+
 def s_maximized_at_close():
-    """A window closed maximized reopens at its normal size: the script saves
-    the floating geometry, and leaves maximizing to the app and KWin."""
+    """A window closed maximized reopens maximized; dragged out, it gets its normal size back,
+    which KWin has from the script."""
+    with sandbox(outputs=1) as sb:
+        maximize_and_close(sb, "Alpha", 300, 200, 1000, 650)
+        sb.open_app("org.example.alpha", "Alpha")
+        check(sb.window("Alpha")["maximized"] == 3, "maximized again: %s" % sb.window("Alpha"))
+        w = drag_out(sb, "Alpha", (900, 500))
+        check(w["maximized"] == 0 and rect(w)[2:] == (1000, 650), "normal size after a drag out: %s" % w)
+
+
+def s_maximized_by_dragging_to_the_top():
+    """Maximized by dragging it to the top edge (KWin's electric border), closed, reopened:
+    maximized again, and the maximize button gives back its normal geometry."""
     with sandbox(outputs=1) as sb:
         a = sb.open_app("org.example.alpha", "Alpha")
         sb.set_geometry("Alpha", 300, 200, 1000, 650)
-        sb.probe("win('Alpha').setMaximize(true, true); return 1")
-        sb.settle(0.5)
-        check(sb.window("Alpha")["maximized"] == 3, "precondition: maximized")
+        sb.drag(titlebar(sb.window("Alpha")), (960, 0))
+        sb.settle(0.8)
+        check(sb.window("Alpha")["maximized"] == 3, "precondition: KWin maximized it: %s" % sb.window("Alpha"))
         a.close()
         sb.open_app("org.example.alpha", "Alpha")
+        check(sb.window("Alpha")["maximized"] == 3, "maximized again")
+        sb.probe("win('Alpha').setMaximize(false, false); return 1")
+        sb.settle(0.6)
         w = sb.window("Alpha")
-        check(w["maximized"] == 0, "not maximized by the script")
-        check(rect(w) == (300, 200, 1000, 650), "normal geometry, not a fake-maximized frame: %s" % (rect(w),))
+        check(w["maximized"] == 0 and rect(w)[2:] == (1000, 650), "normal size after unmaximizing: %s" % w)
+
+
+def s_app_opens_maximized_by_itself():
+    """An app that reopens maximized by itself: KWin knows no normal size for it; the script
+    gives it the saved one, so a drag out works, and the window stays maximized meanwhile."""
+    with sandbox(outputs=1) as sb:
+        maximize_and_close(sb, "Alpha", 300, 200, 1000, 650)
+        sb.open_app("org.example.alpha", "Alpha", maximized=True)
+        check(sb.window("Alpha")["maximized"] == 3, "still maximized: %s" % sb.window("Alpha"))
+        w = drag_out(sb, "Alpha", (900, 500))
+        check(w["maximized"] == 0 and rect(w)[2:] == (1000, 650), "normal size after a drag out: %s" % w)
+
+
+def s_app_opens_at_screen_size():
+    """An app that stores its maximized size as its own (System Monitor does) reopens floating
+    at screen size: the script maximizes it with its normal size to return to."""
+    with sandbox(outputs=1) as sb:
+        maximize_and_close(sb, "Alpha", 300, 200, 1000, 650)
+        sb.open_app("org.example.alpha", "Alpha", size=(1920, 1044))
+        check(sb.window("Alpha")["maximized"] == 3, "maximized: %s" % sb.window("Alpha"))
+        w = drag_out(sb, "Alpha", (900, 500))
+        check(w["maximized"] == 0 and rect(w)[2:] == (1000, 650), "normal size after a drag out: %s" % w)
+        sb.restart_kwin()
+        saved = sb.saved()["apps"]["org.example.alpha"]["w"][0]
+        check(saved.get("max") is None and (saved["w"], saved["h"]) == (1000, 650), "saved at its normal size: %s" % saved)
+
+
+def s_maximized_on_monitor_2():
+    """Maximized on monitor 2, reopened with the pointer on monitor 1: maximized on monitor 2,
+    and its normal geometry there."""
+    with sandbox(outputs=2) as sb:
+        maximize_and_close(sb, "Alpha", 2300, 200, 1000, 650)
+        sb.pointer.move(400, 400)
+        sb.open_app("org.example.alpha", "Alpha")
+        w = sb.window("Alpha")
+        check(w["maximized"] == 3 and w["output"] == "Virtual-1", "maximized on monitor 2: %s" % w)
+        sb.probe("win('Alpha').setMaximize(false, false); return 1")
+        sb.settle(0.6)
+        check(rect(sb.window("Alpha")) == (2300, 200, 1000, 650), "its normal geometry there: %s" % (rect(sb.window("Alpha")),))
 
 
 # ---- KWin's own mechanisms ---------------------------------------------------------
@@ -396,8 +465,8 @@ def s_quick_tiled_window_on_unplugged_monitor():
 
 
 def s_tiled_then_maximized():
-    """Tiled, then maximized (KWin untiles it), then closed: it reopens untiled at its normal
-    size; maximizing again is up to the app."""
+    """Tiled, then maximized (KWin untiles it), then closed: it reopens maximized, not tiled,
+    and unmaximizing gives back its geometry from before it was tiled."""
     with sandbox(outputs=1) as sb:
         a = sb.open_app("org.example.alpha", "Alpha")
         sb.set_geometry("Alpha", 300, 200, 1000, 650)
@@ -412,8 +481,10 @@ def s_tiled_then_maximized():
         sb.open_app("org.example.alpha", "Alpha")
         sb.settle(0.5)
         w = sb.window("Alpha")
-        check(w["tile"] is None and w["maximized"] == 0, "untiled, not maximized: %s" % w)
-        check(rect(w) == (300, 200, 1000, 650), "normal geometry: %s" % (rect(w),))
+        check(w["tile"] is None and w["maximized"] == 3, "maximized, not tiled: %s" % w)
+        sb.probe("win('Alpha').setMaximize(false, false); return 1")
+        sb.settle(0.6)
+        check(rect(sb.window("Alpha")) == (300, 200, 1000, 650), "normal geometry: %s" % (rect(sb.window("Alpha")),))
 
 
 def s_logout_with_tiles():
@@ -722,6 +793,10 @@ SCENARIOS = [
     s_logout_login,
     s_fixed_size_window,
     s_maximized_at_close,
+    s_maximized_by_dragging_to_the_top,
+    s_app_opens_maximized_by_itself,
+    s_app_opens_at_screen_size,
+    s_maximized_on_monitor_2,
     s_window_rule_apply_initially_wins,
     s_window_rule_force_no_fight,
     s_window_rule_remember_agrees,

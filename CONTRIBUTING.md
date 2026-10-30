@@ -7,9 +7,13 @@ on, and how to test a change before it reaches anyone's desktop.
 - **Work with KWin, not against it.** KWin already places, tiles and moves windows, and has
   window rules. The script fills one gap, remembering an app's layout across launches, and
   defers to KWin everywhere else:
-  - a window a KWin rule places or sizes is left to KWin;
-  - focus, stacking, desktops and window states are never changed;
-  - KWin's own moves are not taken for the user's layout (a monitor unplugged, maximizing).
+  - a window a KWin rule places, sizes or maximizes is left to KWin;
+  - focus, stacking and desktops are never changed;
+  - tiles and the maximized state are restored through KWin's own calls (`Tile.manage`, the
+    quick-tile actions, `setMaximize` with a restore geometry), so KWin keeps the geometry to
+    return to;
+  - KWin's own moves are not taken for the user's layout (a monitor unplugged, a maximized
+    window being dragged out).
 - **Rely only on what KWin exposes to scripts.** When a behaviour depends on KWin's internals
   (event order on close, the order of the quick tiles), it is checked in KWin's source, noted
   below, and covered by a real-KWin scenario, so a KWin update that changes it fails a test.
@@ -71,6 +75,11 @@ on, and how to test a change before it reaches anyone's desktop.
   no longer has the old monitor), then emits `outputChanged`, then `screensChanged`. On replug
   it moves windows back itself.
 - **Maximizing** untiles a window.
+- **Restore geometry.** `setMaximize(v, h, restore)` keeps `restore` as the geometry to return to,
+  but only when the maximize state changes (an unchanged mode returns early). A window mapped
+  maximized by its app has no restore geometry. Dragging a maximized window out unmaximizes it
+  and moves it under the pointer at once; on Wayland its size only shrinks once the app has
+  followed.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences
   it doesn't know.

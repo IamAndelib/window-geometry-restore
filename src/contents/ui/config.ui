@@ -14,7 +14,7 @@
    <item>
     <widget class="QLabel" name="introLabel">
      <property name="text">
-      <string>Window Geometry Restore remembers how you left your application windows (position, size, screen and tile) on each virtual desktop and monitor, and puts them back when the app reopens - for apps that don't do it themselves, like Chrome web apps. It works with KWin: windows a KWin window rule places are left to the rule, and focus, desktops and window states stay KWin's.
+      <string>Window Geometry Restore remembers how you left your application windows (position, size, screen and tile) on each virtual desktop and monitor, and puts them back when the app reopens - for apps that don't do it themselves, like Chrome web apps. It works with KWin: windows a KWin window rule places are left to the rule, tiles and maximizing are restored through KWin, and focus and desktops stay KWin's.
 
 Everything works out of the box. The only thing you may ever need to change is the exclusion list below.</string>
      </property>

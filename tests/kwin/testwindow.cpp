@@ -1,9 +1,10 @@
 // A test window for the KWin sandbox (tests/kwin/sandbox.py builds it).
 //
-//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed]
+//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [maximized]
 //
 // The app id becomes the window's resourceClass in KWin, so scenarios can run
-// several apps side by side. "fixed" makes the window non-resizable.
+// several apps side by side. "fixed" makes the window non-resizable; "maximized"
+// opens it maximized, as apps that remember being maximized do.
 #include <QColor>
 #include <QGuiApplication>
 #include <QPainter>
@@ -38,6 +39,10 @@ int main(int argc, char **argv)
         window.setMinimumSize(size);
         window.setMaximumSize(size);
     }
-    window.show();
+    if (args.contains(QStringLiteral("maximized"))) {
+        window.showMaximized();
+    } else {
+        window.show();
+    }
     return app.exec();
 }

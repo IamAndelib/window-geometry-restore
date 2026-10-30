@@ -120,7 +120,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'output', 'tile', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
     assert.equal(a.tile, null)
     assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))
@@ -459,6 +459,22 @@ test('regular expressions: inline flags are understood, unreadable ones fall bac
     assert.equal(atomic[0].unreadable, 'wmclass')
     assert.ok(engine.geometryRuleFor(atomic, konsole), 'its literal text still matches konsole')
     assert.equal(engine.geometryRuleFor(atomic, dolphin), null, 'one unreadable rule does not cover every app')
+})
+
+test('a maximized save round-trips its maximize mode; bad values are dropped', () => {
+    const [full, vertical, plain] = roundTrip([save({ maximized: 3 }), save({ maximized: 1 }), save()])
+    assert.equal(full.maximized, 3)
+    assert.equal(vertical.maximized, 1)
+    assert.equal(plain.maximized, 0)
+    assert.ok(!('max' in JSON.parse(engine.encodeState({ apps: { a: { lastAccess: 1, saves: [save()] } } })).apps.a.w[0]), 'not written when not maximized')
+    for (const max of [0, 4, -1, 1.5, '3', null]) {
+        assert.equal(decodeOne({ c: '', x: 0, y: 0, w: 800, h: 600, max }).maximized, 0, JSON.stringify(max))
+    }
+})
+
+test('a maximize rule counts as a rule that sizes the window', () => {
+    const rules = engine.parseRules(rulesFile({ r: { wmclass: 'konsole', wmclassmatch: '2', maximizevert: 'true', maximizevertrule: '3' } }))
+    assert.deepEqual(rules[0].geometry, ['maximizevert'])
 })
 
 test('default exclusion list is identical in main.qml and config/main.xml', () => {

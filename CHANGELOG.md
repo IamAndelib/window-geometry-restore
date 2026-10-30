@@ -15,8 +15,8 @@ Tiles, virtual desktops and monitors, and working with KWin instead of around it
   - While the app runs, a new window on a monitor where it has no window yet gets that monitor's layout. A window opened next to an open one stays where KWin put it.
 
 **Works with KWin**
-- **Window rules win.** A window that a KWin rule places or sizes (Apply initially, Force, Force temporarily, Remember) is left to KWin. The rules are read as System Settings writes them, with no reload needed when they change.
-- **Maximized windows** are remembered at their normal size, no longer as a screen-sized floating window. A window tiled and then maximized no longer reopens tiled.
+- **Window rules win.** A window that a KWin rule places, sizes or maximizes (Apply initially, Force, Force temporarily, Remember) is left to KWin. The rules are read as System Settings writes them, with no reload needed when they change.
+- **Maximized windows come back maximized,** and dragging them out (or the maximize button) gives back their size from before. That also holds for apps that reopen maximized, or at their maximized size (System Monitor), by themselves: KWin gets the normal size from the script, through its own `setMaximize`. Before, such windows came back as screen-sized floating windows that a drag only moved. A window tiled and then maximized no longer reopens tiled.
 - **Unplugged monitors.** When a monitor goes away, KWin parks its windows on another one, and its later return no longer costs them their place. The same holds when a quick-tiled window is sent to another monitor.
 - **Shared quick tiles:** a window joining a quick tile that already holds another window takes the tile's current size, instead of resizing the window already there.
 
@@ -34,8 +34,8 @@ Tiles, virtual desktops and monitors, and working with KWin instead of around it
 - **Saving is lighter:** it skips reading the data back when no other KWin instance wrote it in between.
 
 **Under the hood**
-- `tests/kwin`: 34 scenarios run against a real, headless KWin with virtual monitors: tiles, window rules, desktops, two and three monitors, hotplug, logouts, many windows, rapid open and close, and 500 apps of saved data.
-- Unit tests: 165 (engine and lifecycle). Each fix was checked with a mutation: with the fix removed, a test fails.
+- `tests/kwin`: 38 scenarios run against a real, headless KWin with virtual monitors: tiles, maximizing, window rules, desktops, two and three monitors, hotplug, logouts, many windows, rapid open and close, and 500 apps of saved data.
+- Unit tests: 175 (engine and lifecycle). Each fix was checked with a mutation: with the fix removed, a test fails.
 - `main.qml` is organised into sections; `CONTRIBUTING.md` describes the design, the KWin behaviour it relies on, and how to test.
 - The saved data stays schema v2 (new fields only), so 1.3 keeps reading it.
 

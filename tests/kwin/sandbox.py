@@ -417,9 +417,9 @@ class Sandbox:
 
     # ---- apps -------------------------------------------------------------
 
-    def open_app(self, app_id, title, size=(800, 500), fixed=False, settle=0.8):
+    def open_app(self, app_id, title, size=(800, 500), fixed=False, maximized=False, settle=0.8):
         """Start an app; KWin places its window, and the script may restore it."""
-        args = [str(self.testwindow), app_id, title, "%dx%d" % size] + (["fixed"] if fixed else [])
+        args = [str(self.testwindow), app_id, title, "%dx%d" % size] + (["fixed"] if fixed else []) + (["maximized"] if maximized else [])
         p = subprocess.Popen(args, env=self._env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.clients.append(p)
         self.wait(lambda: self.window(title) is not None, 10, "window " + title)

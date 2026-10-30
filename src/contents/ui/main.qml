@@ -3,11 +3,11 @@ import QtCore
 import org.kde.kwin
 import "engine.js" as Engine
 
-// Window Geometry Restore: saves an app's window geometry (and tiles) per virtual desktop and
-// monitor when its last window there closes, and restores it when the app opens there again.
-// Works with KWin, not against it: geometry only (focus, stacking, desktops and window states
-// stay KWin's), windows a KWin rule places are left to KWin, and KWin's own moves (monitor
-// unplugged, maximize) are not taken for the user's layout.
+// Window Geometry Restore: saves an app's window geometry (with its tile or maximized state)
+// per virtual desktop and monitor when its last window there closes, and restores it when the
+// app opens there again. Works with KWin, not against it: tiles and maximizing are restored
+// through KWin's own calls, focus, stacking and desktops stay KWin's, windows a KWin rule places
+// are left to KWin, and KWin's own moves (monitor unplugged) aren't taken for the user's layout.
 
 Item {
     id: root
@@ -419,8 +419,9 @@ Item {
             } else {
                 // A frame without a tile: the window left it (KWin also untiles a window it maximizes).
                 entry.tile = null
-                // While moving, the size can't change: no need to ask how large the work area is.
-                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && (w.move || !isMaximizedLike(w))) entry.free = frame
+                // Not when screen-sized: an app opening at its maximized size, or a maximized window
+                // being dragged out (its size shrinks only once the app has followed).
+                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w)) entry.free = frame
             }
         } catch (e) {
             logOnce('geometry', 'reading window geometry failed: ' + e)
@@ -456,12 +457,13 @@ Item {
                 fields = copyGeometry(entry.home)
                 dbg(entry.label + ': closed while its screen ' + entry.home.output.name + ' is missing, saved its place there')
             } else if (isMaximized(w) && !w.tile) {
-                // Maximizing is the app's and KWin's: the layout is the window's normal geometry.
+                // Saved as its normal geometry, to maximize it with again (see applyMaximized).
                 if (!entry.free) {
                     dbg(entry.label + ': closed maximized, normal geometry unknown, not saved')
                     return null
                 }
                 fields = copyGeometry(onCurrentMonitor(entry.free, w))
+                fields.maximized = w.maximizeMode
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
@@ -826,6 +828,7 @@ Item {
     // tile, it restores as plain geometry at the tile rect, as untiled saves do.
     function applySave(entry, save, until) {
         var w = entry.w
+        if (save.maximized && w.maximizable) return applyMaximized(entry, save, until)
         if (!canPlace(w)) return false
         var tiling = restoreTiles && save.tile && w.resizeable ? planTile(entry, save) : null
         var target = targetFor(w, tiling && save.free ? save.free : save)
@@ -851,6 +854,27 @@ Item {
             startTile(entry, tiling, until)
         }
         return moved
+    }
+
+    // A window closed maximized comes back maximized by KWin, with its normal geometry as the one
+    // to return to (a drag out, the maximize button). Apps that reopen maximized, or at their
+    // maximized size, by themselves leave KWin without that geometry otherwise. KWin takes a
+    // restore geometry only when the maximize state changes, so a window that is maximized
+    // already is unmaximized first; KWin configures the app once, for the final state.
+    function applyMaximized(entry, save, until) {
+        var w = entry.w
+        if (w.tile || w.fullScreen || w.move || w.resize) return false
+        var target = targetFor(w, save)
+        if (!target) return false
+        entry.provisional = target.provisional ? { save: save, until: until } : null
+        if (target.provisional) entry.home = copyGeometry(save)
+        var r = target.rect
+        if (w.maximizeMode) w.setMaximize(false, false)
+        setGeometry(w, r) // onto its monitor: KWin maximizes the window where it is
+        w.setMaximize(!!(save.maximized & 1), !!(save.maximized & 2), Qt.rect(r.x, r.y, r.w, r.h))
+        entry.free = geometryOf(target.output || w.output, r.x, r.y, r.w, r.h)
+        log(entry.label + ': maximized again, ' + r.w + 'x' + r.h + ' to return to')
+        return true
     }
 
     // A screen came or went (e.g. a monitor that finished initialising after login):

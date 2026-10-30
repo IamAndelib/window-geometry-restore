@@ -15,9 +15,11 @@
 //              { k: 'q', i: quickTileIndex, g: { x, y, w, h } }  KWin's order: L, R, T, B, TL,
 //                 TR, BL, BR; g is the tile's relativeGeometry (where the shared split was)
 //              { k: 'c', p: [childIndexes], g: { x, y, w, h } }  custom tile, relativeGeometry
-//           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own }
+//           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own,
+//           max: KWin's maximize mode (1 vertical, 2 horizontal, 3 both; only when maximized
+//                at close; x/y/w/h are then the normal geometry to return to) }
 // Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
-// output { x, y, serial, name }, tile { kind, index | path, rel }, free.
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3).
 // v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
 // ignored.
 
@@ -154,7 +156,8 @@ function makeSave(fields) {
         height: fields.height,
         output: fields.output || null,
         tile: fields.tile || null,
-        free: fields.free || null
+        free: fields.free || null,
+        maximized: fields.maximized || 0
     }
 }
 
@@ -232,6 +235,7 @@ function encodeSave(s) {
     }
     if (s.tile) out.t = encodeTile(s.tile)
     if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
+    if (s.maximized) out.max = s.maximized
     return out
 }
 
@@ -242,6 +246,7 @@ function decodeSave(s) {
     geometry.caption = typeof s.c === 'string' ? s.c : ''
     geometry.tile = tile
     geometry.free = tile ? decodeGeometry(s.f) : null
+    geometry.maximized = isIndex(s.max, 4) ? s.max : 0
     return makeSave(geometry)
 }
 
@@ -392,12 +397,12 @@ function mergeDiskApps(state, diskState) {
     return adopted
 }
 
-// KWin window rules (kwinrulesrc) that place or size windows. KWin does not tell scripts which
+// KWin window rules (kwinrulesrc) that place, size or maximize windows. KWin does not tell scripts which
 // rules apply to a window, so the rules file is read and matched here, erring towards "a rule
 // applies": the script then leaves that window to KWin.
 // Rule kinds that last: Force (2), Apply initially (3), Remember (4), Force temporarily (6).
 // Don't affect (1) and Apply now (5, a one-time change) leave new windows alone.
-var RULE_GEOMETRY = ['position', 'size', 'screen', 'placement']
+var RULE_GEOMETRY = ['position', 'size', 'screen', 'placement', 'maximizehoriz', 'maximizevert']
 var RULE_KINDS = [2, 3, 4, 6]
 var NORMAL_WINDOW_TYPE = 1
 
