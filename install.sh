@@ -19,17 +19,22 @@ die()  { printf 'Error: %s\n' "$*" >&2; exit 1; }
 command -v kpackagetool6 >/dev/null 2>&1 || die "kpackagetool6 not found - KDE Plasma 6 is required"
 command -v kwriteconfig6 >/dev/null 2>&1 || die "kwriteconfig6 not found - KDE Plasma 6 is required"
 
-if command -v qdbus >/dev/null 2>&1; then
-    QDBUS=qdbus
-elif command -v qdbus6 >/dev/null 2>&1; then
-    QDBUS=qdbus6
-else
-    die "qdbus not found - KDE Plasma 6 is required"
-fi
+# Tells KWin to re-read its configuration (and so load or unload the script).
+reconfigure_kwin() {
+    if command -v qdbus6 >/dev/null 2>&1; then
+        qdbus6 org.kde.KWin /KWin reconfigure >/dev/null
+    elif command -v qdbus >/dev/null 2>&1; then
+        qdbus org.kde.KWin /KWin reconfigure >/dev/null
+    elif command -v dbus-send >/dev/null 2>&1; then
+        dbus-send --session --print-reply --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null
+    else
+        die "neither qdbus6, qdbus nor dbus-send found - can't tell KWin to reload"
+    fi
+}
 
 set_enabled() {
     kwriteconfig6 --file kwinrc --group Plugins --key "${SCRIPT_NAME}Enabled" "$1"
-    "$QDBUS" org.kde.KWin /KWin reconfigure
+    reconfigure_kwin
 }
 
 if [ "${1-}" = "--uninstall" ]; then
