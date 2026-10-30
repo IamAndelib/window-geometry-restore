@@ -7,10 +7,10 @@
             }
         ],
         "Name": "Window Geometry Restore",
-        "Description": "Remember and restore window geometry for apps that don't do it themselves. A lightweight assistant to KWin's native window management.",
+        "Description": "Remembers and restores window geometry and tiles, per virtual desktop and monitor, for apps that don't do it themselves. Works with KWin's own window management, rules and tiling.",
         "Icon": "preferences-desktop-virtual",
         "Id": "windowgeometryrestore",
-        "Version": "1.3.0",
+        "Version": "1.4.0",
         "License": "GPLv3",
         "Website": "https://github.com/IamAndelib/window-geometry-restore"
     },
