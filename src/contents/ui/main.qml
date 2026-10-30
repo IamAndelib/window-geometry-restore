@@ -31,13 +31,16 @@ Item {
     property bool debugMode: false
     property bool restoreTiles: true
     property var blacklist: Engine.parseList('')
-    // Persisted: { apps: { cls: { lastAccess, saves } } }. Saves stay until replaced
-    // by the app's next close, so a crash or power loss still restores the last layout.
+    // Persisted: { apps: { cls: { lastAccess, saves, desktops: { key: { lastAccess, saves } } } } }.
+    // Each virtual desktop keeps its own layout per app, until the app's next close on that
+    // desktop replaces it, so a crash or power loss still restores the last layout.
     property var store: Engine.newState()
-    // Runtime, per app with open windows: { open: [ids], buffer: [closes], session, settled }
+    // Runtime, per group (an app on one desktop key, see desktopKeyOf) with open windows:
+    // { cls, desk, label, open: [ids], buffer: [closes], session, settled }
     property var live: ({})
-    // Runtime, per window id: { w, cls, assigned, userPlaced, provisional, tile, free, pendingTile,
-    //                          captionHandler, moveHandler, geometryHandler, tileHandler }
+    // Runtime, per window id: { w, cls, desk, group, label, assigned, userPlaced, provisional,
+    //                          tile, free, pendingTile,
+    //                          captionHandler, moveHandler, geometryHandler, tileHandler, desktopsHandler }
     // `tile` is the last tile seen and `free` the last floating geometry (both save-shaped).
     // `pendingTile` is a quick tile waiting for the window to become active.
     property var tracked: ({})
@@ -98,7 +101,9 @@ Item {
         store = result.state
         var removed = Engine.pruneExpired(store, Date.now())
         var count = 0
-        for (var cls in store.apps) count += store.apps[cls].saves.length
+        for (var cls in store.apps) {
+            for (var key in store.apps[cls].desktops) count += store.apps[cls].desktops[key].saves.length
+        }
         log('loaded ' + count + ' saved window(s) for ' + Object.keys(store.apps).length + ' app(s)' +
             (removed > 0 ? ', pruned ' + removed + ' expired app(s)' : ''))
         if (removed > 0 || result.error) persist()
@@ -119,6 +124,27 @@ Item {
         }
     }
 
+    // The desktop a window's layout belongs to: the desktop's id when the window is on exactly
+    // one desktop, '*' when it is on all or several. Ids survive logins and desktop reordering.
+    function desktopKeyOf(w) {
+        var desktops = w.desktops || []
+        if (w.onAllDesktops || desktops.length !== 1) return '*'
+        return String(desktops[0].id || desktops[0].x11DesktopNumber)
+    }
+
+    // Puts a tracked window in the group of its app on its current desktop key.
+    function joinGroup(entry, id) {
+        var w = entry.w
+        entry.desk = desktopKeyOf(w)
+        entry.group = entry.cls + '\n' + entry.desk
+        entry.label = entry.cls + (entry.desk === '*' ? ' (all desktops)' : ' (desktop ' + w.desktops[0].x11DesktopNumber + ')')
+        if (!live[entry.group]) {
+            live[entry.group] = { cls: entry.cls, desk: entry.desk, label: entry.label, open: [], buffer: [], session: null, settled: false }
+        }
+        live[entry.group].open.push(id)
+        return live[entry.group]
+    }
+
     // `adopted` windows were open before the script started (reload, KWin restart):
     // they are left where they are and only saved when they close.
     function trackWindow(w, adopted) {
@@ -130,24 +156,44 @@ Item {
         }
         var id = String(w.internalId)
         if (tracked[id]) return
-        if (!live[cls]) live[cls] = { open: [], buffer: [], session: null, settled: false }
-        var app = live[cls]
         var entry = {
-            w: w, cls: cls, assigned: !!adopted, userPlaced: false, provisional: null, tile: null, free: null, pendingTile: null,
-            captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null
+            w: w, cls: cls, desk: '', group: '', label: cls, assigned: !!adopted, userPlaced: false, provisional: null,
+            tile: null, free: null, pendingTile: null,
+            captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null, desktopsHandler: null
         }
         tracked[id] = entry
-        app.open.push(id)
+        var app = joinGroup(entry, id)
         entry.moveHandler = connectSignal(w, 'interactiveMoveResizeStarted', function () { onUserMoveResize(id) })
         entry.geometryHandler = connectSignal(w, 'frameGeometryChanged', function () { noteGeometry(id) })
         entry.tileHandler = connectSignal(w, 'tileChanged', function () { noteTile(id) })
+        entry.desktopsHandler = connectSignal(w, 'desktopsChanged', function () { onDesktopsChanged(id) })
         noteGeometry(id)
-        dbg('tracking window for ' + cls)
+        dbg('tracking window for ' + entry.label)
         if (adopted) {
             app.settled = true
-        } else if (app.session || startSession(cls)) {
-            joinSession(cls, id)
+        } else if (app.session || startSession(entry.group)) {
+            joinSession(entry.group, id)
         }
+    }
+
+    // A window moved to another desktop joins that desktop's group, as a window of a running
+    // app there. Leaving is not a close: the old desktop keeps its saved layout.
+    function onDesktopsChanged(id) {
+        var entry = tracked[id]
+        if (!entry || desktopKeyOf(entry.w) === entry.desk) return
+        var old = live[entry.group]
+        removeFromArray(old.open, id)
+        if (old.session && old.session.pending.indexOf(id) !== -1) {
+            removeFromArray(old.session.pending, id)
+            entry.assigned = true
+            unwatchCaption(entry)
+            dbg(entry.label + ': window moved to another desktop before its restore, not restoring it')
+        }
+        if (!old.open.length) delete live[entry.group]
+        entry.provisional = null
+        cancelPendingTile(entry)
+        joinGroup(entry, id).settled = true
+        dbg('window of ' + old.label + ' moved, now in ' + entry.label)
     }
 
     function untrack(id) {
@@ -158,6 +204,7 @@ Item {
         disconnectSignal(entry.w, 'interactiveMoveResizeStarted', entry.moveHandler)
         disconnectSignal(entry.w, 'frameGeometryChanged', entry.geometryHandler)
         disconnectSignal(entry.w, 'tileChanged', entry.tileHandler)
+        disconnectSignal(entry.w, 'desktopsChanged', entry.desktopsHandler)
         return entry
     }
 
@@ -246,11 +293,11 @@ Item {
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = describeTile(w.tile)
-            if (w.tile && !current) dbg(entry.cls + ': closed in a tile that could not be identified')
+            if (w.tile && !current) dbg(entry.label + ': closed in a tile that could not be identified')
             fields.tile = entry.tile || current
             fields.free = fields.tile ? entry.free : null
             if (fields.tile) {
-                dbg(entry.cls + ': closed in ' + fields.tile.kind + ' tile ' +
+                dbg(entry.label + ': closed in ' + fields.tile.kind + ' tile ' +
                     (fields.tile.kind === 'quick' ? fields.tile.index : '[' + fields.tile.path.join(',') + ']') +
                     (fields.tile.rel ? ' at ' + Math.round(fields.tile.rel.width * 100) + '%x' + Math.round(fields.tile.rel.height * 100) + '%' : '') +
                     (current ? '' : ' (last tile seen, none at close)') +
@@ -263,10 +310,10 @@ Item {
         }
     }
 
-    // Forget a window. Returns true when it was the app's last one and new saves were made.
+    // Forget a window. Returns true when it was its group's last one and new saves were made.
     function releaseWindow(id) {
         var entry = untrack(id)
-        var app = live[entry.cls]
+        var app = live[entry.group]
         removeFromArray(app.open, id)
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
         var awaitingRestore = !!app.session && app.session.pending.indexOf(id) !== -1
@@ -277,12 +324,13 @@ Item {
             if (app.buffer.length > Engine.MAX_BUFFER) app.buffer.shift()
         }
         if (app.open.length > 0) return false
-        delete live[entry.cls]
-        return finalizeApp(entry.cls, app.buffer)
+        delete live[entry.group]
+        return finalizeApp(app, app.buffer)
     }
 
-    // The windows that closed together (each within BURST_MS of the next) become the app's layout.
-    function finalizeApp(cls, buffer) {
+    // The windows that closed together (each within BURST_MS of the next) become the app's
+    // layout on that desktop.
+    function finalizeApp(app, buffer) {
         if (!buffer.length) return false
         var saves = []
         var last = buffer[buffer.length - 1].closeTime
@@ -290,24 +338,25 @@ Item {
             saves.unshift(buffer[i].snap)
             last = buffer[i].closeTime
         }
-        store.apps[cls] = { lastAccess: Date.now(), saves: saves }
-        log(cls + ' closed, saved ' + saves.length + ' window(s)')
+        Engine.recordLayout(store, app.cls, app.desk, saves, Date.now())
+        log(app.label + ' closed, saved ' + saves.length + ' window(s)')
         return true
     }
 
-    function startSession(cls) {
-        var app = live[cls]
-        var saved = store.apps[cls]
+    // Only the layout saved on the group's own desktop is restored: desktops are independent.
+    function startSession(group) {
+        var app = live[group]
+        var saved = Engine.layoutFor(store, app.cls, app.desk)
         if (app.settled || !saved) return false
-        saved.lastAccess = Date.now()
+        saved.lastAccess = store.apps[app.cls].lastAccess = Date.now()
         app.session = { saves: saved.saves, taken: [], remaining: saved.saves.length, pending: [], deadline: 0 }
-        dbg(cls + ': restore session started - ' + saved.saves.length + ' saved window(s)')
+        dbg(app.label + ': restore session started - ' + saved.saves.length + ' saved window(s)')
         ensureTick()
         return true
     }
 
-    function joinSession(cls, id) {
-        var session = live[cls].session
+    function joinSession(group, id) {
+        var session = live[group].session
         session.pending.push(id)
         session.deadline = Math.max(session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
         watchCaption(id)
@@ -330,12 +379,12 @@ Item {
         entry.userPlaced = true
         entry.provisional = null
         cancelPendingTile(entry)
-        var session = live[entry.cls].session
+        var session = live[entry.group].session
         if (entry.assigned || !session) return
         entry.assigned = true
         unwatchCaption(entry)
         removeFromArray(session.pending, id)
-        log(entry.cls + ': window placed by the user, not restoring it')
+        log(entry.label + ': window placed by the user, not restoring it')
     }
 
     function matchFor(entry, session) {
@@ -351,13 +400,13 @@ Item {
     function tryAssign(id) {
         var entry = tracked[id]
         if (!entry || entry.assigned) return
-        var session = live[entry.cls].session
+        var session = live[entry.group].session
         if (!session) return
         var match = matchFor(entry, session)
         if (!match || (match.tier !== 1 && session.remaining !== 1)) return
         assignSave(entry, id, session, match, false)
         if (session.remaining === 0) {
-            endSession(entry.cls)
+            endSession(entry.group)
         } else if (session.remaining === 1) {
             var waiting = session.pending.slice()
             for (var i = 0; i < waiting.length; i++) tryAssign(waiting[i])
@@ -372,12 +421,12 @@ Item {
         removeFromArray(session.pending, id)
         var moved = applySave(entry, id, session.saves[match.index], Date.now() + Engine.RESTORE_TIMEOUT_MS)
         var mode = bestEffort ? 'best effort' : (moved ? 'moved' : 'left as is')
-        log(entry.cls + ': restored window to saved state (' + mode + '), caption match ' + Math.round(match.score) + '%')
+        log(entry.label + ': restored window to saved state (' + mode + '), caption match ' + Math.round(match.score) + '%')
     }
 
     // Deadline: give each waiting window the best remaining save, best pair first.
-    function endSession(cls) {
-        var app = live[cls]
+    function endSession(group) {
+        var app = live[group]
         var session = app.session
         for (;;) {
             var best = null
@@ -391,7 +440,7 @@ Item {
         for (var j = 0; j < session.pending.length; j++) unwatchCaption(tracked[session.pending[j]])
         app.session = null
         app.settled = true
-        dbg(cls + ': restore session ended')
+        dbg(app.label + ': restore session ended')
     }
 
     function workArea(output) {
@@ -590,14 +639,16 @@ Item {
         try {
             var output = save.output ? resolveOutput(save.output) : entry.w.output
             if (!output) return null
-            var desktop = Workspace.currentDesktop
+            // Tile layouts are per desktop; a window on all desktops is tiled on the current one.
+            var desktops = entry.w.desktops || []
+            var desktop = desktops.length === 1 ? desktops[0] : Workspace.currentDesktop
             if (save.tile.kind === 'quick') {
                 var root = quickRootFor(entry.w, output, desktop)
                 var quick = root && root.tiles ? root.tiles[save.tile.index] : null
                 return quick ? { tile: quick, rel: save.tile.rel } : { quick: save.tile.index, rel: save.tile.rel, output: output }
             }
             var tile = findCustomTile(rootTileFor(output, desktop), save.tile)
-            if (!tile) log(entry.cls + ': saved tile is not in the current layout, restoring plain geometry')
+            if (!tile) log(entry.label + ': saved tile is not in the current layout, restoring plain geometry')
             return tile ? { tile: tile } : null
         } catch (e) {
             dbg('looking up the saved tile failed: ' + e)
@@ -612,17 +663,22 @@ Item {
             pending.handler = connectSignal(entry.w, 'activeChanged', function () { quickTileWhenActive(id) })
             if (!pending.handler) return
             entry.pendingTile = pending
-            if (!entry.w.active) dbg(entry.cls + ': waiting for the window to become active to quick-tile it')
+            if (!entry.w.active) dbg(entry.label + ': waiting for the window to become active to quick-tile it')
             quickTileWhenActive(id)
             return
         }
         try {
-            if (typeof tiling.tile.manage === 'function') tiling.tile.manage(entry.w)
+            var managed = true
+            if (typeof tiling.tile.manage === 'function') managed = tiling.tile.manage(entry.w) !== false
             else entry.w.tile = tiling.tile
-            log(entry.cls + ': put the window back into its tile')
+            if (!managed) {
+                log(entry.label + ': KWin did not accept the window into its tile')
+                return
+            }
+            log(entry.label + ': put the window back into its tile')
             restoreQuickSplit(entry, tiling.rel)
         } catch (e) {
-            log(entry.cls + ': tiling the window failed: ' + e)
+            log(entry.label + ': tiling the window failed: ' + e)
         }
     }
 
@@ -636,31 +692,39 @@ Item {
         var w = entry.w
         if (Date.now() > pending.until || !canPlace(w)) {
             cancelPendingTile(entry)
-            dbg(entry.cls + ': not quick-tiling the window, it was not active on its screen in time')
+            dbg(entry.label + ': not quick-tiling the window, it was not active on its screen in time')
             return
         }
         if (!w.active || Workspace.activeWindow !== w || w.output !== pending.output) return
         cancelPendingTile(entry)
         try {
             Workspace[Engine.QUICK_TILE_ACTIONS[pending.index]]()
-            log(entry.cls + ': put the window back into its quick tile')
+            log(entry.label + ': put the window back into its quick tile')
             restoreQuickSplit(entry, pending.rel)
         } catch (e) {
-            log(entry.cls + ': quick-tiling the window failed: ' + e)
+            log(entry.label + ': quick-tiling the window failed: ' + e)
         }
     }
 
     // KWin resets the quick-tile split once no quick tile on a screen holds a window, so a
     // resized quick tile would come back at half size. The split is shared: windows in the
-    // other quick tiles follow it, as when the user resized the tile.
+    // other quick tiles follow it, as when the user resized the tile. A tile that already
+    // holds another window keeps its size: a tile has one size, and that window was there first.
     function restoreQuickSplit(entry, rel) {
         var tile = entry.w.tile
         if (!rel || !tile || isTileAt(tile, rel)) return
+        var windows = tile.windows || []
+        for (var i = 0; i < windows.length; i++) {
+            if (windows[i] !== entry.w) {
+                dbg(entry.label + ': quick tile already holds another window, keeping its size')
+                return
+            }
+        }
         try {
             tile.relativeGeometry = Qt.rect(rel.x, rel.y, rel.width, rel.height)
-            dbg(entry.cls + ': quick tile resized back to ' + Math.round(rel.width * 100) + '%x' + Math.round(rel.height * 100) + '%')
+            dbg(entry.label + ': quick tile resized back to ' + Math.round(rel.width * 100) + '%x' + Math.round(rel.height * 100) + '%')
         } catch (e) {
-            log(entry.cls + ': resizing the quick tile failed: ' + e)
+            log(entry.label + ': resizing the quick tile failed: ' + e)
         }
     }
 
@@ -698,7 +762,7 @@ Item {
                         !canPlace(entry.w) || rectEquals(entry.w, retry.target)) {
                     retries.splice(i, 1)
                 } else if (retry.tries >= Engine.MAX_GEOMETRY_TRIES) {
-                    dbg(entry.cls + ': geometry did not stick, giving up silently (a window rule or the app owns this window)')
+                    dbg(entry.label + ': geometry did not stick, giving up silently (a window rule or the app owns this window)')
                     retries.splice(i, 1)
                 } else {
                     retry.tries++
@@ -712,13 +776,13 @@ Item {
     }
 
     function sweepSessions(now) {
-        for (var cls in live) {
-            var app = live[cls]
+        for (var group in live) {
+            var app = live[group]
             if (!app.session || now < app.session.deadline) continue
             try {
-                endSession(cls)
+                endSession(group)
             } catch (e) {
-                log(cls + ': ending restore session failed: ' + e)
+                log(app.label + ': ending restore session failed: ' + e)
                 app.session = null
                 app.settled = true
             }
@@ -727,8 +791,8 @@ Item {
 
     function isIdle() {
         if (retries.length > 0) return false
-        for (var cls in live) {
-            if (live[cls].session) return false
+        for (var group in live) {
+            if (live[group].session) return false
         }
         return true
     }

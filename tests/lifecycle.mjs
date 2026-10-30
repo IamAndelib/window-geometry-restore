@@ -10,7 +10,7 @@ const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url)
 
 const engineSource = readFileSync(new URL('../src/contents/ui/engine.js', import.meta.url), 'utf8')
     .replace(/^\s*\.pragma library.*$/m, '')
-const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE };`)()
+const Engine = new Function(`${engineSource}\nreturn { newState, parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, decodeState, encodeState, pruneExpired, mergeDiskApps, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS, MAX_GEOMETRY_TRIES, MAX_BUFFER, EXPIRY_MS, TICK_MS, QUICK_TILES, QUICK_TILE_ACTIONS, MAX_TILE_DEPTH, TILE_TOLERANCE, layoutFor, recordLayout };`)()
 
 function extractFunctions(source) {
     const functions = {}
@@ -40,7 +40,7 @@ const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
-    'loadConfig', 'loadPersisted', 'persist', 'trackWindow', 'untrack', 'geometryOf', 'describeTile',
+    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'onDesktopsChanged', 'untrack', 'geometryOf', 'describeTile',
     'noteTile', 'noteGeometry', 'snapshotWindow',
     'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
@@ -160,7 +160,7 @@ function makeCustomRoot(output) {
 const fakeWorkspace = {
     screens: [outputs[0], outputs[1]],
     stackingOrder: [],
-    desktops: [{ x11DesktopNumber: 1 }, { x11DesktopNumber: 2 }],
+    desktops: [{ x11DesktopNumber: 1, id: 'desk-uuid-1' }, { x11DesktopNumber: 2, id: 'desk-uuid-2' }, { x11DesktopNumber: 3, id: 'desk-uuid-3' }],
     activities: ['act-1', 'act-2'],
     virtualScreenGeometry: { x: 0, y: 0, width: 3280, height: 1080 },
     cursorPos: { x: 100, y: 100 },
@@ -176,7 +176,10 @@ const fakeWorkspace = {
     // Per screen: the custom (Meta+T) layout, and the quick-tile root KWin keeps internally.
     _customRoots: new Map(),
     _quickRoots: new Map(),
-    rootTile(output, _desktop) { return this._customRoots.get(output) || null },
+    // A layout set for one desktop (key 'output/desktop id') wins over one set for the screen.
+    rootTile(output, desktop) {
+        return this._customRoots.get(output.name + '/' + (desktop && desktop.id)) || this._customRoots.get(output) || null
+    },
     // Set by buildRuntime: what Workspace.windowRemoved would call.
     removed: null
 }
@@ -224,8 +227,8 @@ function makeWindow(fields) {
         resizeable: true,
         minSize: null,
         maxSize: null,
-        onAllDesktops: false,
-        desktops: fields.desktop ? [fakeWorkspace.desktops[fields.desktop - 1]] : [fakeWorkspace.desktops[0]],
+        onAllDesktops: fields.desktop === 'all',
+        desktops: fields.desktop === 'all' ? [] : fields.desktop ? [fakeWorkspace.desktops[fields.desktop - 1]] : [fakeWorkspace.desktops[0]],
         activities: fields.activities || [],
         _output: fields.outputIndex !== undefined ? outputs[fields.outputIndex] : outputs[0],
         _geometryWrites: 0,
@@ -252,6 +255,13 @@ function makeWindow(fields) {
         get frameGeometryChanged() { return this._signal('frameGeometryChanged') },
         get tileChanged() { return this._signal('tileChanged') },
         get activeChanged() { return this._signal('activeChanged') },
+        get desktopsChanged() { return this._signal('desktopsChanged') },
+        // The user sends the window to another desktop (a number), or to all desktops ('all').
+        _moveToDesktop(desktop) {
+            this.onAllDesktops = desktop === 'all'
+            this.desktops = desktop === 'all' ? [] : [fakeWorkspace.desktops[desktop - 1]]
+            this._emit('desktopsChanged')
+        },
         get output() { return this._output },
         get captionChanged() {
             const handlers = this._captionHandlers
@@ -393,6 +403,8 @@ function buildRuntime(initialBlob = '{}', config = {}) {
 }
 
 const sleepTick = (runtime, ms) => runtime.setNow(runtime.nowRef() + ms)
+// The runtime group of an app on one desktop (desktop numbers as in makeWindow, or 'all').
+const groupOf = (rt, cls, desktop = 1) => rt.liveRef()[cls + '\n' + (desktop === 'all' ? '*' : 'desk-uuid-' + desktop)]
 
 test('single-window app (chrome PWA): close, relaunch, geometry restored', () => {
     const rt = buildRuntime()
@@ -410,14 +422,14 @@ test('single-window app (chrome PWA): close, relaunch, geometry restored', () =>
     assert.equal(save.w, 1000)
     assert.equal(save.o.n, 'HDMI-A-1')
 
-    const relaunched = makeWindow({ cls: 'whatsapp', caption: 'WhatsApp', x: 200, y: 200, width: 1280, height: 720, outputIndex: 0, desktop: 1 })
+    const relaunched = makeWindow({ cls: 'whatsapp', caption: 'WhatsApp', x: 200, y: 200, width: 1280, height: 720, outputIndex: 0, desktop: 2 })
     rt.trackWindow(relaunched)
 
     assert.equal(relaunched.x, 2040)
     assert.equal(relaunched.y, 100)
     assert.equal(relaunched.width, 1000)
     assert.equal(relaunched.height, 700)
-    assert.equal(relaunched.desktops[0].x11DesktopNumber, 1, 'desktop untouched: KWin opens windows on the current desktop')
+    assert.equal(relaunched.desktops[0].x11DesktopNumber, 2, 'desktop untouched')
 })
 
 test('multi-window app: windows restored to their own slots regardless of launch order', () => {
@@ -617,7 +629,7 @@ test('close buffer is capped while an app keeps a window open (no unbounded memo
         aux.emitClosed()
     }
 
-    const app = rt.liveRef()['chatty']
+    const app = groupOf(rt, 'chatty')
     assert.equal(app.open.length, 1, 'main window still open')
     assert.equal(app.buffer.length, Engine.MAX_BUFFER, 'buffer capped at MAX_BUFFER')
 })
@@ -1032,7 +1044,7 @@ test('a failing geometry retry does not stop other sessions from ending', () => 
     assert.equal(rt.retriesRef().length, 0, 'failing retry dropped')
     sleepTick(rt, Engine.RESTORE_TIMEOUT_MS)
     rt.tick()
-    assert.equal(rt.liveRef().q.session, null, 'q session ended at its deadline')
+    assert.equal(groupOf(rt, 'q').session, null, 'q session ended at its deadline')
     assert.equal(rt.tickRef().running, false, 'timer stops once idle')
 })
 
@@ -1523,11 +1535,239 @@ test('the saved split comes back even when a neighbour shares the quick layout',
 })
 
 test('saves from before quick tile sizes were recorded still restore into the tile', () => {
-    const blob = JSON.stringify({ version: 2, apps: { mon: { t: 1000000000, w: [
+    const blob = JSON.stringify({ version: 2, apps: { mon: { t: 1000000000, d: { 'desk-uuid-1': { t: 1000000000, w: [
         { c: 'Mon', x: 0, y: 0, w: 960, h: 1080, o: { x: 0, y: 0, s: 'SER-1', n: 'DP-1' }, t: { k: 'q', i: 1 }, f: { x: 300, y: 200, w: 1000, h: 700, o: null } }
-    ] } } })
+    ] } } } } })
     const rt = buildRuntime(blob)
     const w = reopen(rt, 'mon', { caption: 'Mon', active: true })
     assert.equal(w.tile, quickRootOf(outputs[0]).tiles[1])
     assert.equal(w.width, 960)
+})
+
+// Saves one window of `cls` closed on `desktop` at the given geometry.
+function saveOn(rt, cls, desktop, geometry) {
+    const w = makeWindow({ cls, caption: 'Doc', desktop, ...geometry })
+    rt.trackWindow(w)
+    w.emitClosed()
+}
+
+test('an app open on one desktop does not stop a restore on another', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'bazaar', 2, { x: 500, y: 300, width: 900, height: 700 })
+    const elsewhere = makeWindow({ cls: 'bazaar', caption: 'Doc', desktop: 1 })
+    rt.trackWindow(elsewhere)
+
+    const w = makeWindow({ cls: 'bazaar', caption: 'Doc', desktop: 2, x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [500, 300, 900, 700])
+    assert.ok(rt.getLogs().some((l) => l.includes('bazaar (desktop 2): restored window')))
+})
+
+test('each desktop restores its own layout', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'konsole', 1, { x: 10, y: 10, width: 800, height: 600 })
+    saveOn(rt, 'konsole', 2, { x: 900, y: 300, width: 700, height: 500 })
+
+    const one = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 1, x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(one)
+    const two = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 2, x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(two)
+    assert.deepEqual([one.x, one.width], [10, 800])
+    assert.deepEqual([two.x, two.width], [900, 700])
+})
+
+test('a desktop without a save of its own restores nothing', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'konsole', 1, { x: 10, y: 10, width: 800, height: 600 })
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 3, x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._geometryWrites, 0)
+})
+
+test('data from before per-desktop layouts restores nothing, and is kept for older versions', () => {
+    const blob = JSON.stringify({ version: 2, apps: { konsole: { t: 1000000000, w: [{ c: 'Doc', x: 10, y: 10, w: 800, h: 600, o: null }] } } })
+    const rt = buildRuntime(blob)
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._geometryWrites, 0)
+    rt.persist()
+    assert.equal(JSON.parse(rt.blobRef()).apps.konsole.w[0].x, 10)
+})
+
+test('closing an app on one desktop saves that desktop only, while it stays open elsewhere', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'konsole', 1, { x: 10, y: 10, width: 800, height: 600 })
+    const stays = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 1, x: 10, y: 10, width: 800, height: 600 })
+    rt.trackWindow(stays)
+    const closes = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 2, x: 700, y: 50, width: 900, height: 500 })
+    rt.trackWindow(closes)
+
+    closes.emitClosed()
+    const app = savedApp(rt, 'konsole')
+    assert.equal(app.d['desk-uuid-2'].w[0].x, 700)
+    assert.equal(app.d['desk-uuid-1'].w[0].x, 10, 'desktop 1 keeps its layout')
+    assert.ok(rt.getLogs().some((l) => l.includes('konsole (desktop 2) closed, saved 1 window(s)')))
+})
+
+test('windows on all desktops share one layout of their own', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'player', 'all', { x: 1500, y: 800, width: 400, height: 250 })
+    assert.deepEqual(Object.keys(savedApp(rt, 'player').d), ['*'])
+
+    const onOne = makeWindow({ cls: 'player', caption: 'Doc', desktop: 1, x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(onOne)
+    assert.equal(onOne._geometryWrites, 0, 'not the layout of desktop 1')
+    onOne.emitClosed()
+    const everywhere = makeWindow({ cls: 'player', caption: 'Doc', desktop: 'all', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(everywhere)
+    assert.deepEqual([everywhere.x, everywhere.width], [1500, 400])
+    assert.ok(rt.getLogs().some((l) => l.includes('player (all desktops)')))
+})
+
+test('a window moved to another desktop is saved there; leaving is not a close', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'konsole', 1, { x: 10, y: 10, width: 800, height: 600 })
+    const w = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 1, x: 10, y: 10, width: 800, height: 600 })
+    rt.trackWindow(w)
+    w._moveToDesktop(3)
+    assert.equal(groupOf(rt, 'konsole', 1), undefined, 'desktop 1 has no open windows now')
+    assert.equal(savedApp(rt, 'konsole').d['desk-uuid-3'], undefined, 'nothing saved yet')
+    assert.ok(groupOf(rt, 'konsole', 3).settled, 'the app now runs on desktop 3')
+
+    w._setFrame({ x: 400, y: 300, width: 700, height: 500 })
+    w.emitClosed()
+    const app = savedApp(rt, 'konsole')
+    assert.equal(app.d['desk-uuid-3'].w[0].x, 400)
+    assert.equal(app.d['desk-uuid-1'].w[0].x, 10, 'desktop 1 kept its layout')
+    assert.equal(w._connected('desktopsChanged'), 0)
+})
+
+test('a window moved to another desktop before its restore is not restored', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'konsole', caption: 'One', x: 10, y: 10, width: 800, height: 600 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Two', x: 900, y: 10, width: 700, height: 500 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    closeAll(a, b)
+
+    const w = makeWindow({ cls: 'konsole', caption: 'Something else', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w._geometryWrites, 0, 'ambiguous: waits for the deadline')
+    w._moveToDesktop(2)
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.equal(w._geometryWrites, 0)
+    assert.equal(rt.tickRef().running, false)
+})
+
+test('a window opening on another desktop is tiled in that desktop\'s layout', () => {
+    const rt = buildRuntime()
+    const layout2 = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set('DP-1/desk-uuid-2', layout2)
+    fakeWorkspace._customRoots.set(outputs[0], makeCustomRoot(outputs[0])) // the current desktop's
+    const w0 = makeWindow({ cls: 'doc', caption: 'Doc', desktop: 2, x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    w0._tileTo(layout2.tiles[0])
+    w0.emitClosed()
+
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', desktop: 2, x: 40, y: 40, width: 640, height: 480 })
+    rt.trackWindow(w)
+    assert.equal(w.tile, layout2.tiles[0])
+})
+
+test('a quick-tiled neighbour on the window\'s own desktop is used, whatever desktop is current', () => {
+    const rt = buildRuntime()
+    const root2 = makeQuickRoot(outputs[0])
+    saveOn(rt, 'doc', 2, { x: 300, y: 200, width: 1000, height: 700 })
+    const saved = savedApp(rt, 'doc')
+    assert.ok(saved)
+    const w0 = makeWindow({ cls: 'mon', caption: 'Mon', desktop: 2, x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    w0._tileTo(root2.tiles[1])
+    w0.emitClosed()
+    const neighbour = makeWindow({ cls: 'other', caption: 'Other', desktop: 2 })
+    neighbour._tileTo(root2.tiles[0])
+    fakeWorkspace.stackingOrder = [neighbour]
+    let w
+    try {
+        w = makeWindow({ cls: 'mon', caption: 'Mon', desktop: 2, x: 40, y: 40, width: 640, height: 480 })
+        rt.trackWindow(w)
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(w.tile, root2.tiles[1], 'desktop 1 is current, but the window lives on desktop 2')
+})
+
+test('a tile KWin refuses leaves the window floating at its pre-tile geometry', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set(outputs[0], layout)
+    saveTiled(rt, 'doc', layout.tiles[0])
+    layout.tiles[0].manage = () => false
+
+    const w = reopen(rt, 'doc')
+    assert.equal(w.tile, null)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [300, 200, 1000, 700])
+    assert.ok(rt.getLogs().some((l) => l.includes('KWin did not accept the window into its tile')))
+    assert.ok(!rt.getLogs().some((l) => l.includes('put the window back into its tile')))
+})
+
+test('a window restored into a quick tile that holds another window takes the tile\'s size', () => {
+    const rt = buildRuntime()
+    const root = quickRootOf(outputs[0])
+    const w0 = makeWindow({ cls: 'bazaar', caption: 'Doc', x: 300, y: 200, width: 1000, height: 700 })
+    rt.trackWindow(w0)
+    w0._tileTo(root.tiles[0])
+    root.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.6, height: 1 }
+    w0.emitClosed()
+
+    const mon = makeWindow({ cls: 'mon', caption: 'Mon' })
+    mon._tileTo(root.tiles[0])
+    root.tiles[0].relativeGeometry = { x: 0, y: 0, width: 0.41, height: 1 }
+    fakeWorkspace.stackingOrder = [mon]
+    let w
+    try {
+        w = reopen(rt, 'bazaar')
+    } finally {
+        fakeWorkspace.stackingOrder = []
+    }
+    assert.equal(w.tile, root.tiles[0])
+    assert.equal(root.tiles[0].relativeGeometry.width, 0.41, 'the tile keeps its size')
+    assert.equal(mon.width, 787, 'the window already in the tile is not resized')
+    assert.equal(w.width, 787)
+})
+
+test('shutdown saves each desktop\'s layout separately', () => {
+    const rt = buildRuntime()
+    const one = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 1, x: 10, y: 10, width: 800, height: 600 })
+    const two = makeWindow({ cls: 'konsole', caption: 'Doc', desktop: 2, x: 900, y: 10, width: 700, height: 500 })
+    rt.trackWindow(one)
+    rt.trackWindow(two)
+    rt.shutdown()
+    const app = savedApp(rt, 'konsole')
+    assert.equal(app.d['desk-uuid-1'].w[0].x, 10)
+    assert.equal(app.d['desk-uuid-2'].w[0].x, 900)
+})
+
+test('a window moved away during a restore that goes on for other windows is not restored', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'konsole', caption: 'One', x: 10, y: 10, width: 800, height: 600 })
+    const b = makeWindow({ cls: 'konsole', caption: 'Two', x: 900, y: 10, width: 700, height: 500 })
+    const c = makeWindow({ cls: 'konsole', caption: 'Three', x: 300, y: 500, width: 600, height: 400 })
+    rt.trackWindow(a)
+    rt.trackWindow(b)
+    rt.trackWindow(c)
+    closeAll(a, b, c)
+
+    // Caption matches without the size: not decisive, so both wait for the deadline.
+    const stays = makeWindow({ cls: 'konsole', caption: 'One', x: 0, y: 0, width: 640, height: 480 })
+    const moves = makeWindow({ cls: 'konsole', caption: 'Two', x: 0, y: 0, width: 640, height: 480 })
+    rt.trackWindow(stays)
+    rt.trackWindow(moves)
+    assert.equal(stays._geometryWrites + moves._geometryWrites, 0, 'both waiting')
+    moves._moveToDesktop(2)
+    sleepTick(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.ok(stays._geometryWrites > 0, 'the window that stayed got a save at the deadline')
+    assert.equal(moves._geometryWrites, 0, 'the moved window was left alone')
 })

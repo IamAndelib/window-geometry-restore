@@ -1,7 +1,10 @@
 .pragma library
 
 // Persisted key legend (compact on purpose - the blob lives in a single KConfig entry):
-//   app:  { t: lastAccessTime, w: [saves] }
+//   app:  { t: lastAccessTime, w: [saves], d: { desktopKey: { t, w: [saves] } } }
+//         d holds one layout per virtual desktop (key: the desktop's id, or '*' for windows on
+//         all or several desktops); restores read only d. w is the latest layout from any
+//         desktop, kept so that versions without d still work.
 //   save: { c: caption, x: globalX, y: globalY, w: width, h: height,
 //           o: { x, y, s: outputSerial, n: outputName }  output-relative position,
 //           t: tile (only when tiled at close):
@@ -24,6 +27,7 @@ var TICK_MS = 250
 var MAX_BUFFER = 64
 var EXPIRY_MS = 30 * 24 * 60 * 60 * 1000
 var MAX_APPS = 500
+var MAX_DESKTOP_KEY = 64
 // KWin creates the quick tiles in this order; the actions quick-tile the active window.
 var QUICK_TILE_ACTIONS = [
     'slotWindowQuickTileLeft', 'slotWindowQuickTileRight', 'slotWindowQuickTileTop', 'slotWindowQuickTileBottom',
@@ -233,6 +237,32 @@ function decodeSave(s) {
     return makeSave(geometry)
 }
 
+function decodeSaves(list) {
+    var saves = []
+    if (!Array.isArray(list)) return saves
+    for (var i = 0; i < list.length; i++) {
+        var save = decodeSave(list[i])
+        if (save) saves.push(save)
+    }
+    return saves
+}
+
+function decodeDesktops(d, fallbackTime) {
+    var desktops = {}
+    if (!isObject(d)) return desktops
+    for (var key in d) {
+        if (!key || key.length > MAX_DESKTOP_KEY || !isObject(d[key])) continue
+        var saves = decodeSaves(d[key].w)
+        if (saves.length) desktops[key] = { lastAccess: numberOr(d[key].t, fallbackTime), saves: saves }
+    }
+    return desktops
+}
+
+function hasLayouts(app) {
+    return !!app && ((Array.isArray(app.saves) && app.saves.length > 0) ||
+                     (isObject(app.desktops) && Object.keys(app.desktops).length > 0))
+}
+
 // Never throws. Returns { state, error } - error is null when the blob was usable.
 function decodeState(text) {
     var state = newState()
@@ -249,15 +279,18 @@ function decodeState(text) {
     if (!isObject(apps)) return { state: state, error: 'unexpected apps' }
     for (var cls in apps) {
         var app = apps[cls]
-        if (!isObject(app) || !Array.isArray(app.w) || !app.w.length) continue
-        var saves = []
-        for (var i = 0; i < app.w.length; i++) {
-            var save = decodeSave(app.w[i])
-            if (save) saves.push(save)
-        }
-        if (saves.length) state.apps[cls] = { lastAccess: numberOr(app.t, 0), saves: saves }
+        if (!isObject(app)) continue
+        var lastAccess = numberOr(app.t, 0)
+        var decoded = { lastAccess: lastAccess, saves: decodeSaves(app.w), desktops: decodeDesktops(app.d, lastAccess) }
+        if (hasLayouts(decoded)) state.apps[cls] = decoded
     }
     return { state: state, error: null }
+}
+
+function encodeSaves(saves) {
+    var out = []
+    for (var i = 0; i < saves.length; i++) out.push(encodeSave(saves[i]))
+    return out
 }
 
 function encodeState(state) {
@@ -265,21 +298,52 @@ function encodeState(state) {
     if (!state || !state.apps) return JSON.stringify(out)
     for (var cls in state.apps) {
         var app = state.apps[cls]
-        if (!app || !Array.isArray(app.saves) || !app.saves.length) continue
-        var saves = []
-        for (var i = 0; i < app.saves.length; i++) saves.push(encodeSave(app.saves[i]))
-        out.apps[cls] = { t: numberOr(app.lastAccess, 0), w: saves }
+        if (!hasLayouts(app)) continue
+        var encoded = { t: numberOr(app.lastAccess, 0) }
+        if (Array.isArray(app.saves) && app.saves.length) encoded.w = encodeSaves(app.saves)
+        var desktops = isObject(app.desktops) ? app.desktops : {}
+        var keys = Object.keys(desktops)
+        if (keys.length) {
+            encoded.d = {}
+            for (var i = 0; i < keys.length; i++) {
+                var layout = desktops[keys[i]]
+                encoded.d[keys[i]] = { t: numberOr(layout.lastAccess, 0), w: encodeSaves(layout.saves) }
+            }
+        }
+        out.apps[cls] = encoded
     }
     return JSON.stringify(out)
 }
 
+// The layout an app left on one desktop: { lastAccess, saves } or null.
+function layoutFor(state, cls, key) {
+    var app = state.apps[cls]
+    return app && isObject(app.desktops) && app.desktops[key] ? app.desktops[key] : null
+}
+
+function recordLayout(state, cls, key, saves, now) {
+    var app = state.apps[cls]
+    if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: {} }
+    if (!isObject(app.desktops)) app.desktops = {}
+    app.desktops[key] = { lastAccess: now, saves: saves }
+    app.saves = saves
+    app.lastAccess = now
+}
+
 function pruneExpired(state, now) {
     var removed = 0
+    var cutoff = now - EXPIRY_MS
     var keys = Object.keys(state.apps)
     for (var i = 0; i < keys.length; i++) {
-        if (state.apps[keys[i]].lastAccess < now - EXPIRY_MS) {
+        var app = state.apps[keys[i]]
+        if (app.lastAccess < cutoff) {
             delete state.apps[keys[i]]
             removed++
+            continue
+        }
+        // A deleted desktop's layouts go the same way as an unused app's.
+        for (var key in app.desktops || {}) {
+            if (app.desktops[key].lastAccess < cutoff) delete app.desktops[key]
         }
     }
     var remaining = Object.keys(state.apps)
@@ -293,17 +357,27 @@ function pruneExpired(state, now) {
     return removed
 }
 
-// Re-adopt apps that exist on disk but are missing from the in-memory state
-// (written by another KWin instance, e.g. across a login). Memory wins for every
-// app it already knows. Callers prune afterwards, so expired disk apps still go.
+// Re-adopt apps and desktop layouts that exist on disk but are missing from the in-memory
+// state (written by another KWin instance, e.g. across a login). Memory wins for every app
+// and desktop it already knows. Callers prune afterwards, so expired disk layouts still go.
 function mergeDiskApps(state, diskState) {
     var adopted = 0
     if (!diskState || !diskState.apps) return adopted
     for (var cls in diskState.apps) {
         var app = diskState.apps[cls]
-        if (app && Array.isArray(app.saves) && app.saves.length > 0 && !state.apps[cls]) {
+        if (!hasLayouts(app)) continue
+        var known = state.apps[cls]
+        if (!known) {
             state.apps[cls] = app
             adopted++
+            continue
+        }
+        if (!isObject(known.desktops)) known.desktops = {}
+        for (var key in app.desktops || {}) {
+            if (!known.desktops[key]) {
+                known.desktops[key] = app.desktops[key]
+                adopted++
+            }
         }
     }
     return adopted

@@ -10,7 +10,7 @@ const engine = new Function(`
     return { SCHEMA_VERSION, CAPTION_FALLBACK, BURST_MS, RESTORE_TIMEOUT_MS, RETRY_MAX_AGE_MS,
              MAX_GEOMETRY_TRIES, EXPIRY_MS, MAX_APPS,
              parseList, isListed, captionScore, isBetterMatch, bestMatch, makeSave, newState,
-             decodeState, encodeState, pruneExpired, mergeDiskApps };
+             decodeState, encodeState, pruneExpired, mergeDiskApps, layoutFor, recordLayout, MAX_DESKTOP_KEY };
 `)()
 
 function save(overrides = {}) {
@@ -302,6 +302,96 @@ test('mergeDiskApps: adopts disk-only apps, memory wins for known apps', () => {
     assert.equal(adopted, 1)
     assert.equal(memory.apps['known'].saves[0].caption, 'Window', 'memory wins for known apps')
     assert.equal(memory.apps['lost'].saves[0].caption, 'lost', 'disk-only app re-adopted')
+})
+
+function desktopState() {
+    const state = engine.newState()
+    engine.recordLayout(state, 'konsole', 'uuid-desk-1', [save({ caption: 'On one' })], 100)
+    engine.recordLayout(state, 'konsole', '*', [save({ caption: 'Everywhere' })], 200)
+    engine.recordLayout(state, 'konsole', 'uuid-desk-2', [save({ caption: 'On two' }), save({ caption: 'Also two' })], 300)
+    return state
+}
+
+test('recordLayout keeps one layout per desktop, and the latest one for older versions', () => {
+    const state = desktopState()
+    const app = state.apps['konsole']
+    assert.equal(app.lastAccess, 300)
+    assert.deepEqual(app.saves.map((s) => s.caption), ['On two', 'Also two'], 'w: the latest layout, any desktop')
+    assert.deepEqual(engine.layoutFor(state, 'konsole', 'uuid-desk-1').saves.map((s) => s.caption), ['On one'])
+    assert.equal(engine.layoutFor(state, 'konsole', 'uuid-desk-1').lastAccess, 100)
+    assert.deepEqual(engine.layoutFor(state, 'konsole', '*').saves.map((s) => s.caption), ['Everywhere'])
+    assert.equal(engine.layoutFor(state, 'konsole', 'uuid-desk-3'), null)
+    assert.equal(engine.layoutFor(state, 'dolphin', 'uuid-desk-1'), null)
+})
+
+test('per-desktop layouts round-trip; older versions still read w', () => {
+    const blob = JSON.parse(engine.encodeState(desktopState()))
+    assert.equal(blob.version, 2, 'additive: no version bump')
+    const app = blob.apps['konsole']
+    assert.deepEqual(app.w.map((s) => s.c), ['On two', 'Also two'])
+    assert.deepEqual(Object.keys(app.d).sort(), ['*', 'uuid-desk-1', 'uuid-desk-2'])
+    assert.equal(app.d['uuid-desk-1'].t, 100)
+
+    const decoded = engine.decodeState(JSON.stringify(blob))
+    assert.equal(decoded.error, null)
+    assert.deepEqual(engine.layoutFor(decoded.state, 'konsole', 'uuid-desk-2').saves.map((s) => s.caption), ['On two', 'Also two'])
+    assert.equal(engine.layoutFor(decoded.state, 'konsole', '*').lastAccess, 200)
+})
+
+test('data from older versions has no per-desktop layout, so it restores nothing', () => {
+    const r = engine.decodeState(JSON.stringify({ version: 2, apps: { konsole: { t: 5, w: [{ c: 'Old', x: 1, y: 2, w: 800, h: 600 }] } } }))
+    assert.equal(r.error, null)
+    assert.equal(r.state.apps['konsole'].saves.length, 1, 'kept, and written back for older versions')
+    assert.equal(engine.layoutFor(r.state, 'konsole', 'uuid-desk-1'), null)
+    assert.equal(engine.layoutFor(r.state, 'konsole', '*'), null)
+    assert.ok(!('d' in JSON.parse(engine.encodeState(r.state)).apps['konsole']), 'no empty d written')
+})
+
+test('malformed per-desktop data is dropped, valid layouts are kept', () => {
+    const good = { c: 'Win', x: 1, y: 2, w: 800, h: 600 }
+    const blob = JSON.stringify({ version: 2, apps: {
+        a: { t: 1, w: [good], d: 'nope' },
+        b: { t: 1, w: [good], d: { '': { t: 1, w: [good] }, ['x'.repeat(engine.MAX_DESKTOP_KEY + 1)]: { t: 1, w: [good] },
+                                   bad: 7, empty: { t: 1, w: [] }, junk: { t: 1, w: [{ c: 'no size' }] }, ok: { t: 'x', w: [good] } } },
+        onlyDesktops: { t: 9, d: { 'uuid-desk-1': { t: 9, w: [good] } } },
+        nothing: { t: 9, d: { 'uuid-desk-1': { t: 9, w: [] } } }
+    } })
+    const r = engine.decodeState(blob)
+    assert.equal(r.error, null)
+    assert.equal(engine.layoutFor(r.state, 'a', 'nope'), null)
+    assert.deepEqual(Object.keys(r.state.apps['b'].desktops), ['ok'])
+    assert.equal(engine.layoutFor(r.state, 'b', 'ok').lastAccess, 1, 'no valid time: the app\'s')
+    assert.equal(engine.layoutFor(r.state, 'onlyDesktops', 'uuid-desk-1').saves.length, 1, 'an app with only per-desktop layouts is kept')
+    assert.equal(r.state.apps['onlyDesktops'].saves.length, 0)
+    assert.equal(r.state.apps['nothing'], undefined)
+    const reencoded = JSON.parse(engine.encodeState(r.state))
+    assert.equal(reencoded.apps['onlyDesktops'].w, undefined, 'no empty w written')
+})
+
+test('pruneExpired drops stale desktop layouts and keeps fresh ones', () => {
+    const now = 1_000_000_000
+    const state = engine.newState()
+    engine.recordLayout(state, 'konsole', 'gone-desktop', [save()], now - engine.EXPIRY_MS - 1)
+    engine.recordLayout(state, 'konsole', 'uuid-desk-1', [save()], now - 1000)
+    engine.recordLayout(state, 'old', 'uuid-desk-1', [save()], now - engine.EXPIRY_MS - 1)
+
+    assert.equal(engine.pruneExpired(state, now), 1, 'counts removed apps')
+    assert.equal(state.apps['old'], undefined)
+    assert.equal(engine.layoutFor(state, 'konsole', 'gone-desktop'), null)
+    assert.ok(engine.layoutFor(state, 'konsole', 'uuid-desk-1'))
+})
+
+test('mergeDiskApps adopts desktop layouts missing from memory; memory wins per desktop', () => {
+    const memory = engine.newState()
+    engine.recordLayout(memory, 'konsole', 'uuid-desk-1', [save({ caption: 'memory' })], 50)
+    const disk = engine.newState()
+    engine.recordLayout(disk, 'konsole', 'uuid-desk-1', [save({ caption: 'stale on disk' })], 10)
+    engine.recordLayout(disk, 'konsole', 'uuid-desk-2', [save({ caption: 'other instance' })], 20)
+
+    assert.equal(engine.mergeDiskApps(memory, disk), 1)
+    assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-1').saves[0].caption, 'memory')
+    assert.equal(engine.layoutFor(memory, 'konsole', 'uuid-desk-2').saves[0].caption, 'other instance')
+    assert.equal(memory.apps['konsole'].saves[0].caption, 'memory', 'w stays the in-memory latest')
 })
 
 test('default exclusion list is identical in main.qml and config/main.xml', () => {

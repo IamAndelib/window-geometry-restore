@@ -17,8 +17,9 @@ desktops and window states stay native KWin.
   `REQUIRED_FUNCTIONS`, so update that list when adding or removing functions.
 
 ## State model (main.qml)
-- `store` — persisted saves per app; kept until the app's next close replaces them.
-- `live` — runtime per app with open windows (`open`, `buffer`, `session`, `settled`).
+- `store` — persisted layouts per app and virtual desktop (`d`), plus the latest one (`w`) for
+  older versions; a desktop's layout is kept until the app's next close on that desktop.
+- `live` — runtime per group, i.e. an app on one desktop key (`open`, `buffer`, `session`, `settled`).
 - `tracked` — runtime per window id; `retries` — geometry writes that have not stuck yet.
 - Window close is detected only through `Workspace.windowRemoved`.
 
@@ -51,4 +52,5 @@ Bump `Version` in `src/metadata.json`, merge to `main`, then push a matching `v<
 The Release workflow refuses a tag that does not match `metadata.json`.
 
 ## Current work
-`docs/plans/tile-restore.md` — plan for restoring tiled state and the pre-tile size.
+- `docs/plans/tile-restore.md` — tiled state and pre-tile size: implemented (see its Status section).
+- `docs/plans/per-desktop-restore.md` — independent save/restore per virtual desktop: implemented.
