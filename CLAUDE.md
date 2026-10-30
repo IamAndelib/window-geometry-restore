@@ -15,6 +15,12 @@ desktops and window states stay native KWin.
 - `tests/lifecycle.mjs` — extracts the real functions from `main.qml` and runs them against a
   fake KWin. It requires every 4-space-indented `function` in `main.qml` to be listed in
   `REQUIRED_FUNCTIONS`, so update that list when adding or removing functions.
+- `tests/kwin/` — scenarios against a real headless KWin (`kwin_wayland --virtual`, 1-2
+  virtual monitors), adapted from kde-snap-overlay's test bed. Each scenario gets its own
+  D-Bus, HOME and config under the container's `/var/tmp`. Apps are `testwindow.cpp`
+  processes, each with its own app id. Monitors are switched off and on with `outputctl.c`,
+  and KWin's state is read through probe scripts. Scenarios check that the script works with
+  KWin's own mechanisms (window rules, quick tiles, monitor hotplug), not against them.
 
 ## State model (main.qml)
 - `store` — persisted layouts per app and virtual desktop (`d`), plus the latest one (`w`) for
@@ -25,6 +31,9 @@ desktops and window states stay native KWin.
 
 ## Commands
 - `make test` — run all tests (Node 22). Run before every commit; CI runs it on push and PRs.
+- `make test-kwin` (`K=name` for some) — the real-KWin scenarios, about 3 minutes; dev container
+  only, not in CI. Run them for anything touching screens, tiles, placement or saving.
+  `WGR_ROOT=/path/to/copy` runs them against another checkout, for mutation checks.
 - `make build` — package `windowgeometryrestore.kwinscript`.
 - `make logs` — follow the script's log (`journalctl --user -f | grep WindowGeometryRestore`).
 

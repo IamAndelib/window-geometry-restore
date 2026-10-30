@@ -40,7 +40,7 @@ const extracted = extractFunctions(qml)
 
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'removeFromArray', 'connectSignal', 'disconnectSignal', 'isValidWindow',
-    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'onDesktopsChanged', 'untrack', 'geometryOf', 'describeTile',
+    'loadConfig', 'loadPersisted', 'persist', 'desktopKeyOf', 'joinGroup', 'trackWindow', 'onDesktopsChanged', 'untrack', 'geometryOf', 'isAway', 'isMaximized', 'copyGeometry', 'describeTile',
     'noteTile', 'noteGeometry', 'snapshotWindow',
     'releaseWindow', 'finalizeApp', 'startSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession', 'workArea',
@@ -220,6 +220,7 @@ function makeWindow(fields) {
         keepAbove: false,
         keepBelow: false,
         fullScreen: false,
+        maximizeMode: 0,
         tile: null,
         move: false,
         resize: false,
@@ -1770,4 +1771,114 @@ test('a window moved away during a restore that goes on for other windows is not
     rt.tick()
     assert.ok(stays._geometryWrites > 0, 'the window that stayed got a save at the deadline')
     assert.equal(moves._geometryWrites, 0, 'the moved window was left alone')
+})
+
+test('a window closed maximized saves its floating geometry, not the maximized frame', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 200, width: 1000, height: 650 })
+    rt.trackWindow(w)
+    w.maximizeMode = 3
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.w, s.h], [300, 200, 1000, 650])
+})
+
+test('a window maximized all along saves nothing, so the previous layout stays', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 40, y: 50, width: 900, height: 600 })
+    const w = makeWindow({ cls: 'app', caption: 'Other', x: 0, y: 0, width: 1920, height: 1080 })
+    w.maximizeMode = 3
+    rt.trackWindow(w)
+    w.emitClosed()
+    assert.equal(savedApp(rt, 'app').d['desk-uuid-1'].w[0].x, 40)
+})
+
+// KWin moves the windows of a monitor that goes away to another one first, then reports it.
+function unplug(window, to, rect) {
+    fakeWorkspace.screens = [outputs[0]]
+    window._output = to
+    window._setFrame(rect)
+}
+
+test('a window KWin moved off an unplugged monitor is saved where it was on that monitor', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    try {
+        unplug(w, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.w, s.h, s.o.n], [2100, 150, 900, 600, 'HDMI-A-1'])
+})
+
+test('once KWin moves it back to its monitor, the window is tracked as usual again', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    try {
+        unplug(w, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    w._output = outputs[1]
+    w._setFrame({ x: 2100, y: 150, width: 900, height: 600 })
+    w._setFrame({ x: 2200, y: 250, width: 800, height: 500 })
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.w, s.h], [2200, 250, 800, 500])
+})
+
+test('a window the user moves after its monitor went away is saved where the user put it', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    try {
+        unplug(w, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+        w.emitMoveResizeStarted()
+        w._setFrame({ x: 400, y: 300, width: 900, height: 600 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.o.n], [400, 300, 'DP-1'])
+})
+
+test('a window placed on a fallback screen keeps its saved monitor when it closes there', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+        assert.equal(w._geometryWrites, 1, 'placed on the fallback screen')
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').d['desk-uuid-1'].w
+    assert.deepEqual([s.x, s.y, s.o.n], [2100, 150, 'HDMI-A-1'], 'not the fallback spot')
+})
+
+test('a monitor that comes back under another connector name counts as the window\'s own', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    const renamed = makeOutput('HDMI-A-2', 'SER-2', 2000, 0, 1280, 1024)
+    try {
+        unplug(w, outputs[0], { x: 180, y: 150, width: 900, height: 600 })
+        fakeWorkspace.screens = [outputs[0], renamed]
+        w._output = renamed
+        w._setFrame({ x: 2100, y: 150, width: 900, height: 600 })
+        w._setFrame({ x: 2300, y: 250, width: 800, height: 500 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.y, s.o.n], [2300, 250, 'HDMI-A-2'])
 })

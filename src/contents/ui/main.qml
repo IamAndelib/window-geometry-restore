@@ -39,9 +39,10 @@ Item {
     // { cls, desk, label, open: [ids], buffer: [closes], session, settled }
     property var live: ({})
     // Runtime, per window id: { w, cls, desk, group, label, assigned, userPlaced, provisional,
-    //                          tile, free, pendingTile,
+    //                          home, tile, free, pendingTile,
     //                          captionHandler, moveHandler, geometryHandler, tileHandler, desktopsHandler }
-    // `tile` is the last tile seen and `free` the last floating geometry (both save-shaped).
+    // `home` is the last geometry on a connected screen, `tile` the last tile seen and `free` the
+    // last floating geometry (all save-shaped).
     // `pendingTile` is a quick tile waiting for the window to become active.
     property var tracked: ({})
     // Geometry writes that have not stuck yet: { id, target, tries, born }
@@ -158,7 +159,7 @@ Item {
         if (tracked[id]) return
         var entry = {
             w: w, cls: cls, desk: '', group: '', label: cls, assigned: !!adopted, userPlaced: false, provisional: null,
-            tile: null, free: null, pendingTile: null,
+            home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null, desktopsHandler: null
         }
         tracked[id] = entry
@@ -258,11 +259,33 @@ Item {
         }
     }
 
+    // KWin moves the windows of a monitor that goes away to another one, and back when it
+    // returns. Those moves are not the user's: while the window's own screen is missing, its
+    // last geometry there (`home`) is what counts. A window the script placed on a fallback
+    // screen belongs to its saved screen the same way. The user moving it ends this.
+    function isAway(entry) {
+        var home = entry.home && entry.home.output
+        if (!home) return false
+        var screens = Workspace.screens || []
+        var sameSerial = []
+        for (var i = 0; i < screens.length; i++) {
+            if (String(screens[i].name) === home.name) return false
+            if (home.serial && String(screens[i].serialNumber) === home.serial) sameSerial.push(screens[i])
+        }
+        // Its screen came back under another connector name (a serial no other screen shares).
+        return !(sameSerial.length === 1 && entry.w.output === sameSerial[0])
+    }
+
+    // KWin's own maximize state (MaximizeRestore is 0).
+    function isMaximized(w) {
+        return !!w.maximizeMode
+    }
+
     // Only records a tile, never clears one: KWin may drop the tile while it closes the
     // window, and that close must still save the tile. A floating frame clears it instead.
     function noteTile(id) {
         var entry = tracked[id]
-        if (entry && entry.w.tile) entry.tile = describeTile(entry.w.tile) || entry.tile
+        if (entry && entry.w.tile && !isAway(entry)) entry.tile = describeTile(entry.w.tile) || entry.tile
     }
 
     // KWin sets the requested tile before it moves the window into it, so tile-sized
@@ -272,9 +295,14 @@ Item {
         if (!entry) return
         var w = entry.w
         try {
+            if (isAway(entry)) {
+                if (entry.pendingTile) quickTileWhenActive(id)
+                return
+            }
+            entry.home = geometryOf(w.output, w.x, w.y, w.width, w.height)
             if (w.tile) {
                 noteTile(id)
-            } else if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximizedLike(w)) {
+            } else if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w)) {
                 entry.tile = null
                 entry.free = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
@@ -284,16 +312,34 @@ Item {
         if (entry.pendingTile) quickTileWhenActive(id)
     }
 
+    function copyGeometry(g) {
+        return { x: g.x, y: g.y, width: g.width, height: g.height, output: g.output }
+    }
+
     function snapshotWindow(entry) {
         var w = entry.w
         try {
             if (w.fullScreen || !(w.width >= 1) || !(w.height >= 1)) return null
-            var fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
+            var away = isAway(entry)
+            var fields
+            if (away) {
+                fields = copyGeometry(entry.home)
+                dbg(entry.label + ': closed while its screen ' + entry.home.output.name + ' is missing, saved its place there')
+            } else if (isMaximized(w) && !w.tile) {
+                // Maximizing is the app's and KWin's: the layout is the window's normal geometry.
+                if (!entry.free) {
+                    dbg(entry.label + ': closed maximized, normal geometry unknown, not saved')
+                    return null
+                }
+                fields = copyGeometry(entry.free)
+            } else {
+                fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
+            }
             fields.caption = String(w.caption || '')
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
-            var current = describeTile(w.tile)
-            if (w.tile && !current) dbg(entry.label + ': closed in a tile that could not be identified')
+            var current = away ? null : describeTile(w.tile)
+            if (w.tile && !current && !away) dbg(entry.label + ': closed in a tile that could not be identified')
             fields.tile = entry.tile || current
             fields.free = fields.tile ? entry.free : null
             if (fields.tile) {
@@ -378,6 +424,7 @@ Item {
         if (!entry || entry.userPlaced) return
         entry.userPlaced = true
         entry.provisional = null
+        entry.home = null
         cancelPendingTile(entry)
         var session = live[entry.group].session
         if (entry.assigned || !session) return
@@ -566,6 +613,7 @@ Item {
         if (target && tiling && target.provisional) target = targetFor(w, save)
         if (!target) return false
         entry.provisional = target.provisional ? { save: save, until: until } : null
+        if (target.provisional) entry.home = copyGeometry(save)
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)
