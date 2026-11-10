@@ -38,6 +38,12 @@ on, and how to test a change before it reaches anyone's desktop.
 ## How the runtime works
 - **Groups.** Windows are tracked per *group*: an app on one virtual desktop key (the desktop's
   UUID, or `*` for windows on all or several desktops).
+  - The app is its *app key* (`Engine.appKeyFor`): the window's desktop file name, or its
+    class when the two differ only in case. It is read once, when the window is tracked.
+    Saved data is keyed by it too. A key with nothing saved yet restores once from its class's
+    layout (data from 1.4.0, which keyed by class); by caption only when the key is inside the
+    class (a browser's web app, which shared that layout).
+  - The exclusion list matches the key or the class; window rules match the class, as in KWin.
   - Each group has its open windows, a buffer of recent closes, at most one restore session,
     and a `settled` flag. `settled` means the app is running there, and its later windows are
     restored only on a monitor it has no window on yet.
@@ -59,7 +65,7 @@ on, and how to test a change before it reaches anyone's desktop.
   - its last tile and last floating geometry are recorded from KWin's signals;
   - its geometry on its own monitor (`home`) is kept while that monitor is unplugged.
 
-### KWin facts the script relies on (checked in KWin 6.7.5's source)
+### KWin facts the script relies on (checked in KWin 6.7.5's source unless noted)
 - **Close order.** Tiles connect to `Workspace::windowRemoved` before any script does. On
   close, KWin unmanages the window and may reset the quick-tile split (`QuickRootTile::tryReset`)
   before the script hears of the close, so tiles are recorded while windows are open.
@@ -80,9 +86,20 @@ on, and how to test a change before it reaches anyone's desktop.
   maximized by its app has no restore geometry. Dragging a maximized window out unmaximizes it
   and moves it under the pointer at once; on Wayland its size only shrinks once the app has
   followed.
+- **Class and desktop file name** (6.8.2, `XdgToplevelWindow::handleAppIdChanged`): both come
+  from the app id. For a sandboxed (Flatpak) client whose app id doesn't start with the sandbox's
+  id, KWin uses the sandbox's id instead, so a Flatpak browser's web apps get the browser's class.
+  `initialize()` applies a *Desktop file name* rule, and `windowAdded` is only emitted once the
+  window is ready for painting, so the script sees the final name. A later app id change sets
+  the name again, through the rule (a Force rule keeps it). On X11 the name comes from
+  `_KDE_NET_WM_DESKTOP_FILE`, `_GTK_APPLICATION_ID`, or a desktop file's `StartupWMClass`.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences
   it doesn't know.
+  - KWin 6.8 (`RuleBookSettings::usrRead`) lists the rules in `[General] Order`. It moves an
+    older `rules` list there, drops `count`, and rewrites the file. A rule with `Enabled=false`
+    is ignored. KWin also takes rule groups missing from `Order`; QSettings in QML can't list
+    groups, so the script doesn't (System Settings always writes `Order`).
 
 ## Testing
 All tests run in a development container. On the host, only the step of trying a build changes

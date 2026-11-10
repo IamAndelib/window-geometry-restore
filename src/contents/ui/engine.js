@@ -4,7 +4,8 @@
 // exclusion list and KWin window rules, plus the timings main.qml runs on.
 //
 // Saved data, compact on purpose (it lives in a single KConfig entry):
-//   root: { version: SCHEMA_VERSION, apps: { resourceClass: app } }
+//   root: { version: SCHEMA_VERSION, apps: { appKey: app } }  (appKeyFor: the desktop file
+//         name, or the window class)
 //   app:  { t: lastAccessTime, w: [saves], d: { desktopKey: { t, w: [saves] } } }
 //         d holds one layout per virtual desktop (key: the desktop's id, or '*' for windows on
 //         all or several desktops); restores read only d. w is the latest layout from any
@@ -76,6 +77,24 @@ function parseList(text) {
         }
     }
     return parsed
+}
+
+// The key an app's windows are grouped and saved under: its desktop file name when that names
+// a different app than its window class, else the class. A Flatpak's windows all report the
+// Flatpak's id as their class on Wayland, so a browser's web apps are told apart only by the
+// desktop file name a KWin rule (or StartupWMClass) gives them. A difference in case alone
+// keeps the class, so existing saves stay where they are.
+function appKeyFor(resourceClass, desktopFileName) {
+    var cls = String(resourceClass || '').trim()
+    var df = String(desktopFileName || '').trim()
+    return df && df.toLowerCase() !== cls.toLowerCase() ? df : cls
+}
+
+// Whether `key` names an app inside `cls`, as a Flatpak browser's web apps do: Flatpak only
+// exports desktop files named after the Flatpak's id (com.google.Chrome.chrome-wah-...).
+// Such an app shared its class's saved layout with the browser.
+function isSubApp(key, cls) {
+    return !!cls && String(key).toLowerCase().indexOf(String(cls).toLowerCase() + '.') === 0
 }
 
 // Case-insensitive: Wayland app ids keep their case, XWayland window classes come lowercased.
@@ -453,13 +472,12 @@ function ruleCondition(pattern, mode) {
 }
 
 // `read(key)` returns a value from the rules file as QSettings reads it: [General] keys at
-// the top level, rule groups as "group/key". Rules ids come from General/rules, or, in older
-// files, the groups 1..count.
+// the top level, rule groups as "group/key". Rule ids come from General/Order (KWin 6.8, which
+// moves General/rules there), General/rules, or, in older files, the groups 1..count.
 function parseRules(read) {
-    var ids = read('rules')
-    if (isList(ids)) ids = Array.prototype.slice.call(ids)
-    else if (typeof ids === 'string') ids = ids.length ? ids.split(',') : []
-    if (!Array.isArray(ids) || !ids.length) {
+    var ids = ruleIds(read('Order'))
+    if (!ids.length) ids = ruleIds(read('rules'))
+    if (!ids.length) {
         ids = []
         var count = parseInt(read('count'), 10) || 0
         for (var n = 1; n <= count; n++) ids.push(String(n))
@@ -468,6 +486,7 @@ function parseRules(read) {
     for (var i = 0; i < ids.length; i++) {
         var id = String(ids[i]).trim()
         if (!id) continue
+        if (String(read(id + '/Enabled')) === 'false') continue
         var geometry = []
         for (var j = 0; j < RULE_GEOMETRY.length; j++) {
             if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
@@ -487,6 +506,11 @@ function parseRules(read) {
         })
     }
     return rules
+}
+
+function ruleIds(value) {
+    if (isList(value)) return Array.prototype.slice.call(value)
+    return typeof value === 'string' && value.length ? value.split(',') : []
 }
 
 // QSettings trims the items of a value it split at commas, so spaces after commas don't count.

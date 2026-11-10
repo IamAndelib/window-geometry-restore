@@ -35,6 +35,7 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - **When the app starts again,** every window goes back to its own monitor, on the desktop it opens on.
   - **While the app is running,** a new window it opens on a monitor where it has no window yet gets that monitor's layout and stays there. A window opened next to one already open is left where KWin put it.
   - **Each desktop is independent.** Konsole closed on desktop 2 comes back the way you left it on desktop 2, whether or not Konsole is open on desktop 1. An app opening on a desktop where you never closed it opens where it opens. Windows set to show on all desktops share one layout of their own.
+- **Which app a window belongs to.** Windows are told apart by their desktop file name, or by their window class when that names the same app. So a browser's web apps (a WhatsApp or Calendar web app) are apps of their own, as in the taskbar: each keeps its own layout and is restored while the browser is open. A Flatpak browser's web apps only get their own desktop file name from a KWin rule (*Desktop file name*, Force) or the web app's `StartupWMClass`, as Web App Hub sets up.
 - **Matching.** Windows are matched to their remembered slots by caption and size. A clear match applies at once; otherwise the window gets one within a few seconds. If you move a window yourself first, your placement wins.
 - **Tiles.**
   - **Back in its tile:** a window that was tiled when it closed (a quick tile or a custom Meta+T tile) reopens in the same tile. Dragging it out gives back the size it had before you tiled it.
@@ -54,6 +55,10 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - Unreadable data, or data from a newer version of the script, is set aside, never destroyed.
   - Layouts unused for 30 days expire.
 
+### Upgrading from 1.4.0
+
+Apps whose desktop file name differs from their window class (a browser's web apps, some XWayland apps) are now remembered under the desktop file name. Their first launch after the upgrade restores from what 1.4.0 remembered; a web app only takes a window whose caption matches, and only until its browser next closes on that monitor (that close replaces the browser's layout). From their next close on, they have their own layout.
+
 ### Upgrading from 1.3
 
 Layouts are now kept per virtual desktop. Layouts saved by 1.3 had no desktop, so each app restores on a desktop once you've closed it there with 1.4. The old data stays in place, so going back to 1.3 keeps working.
@@ -64,7 +69,7 @@ Three settings (⚙ next to the script in KWin Scripts):
 
 | Setting | Default | Purpose |
 |---|---|---|
-| Excluded applications | a short safe list | Apps to never remember; one per line, `*` acts as a wildcard |
+| Excluded applications | a short safe list | Apps to never remember, by window class or desktop file name; one per line, `*` acts as a wildcard |
 | Restore tiled windows into their tile | on | Off: tiled windows reopen floating at the tile's position and size |
 | Verbose debug logging | off | Per-window detail for troubleshooting |
 

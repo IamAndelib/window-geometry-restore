@@ -214,6 +214,7 @@ function makeWindow(fields) {
         transient: false,
         splash: false,
         resourceClass: fields.cls,
+        desktopFileName: fields.df !== undefined ? fields.df : fields.cls,
         caption: fields.caption || '',
         fullScreen: false,
         maximizeMode: 0,
@@ -2655,4 +2656,133 @@ test('a screen-sized floating window dragged by the user is not taken for its no
     w.setMaximize(true, true)
     w.emitClosed()
     assert.equal((JSON.parse(rt.blobRef()).apps || {}).mon, undefined, 'its normal size is unknown: nothing saved')
+})
+
+// --- App keys: the desktop file name tells a browser's web apps apart (issue #5) ---
+
+const CHROME = 'com.google.Chrome'
+const WHATSAPP = 'com.google.Chrome.chrome-wah-abc'
+const webApp = (fields) => makeWindow({ cls: CHROME, df: WHATSAPP, caption: 'WhatsApp', ...fields })
+
+test('a web app with its own desktop file name is its own app: restored while the browser is open', () => {
+    const rt = buildRuntime()
+    const app = webApp({ x: 300, y: 200, width: 900, height: 700 })
+    rt.trackWindow(app)
+    app.emitClosed()
+    const apps = JSON.parse(rt.blobRef()).apps
+    assert.ok(apps[WHATSAPP], 'saved under its desktop file name')
+    assert.equal(apps[CHROME], undefined, 'not under the browser')
+
+    const browser = makeWindow({ cls: CHROME, caption: 'New Tab - Google Chrome', x: 0, y: 0, width: 1200, height: 900 })
+    rt.trackWindow(browser)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.ok(groupOf(rt, CHROME).settled, 'precondition: the browser runs here')
+
+    const again = webApp({ x: 0, y: 0, width: 900, height: 700 })
+    rt.trackWindow(again)
+    assert.deepEqual([again.x, again.y], [300, 200])
+    assert.ok(groupOf(rt, WHATSAPP), 'grouped by its desktop file name')
+})
+
+test('a browser and two of its web apps keep separate layouts', () => {
+    const rt = buildRuntime()
+    const browser = makeWindow({ cls: CHROME, caption: 'Google Chrome', x: 10, y: 10, width: 1200, height: 900 })
+    const whatsapp = webApp({ x: 300, y: 200, width: 900, height: 700 })
+    const other = makeWindow({ cls: CHROME, df: 'com.google.Chrome.chrome-wah-xyz', caption: 'Calendar', x: 600, y: 50, width: 800, height: 600 })
+    rt.trackWindow(browser)
+    rt.trackWindow(whatsapp)
+    rt.trackWindow(other)
+    whatsapp.emitClosed()
+    browser._g = { x: 40, y: 40, width: 1200, height: 900 }
+    browser.emitClosed()
+    other.emitClosed()
+    const apps = JSON.parse(rt.blobRef()).apps
+    assert.deepEqual(apps[CHROME].w.map((s) => s.c), ['Google Chrome'])
+    assert.deepEqual(apps[WHATSAPP].w.map((s) => [s.c, s.x]), [['WhatsApp', 300]], 'the browser\'s close left it alone')
+    assert.deepEqual(apps['com.google.Chrome.chrome-wah-xyz'].w.map((s) => s.c), ['Calendar'])
+})
+
+test('an app whose desktop file name is its class (or differs only in case) keeps its saves', () => {
+    const blob = JSON.stringify({ version: 2, apps: {
+        'org.kde.dolphin': { t: 1000000000, w: [], d: { 'desk-uuid-1': { t: 1000000000, w: [{ c: 'Home', x: 70, y: 80, w: 800, h: 600, o: null }] } } },
+        discord: { t: 1000000000, w: [], d: { 'desk-uuid-1': { t: 1000000000, w: [{ c: 'Discord', x: 90, y: 60, w: 800, h: 600, o: null }] } } }
+    } })
+    const rt = buildRuntime(blob)
+    const dolphin = makeWindow({ cls: 'org.kde.dolphin', caption: 'Home', width: 800, height: 600 })
+    const discord = makeWindow({ cls: 'discord', df: 'Discord', caption: 'Discord', width: 800, height: 600 })
+    rt.trackWindow(dolphin)
+    rt.trackWindow(discord)
+    assert.deepEqual([dolphin.x, dolphin.y], [70, 80])
+    assert.deepEqual([discord.x, discord.y], [90, 60])
+    assert.ok(groupOf(rt, 'discord'), 'keyed by its class')
+})
+
+test('the exclusion list matches the window class as well as the app key', () => {
+    const rt = buildRuntime('{}', { blacklist: 'steam*\ncom.example.byclass\ncom.example.bykey' })
+    rt.trackWindow(makeWindow({ cls: 'steam', df: 'com.valvesoftware.Steam', caption: 'Steam' }))
+    rt.trackWindow(makeWindow({ cls: 'com.example.byclass', df: 'com.example.other', caption: 'A' }))
+    rt.trackWindow(makeWindow({ cls: 'com.example.app', df: 'com.example.bykey', caption: 'B' }))
+    assert.deepEqual(Object.keys(rt.trackedRef()), [])
+})
+
+// Saves written by 1.4.0 under the class, for the browser and its web app together.
+const legacyChromeBlob = () => JSON.stringify({ version: 2, apps: { [CHROME]: { t: 1000000000, w: [], d: { 'desk-uuid-1': { t: 1000000000, w: [
+    { c: 'Google Chrome', x: 40, y: 40, w: 900, h: 700, o: null },
+    { c: 'WhatsApp', x: 300, y: 200, w: 900, h: 700, o: null }
+] } } } } })
+
+test('first launch under a new app key restores once from the class\'s layout, by caption only', () => {
+    const rt = buildRuntime(legacyChromeBlob())
+    const app = webApp({ x: 0, y: 0, width: 900, height: 700 })
+    rt.trackWindow(app)
+    assert.deepEqual([app.x, app.y], [300, 200], 'the save with its caption, not the browser\'s of the same size')
+    assert.equal(rt.storeRef().apps[CHROME].lastAccess, 1000000000, 'the class\'s entry is only read')
+
+    app._g = { x: 500, y: 100, width: 900, height: 700 }
+    app.emitClosed()
+    const apps = JSON.parse(rt.blobRef()).apps
+    assert.equal(apps[WHATSAPP].d['desk-uuid-1'].w[0].x, 500, 'saved under the new key')
+    assert.equal(apps[CHROME].d['desk-uuid-1'].w.length, 2, 'the class\'s layout untouched')
+
+    const again = webApp({ x: 0, y: 0, width: 900, height: 700 })
+    rt.trackWindow(again)
+    assert.deepEqual([again.x, again.y], [500, 100], 'from then on its own layout')
+})
+
+test('the fallback applies at once when one save has the window\'s caption, whatever its size', () => {
+    const rt = buildRuntime(legacyChromeBlob())
+    const app = webApp({ x: 0, y: 0, width: 700, height: 536 })
+    rt.trackWindow(app)
+    assert.deepEqual([app.x, app.y], [300, 200], 'no wait for the browser\'s save, which belongs to another app')
+})
+
+test('the fallback never gives a web app a save with another caption', () => {
+    const rt = buildRuntime(legacyChromeBlob())
+    const app = makeWindow({ cls: CHROME, df: 'com.google.Chrome.chrome-wah-xyz', caption: 'Calendar', x: 5, y: 5, width: 900, height: 700 })
+    rt.trackWindow(app)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.deepEqual([app.x, app.y], [5, 5], 'left where KWin put it')
+    assert.equal(app._geometryWrites, 0)
+})
+
+test('an app that only changed name restores from its class\'s layout as usual, whatever its caption', () => {
+    const blob = JSON.stringify({ version: 2, apps: { spotify: { t: 1000000000, w: [], d: { 'desk-uuid-1': { t: 1000000000, w: [
+        { c: 'Spotify Premium', x: 120, y: 90, w: 1000, h: 700, o: null }
+    ] } } } } })
+    const rt = buildRuntime(blob)
+    const w = makeWindow({ cls: 'spotify', df: 'com.spotify.Client', caption: 'Daft Punk - Around the World', x: 0, y: 0, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [120, 90], 'matched by size: nothing else shared that layout')
+    assert.ok(groupOf(rt, 'com.spotify.Client'), 'keyed by its desktop file name')
+})
+
+test('no fallback once the new key has saved data, even on another desktop', () => {
+    const blob = JSON.parse(legacyChromeBlob())
+    blob.apps[WHATSAPP] = { t: 1000000000, w: [], d: { 'desk-uuid-2': { t: 1000000000, w: [{ c: 'WhatsApp', x: 700, y: 300, w: 900, h: 700, o: null }] } } }
+    const rt = buildRuntime(JSON.stringify(blob))
+    const app = webApp({ x: 5, y: 5, width: 900, height: 700 })
+    rt.trackWindow(app)
+    assert.deepEqual([app.x, app.y], [5, 5], 'desktops are independent; the class\'s layout is not used')
 })

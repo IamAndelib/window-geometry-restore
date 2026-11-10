@@ -27,6 +27,25 @@ test('captionScore: exact, numeric drift, prefix/suffix drift, unrelated', () =>
     assert.equal(engine.captionScore(null, 'x'), 0)
 })
 
+test('appKeyFor: the desktop file name when it names another app, else the class', () => {
+    assert.equal(engine.appKeyFor('org.kde.dolphin', 'org.kde.dolphin'), 'org.kde.dolphin')
+    assert.equal(engine.appKeyFor('com.google.Chrome', 'com.google.Chrome.chrome-wah-abc'), 'com.google.Chrome.chrome-wah-abc')
+    assert.equal(engine.appKeyFor('discord', 'Discord'), 'discord', 'case alone keeps the class')
+    assert.equal(engine.appKeyFor('app', ''), 'app')
+    assert.equal(engine.appKeyFor('app', undefined), 'app')
+    assert.equal(engine.appKeyFor('app', null), 'app')
+    assert.equal(engine.appKeyFor('app', '  other  '), 'other')
+    assert.equal(engine.appKeyFor('app', '   '), 'app')
+})
+
+test('isSubApp: a desktop file name inside the class, as a Flatpak browser\'s web apps have', () => {
+    assert.equal(engine.isSubApp('com.google.Chrome.chrome-wah-abc', 'com.google.Chrome'), true)
+    assert.equal(engine.isSubApp('com.google.chrome.x', 'com.google.Chrome'), true, 'case-insensitive')
+    assert.equal(engine.isSubApp('com.spotify.Client', 'spotify'), false)
+    assert.equal(engine.isSubApp('com.google.ChromeBeta', 'com.google.Chrome'), false, 'a whole name, not a prefix')
+    assert.equal(engine.isSubApp('a.b', null), false)
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)
@@ -412,6 +431,19 @@ test('parseRules reads both the list of rule ids and the older numbered groups',
     const numbered = engine.parseRules(rulesFile({ 1: { positionrule: '2' }, 2: { sizerule: '3' } }, { count: '2' }))
     assert.deepEqual(numbered.map((r) => r.id), ['1', '2'])
     assert.deepEqual(engine.parseRules(() => undefined), [], 'no rules file content')
+})
+
+test('parseRules reads KWin 6.8\'s Order first, and skips disabled rules', () => {
+    const groups = { a: { positionrule: '2' }, b: { sizerule: '3' }, c: { sizerule: '3', Enabled: 'false' } }
+    assert.deepEqual(engine.parseRules(rulesFile(groups, { Order: 'b,a,c' })).map((r) => r.id), ['b', 'a'], 'Order as a string, in its order')
+    assert.deepEqual(engine.parseRules(rulesFile(groups, { Order: sequence('a', 'b') })).map((r) => r.id), ['a', 'b'], 'Order as a sequence')
+    assert.deepEqual(engine.parseRules(rulesFile(groups, { Order: 'b', rules: 'a' })).map((r) => r.id), ['b'], 'Order wins over the older list')
+    assert.deepEqual(engine.parseRules(rulesFile(groups, { Order: '', rules: 'a' })).map((r) => r.id), ['a'], 'an empty Order falls back')
+    assert.deepEqual(engine.parseRules(rulesFile({ a: { positionrule: '2', Enabled: 'true' } })).map((r) => r.id), ['a'])
+})
+
+test('a rule that only sets the desktop file name is not a geometry rule', () => {
+    assert.deepEqual(engine.parseRules(rulesFile({ r: { wmclass: 'a', wmclassmatch: '1', desktopfile: 'a.webapp', desktopfilerule: '2' } })), [])
 })
 
 test('geometryRuleFor matches the app the way KWin does: exact, substring or regular expression', () => {

@@ -375,7 +375,7 @@ class Sandbox:
             var x = win(%s);
             if (!x) return null;
             var t = x.tile;
-            return {title: x.caption, cls: x.resourceClass, geo: g(x.frameGeometry),
+            return {title: x.caption, cls: x.resourceClass, df: x.desktopFileName, geo: g(x.frameGeometry),
                     output: x.output ? x.output.name : null, active: workspace.activeWindow === x,
                     maximized: x.maximizeMode !== undefined ? x.maximizeMode : null,
                     tile: t ? {abs: g(t.absoluteGeometry), rel: g(t.relativeGeometry),

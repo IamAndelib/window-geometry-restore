@@ -38,3 +38,4 @@ needs on top.
 - `docs/plans/per-desktop-restore.md`: independent restore per virtual desktop.
 - `docs/plans/per-monitor-restore.md`: monitors independent while an app runs; everything back
   on a fresh start.
+- `docs/plans/app-key.md`: windows keyed by desktop file name; the one-time fallback to the class.
