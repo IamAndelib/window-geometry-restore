@@ -49,7 +49,8 @@ fi
 command -v zip >/dev/null 2>&1 || die "zip not found - install it (e.g. 'sudo dnf install zip') and retry"
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'exit 130' INT TERM
 PKG="$TMP_DIR/$SCRIPT_NAME.kwinscript"
 
 info "Packaging..."

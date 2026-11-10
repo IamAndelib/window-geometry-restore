@@ -575,7 +575,7 @@ def s_web_app_restored_with_browser_open():
         check(not logged(sb.script_log(), "leaving it to KWin"), "a desktop file rule is not a geometry rule")
         sb.set_geometry("WhatsApp", 900, 300, 700, 500)
         a.close()
-        sb.open_app(BROWSER, "Browser")
+        sb.open_app(BROWSER, "Browser", first_title="Loading")
         sb.settle(0.5)
         sb.open_app(BROWSER, "WhatsApp")
         w = sb.window("WhatsApp")
@@ -587,7 +587,7 @@ def s_web_app_restored_with_browser_open():
 def s_browser_and_web_app_separate():
     """Closing the browser does not overwrite its web app's layout, nor the other way round."""
     with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
-        b = sb.open_app(BROWSER, "Browser")
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
         a = sb.open_app(BROWSER, "WhatsApp")
         sb.set_geometry("Browser", 100, 100, 800, 600)
         sb.set_geometry("WhatsApp", 1000, 300, 700, 500)
@@ -598,7 +598,7 @@ def s_browser_and_web_app_separate():
         captions = lambda key: [s["c"] for s in saved[key]["w"]]
         check(captions(BROWSER) == ["Browser"] and captions(WEB_APP) == ["WhatsApp"], "separate layouts: %s" % (saved,))
         sb.open_app(BROWSER, "WhatsApp")
-        sb.open_app(BROWSER, "Browser")
+        sb.open_app(BROWSER, "Browser", first_title="Loading")
         check(rect(sb.window("WhatsApp")) == (1000, 300, 700, 500), "web app: %s" % (rect(sb.window("WhatsApp")),))
         check(rect(sb.window("Browser")) == (100, 100, 800, 600), "browser: %s" % (rect(sb.window("Browser")),))
 
@@ -618,6 +618,156 @@ def s_web_app_from_older_saves():
         check(w["df"] == WEB_APP, "precondition: keyed by its desktop file name")
         check(logged(sb.script_log(), "by an earlier version"), "restored through the fallback")
         check(rect(w) == (1000, 300, 700, 500), "its own save from the browser's layout: %s" % (rect(w),))
+
+
+def s_web_app_named_by_its_title():
+    """As Chrome does: the window is shown as "New Tab" and renamed to WhatsApp a moment
+    later, so the rule gives it its desktop file name only after the script saw it."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 100, 100, 700, 500)
+        b.close()
+        a = sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab")
+        log = sb.script_log()
+        check(logged(log, "tracking window for " + BROWSER) and logged(log, "now belongs to " + WEB_APP),
+              "precondition: seen as the browser first, then as the web app")
+        # The user drags it (a window still waiting for its restore isn't saved), then places it.
+        w = sb.window("WhatsApp")
+        sb.drag(titlebar(w), (titlebar(w)[0] + 40, titlebar(w)[1] + 40))
+        check(logged(sb.script_log(), "placed by the user"), "precondition: the drag counts as the user's")
+        sb.set_geometry("WhatsApp", 1000, 300, 700, 500)
+        a.close()
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab")
+        check(rect(sb.window("WhatsApp")) == (1000, 300, 700, 500), "web app: %s" % (rect(sb.window("WhatsApp")),))
+        check(rect(sb.window("Browser")) == (100, 100, 700, 500), "browser: %s" % (rect(sb.window("Browser")),))
+        saved = sb.saved()["apps"]
+        check([s["c"] for s in saved[BROWSER]["w"]] == ["Browser"], "the browser's layout is its own: %s" % (saved[BROWSER],))
+
+
+def s_web_app_same_with_or_without_browser():
+    """The user's case: the browser is saved maximized, its web app (named by a rule on its
+    title, set after the window is shown) quick-tiled. Once the script has seen how the web app
+    opens, it reopens straight in its tile, taken for the web app from the start: never restored
+    as the browser, never moved twice, whether the browser is closed or open."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 200, 150, 900, 600)
+        sb.probe("win('Browser').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        check(sb.window("Browser")["maximized"] == 3, "precondition: the browser maximized")
+        b.close()
+
+        a = sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab")
+        check(sb.window("WhatsApp")["df"] == WEB_APP, "precondition: renamed by the rule")
+        w = sb.window("WhatsApp")
+        sb.drag(titlebar(w), (titlebar(w)[0] + 40, titlebar(w)[1] + 40))
+        sb.set_geometry("WhatsApp", 300, 200, 1000, 650)
+        tile_left_at(sb, "WhatsApp", 0.5)
+        a.close()
+        check(WEB_APP in sb.saved()["apps"] and sb.saved()["apps"][WEB_APP].get("o") == [{"k": BROWSER, "c": "New Tab"}],
+              "learned how the web app opens: %s" % (sb.saved()["apps"].get(WEB_APP),))
+
+        def reopen_web_app(situation):
+            sb.script_log()
+            app = sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab")
+            sb.wait(lambda: (sb.window("WhatsApp")["tile"] or {}).get("quick"), 5, "the web app tiled (%s)" % situation)
+            w = sb.window("WhatsApp")
+            log = sb.script_log()
+            check(w["maximized"] == 0, "%s: not maximized: %s" % (situation, w))
+            check(not any(BROWSER + " (desktop 1): maximized again" in l or BROWSER + " (desktop 1): restored" in l for l in log),
+                  "%s: never restored as the browser: %s" % (situation, log))
+            check(any("tracking window for " + WEB_APP in l and "as it does before KWin names it" in l for l in log),
+                  "%s: taken for the web app from the start: %s" % (situation, log))
+            check(not any("put back as KWin opened it" in l for l in log), "%s: nothing to undo: %s" % (situation, log))
+            sb.drag(titlebar(w), (900, 500))
+            check(rect(sb.window("WhatsApp"))[2:] == (1000, 650), "%s: its own floating size back: %s" % (situation, rect(sb.window("WhatsApp"))))
+            sb.set_geometry("WhatsApp", 300, 200, 1000, 650)  # its floating geometry again, then tiled
+            tile_left_at(sb, "WhatsApp", 0.5)
+            app.close()
+
+        reopen_web_app("browser closed")
+        sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.wait(lambda: sb.window("Browser")["maximized"] == 3, 5, "the browser restored maximized")
+        reopen_web_app("browser open")
+
+
+def learn_web_app(sb, title, geometry, first="New Tab"):
+    """Open a web app once (shown as `first`, renamed by its rule), place it as the user would,
+    close it: the script learns how it opens and saves its place."""
+    a = sb.open_app(BROWSER, title, size=(700, 464), first_title=first)
+    w = sb.window(title)
+    sb.drag(titlebar(w), (titlebar(w)[0] + 40, titlebar(w)[1] + 40))
+    sb.set_geometry(title, *geometry)
+    a.close()
+
+
+def watch(sb, titles, seconds):
+    """Every distinct (rect, maximized) state a window shows during `seconds`."""
+    seen, end = [], time.time() + seconds
+    while time.time() < end:
+        w = next((sb.window(t) for t in titles if sb.window(t)), None)
+        state = (rect(w), w["maximized"]) if w else None
+        if state and (not seen or seen[-1] != state):
+            seen.append(state)
+        time.sleep(0.1)
+    return seen
+
+
+def s_wrong_guess_left_alone():
+    """A browser window opening like a learned web app, but never named so: taken for the web
+    app at once, and when no name comes it becomes the browser's again where it is, never
+    maximized as the browser. The opening is forgotten."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 200, 150, 900, 600)
+        sb.probe("win('Browser').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        b.close()
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        sb.script_log()
+        sb.open_app(BROWSER, "Docs", size=(700, 464), first_title="New Tab", settle=0)
+        seen = watch(sb, ["New Tab", "Docs"], 11.5)
+        log = sb.script_log()
+        check(logged(log, "after all, left where it is"), "the guess ran out: %s" % log)
+        check(seen[-1] == ((1000, 300, 700, 500), 0) and all(m == 0 for _, m in seen), "placed once, never moved again: %s" % seen)
+        check(not sb.saved()["apps"].get(WEB_APP, {}).get("o"), "forgotten")
+
+
+def s_two_web_apps_same_opening():
+    """Two web apps of one browser open as "New Tab". Once both are known, neither is guessed:
+    each waits for its name and is restored once, at its own place."""
+    rules = [web_app_rule("WhatsApp"), rule(BROWSER, title="Telegram", titlematch="1", desktopfile=WEB_APP + "2", desktopfilerule=2)]
+    with sandbox(outputs=1, rules=rules) as sb:
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        learn_web_app(sb, "Telegram", (100, 100, 600, 400))
+        for title, geometry in [("WhatsApp", (1000, 300, 700, 500)), ("Telegram", (100, 100, 600, 400)), ("WhatsApp", (1000, 300, 700, 500))]:
+            sb.script_log()
+            a = sb.open_app(BROWSER, title, size=(700, 464), first_title="New Tab")
+            sb.settle(0.5)
+            log = sb.script_log()
+            check(rect(sb.window(title)) == geometry, "%s at its place: %s" % (title, rect(sb.window(title))))
+            check(not any("as it does before KWin names it" in l for l in log), "%s not guessed: %s" % (title, log))
+            check(not any("put back as KWin opened it" in l for l in log), "%s nothing to undo: %s" % (title, log))
+            a.close()
+
+
+def s_slow_rename_confirmed():
+    """The learned web app is named only after 6 s (a slow start): it is placed once, and the
+    late name confirms it without moving it."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 200, 150, 900, 600)
+        sb.probe("win('Browser').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        b.close()
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        sb.script_log()
+        sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab", retitle_ms=6000, settle=0)
+        seen = watch(sb, ["New Tab", "WhatsApp"], 8)
+        log = sb.script_log()
+        check(logged(log, "KWin named it as expected"), "confirmed: %s" % log)
+        check(seen[-1] == ((1000, 300, 700, 500), 0) and all(m == 0 for _, m in seen), "placed once, never moved again: %s" % seen)
 
 
 # ---- monitors ----------------------------------------------------------------------
@@ -884,6 +1034,11 @@ SCENARIOS = [
     s_web_app_restored_with_browser_open,
     s_browser_and_web_app_separate,
     s_web_app_from_older_saves,
+    s_web_app_named_by_its_title,
+    s_web_app_same_with_or_without_browser,
+    s_wrong_guess_left_alone,
+    s_two_web_apps_same_opening,
+    s_slow_rename_confirmed,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

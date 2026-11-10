@@ -54,8 +54,10 @@ Item {
 
     // ---- logging and signals -------------------------------------------------------------
 
+    // Messages carry app-chosen names and titles: control characters (a newline faking a log
+    // line) are replaced.
     function log(message) {
-        console.warn('WindowGeometryRestore: ' + message)
+        console.warn('WindowGeometryRestore: ' + String(message).replace(/[\x00-\x1f\x7f]/g, ' '))
     }
 
     function dbg(message) {
@@ -193,26 +195,51 @@ Item {
         return live[entry.groupKey]
     }
 
+    // Takes a window out of its group when it moves to another desktop or app. Closes buffered
+    // there are completed if it leaves a monitor without the app's windows. Returns whether the
+    // window was still waiting for its restore in that group.
+    function leaveGroup(entry) {
+        var old = live[entry.groupKey]
+        removeFromArray(old.open, entry.id)
+        var waiting = !!old.session && old.session.pending.indexOf(entry.id) !== -1
+        if (waiting) {
+            removeFromArray(old.session.pending, entry.id)
+            unwatchCaption(entry)
+        }
+        if (old.buffer.length && finalizeLeftMonitors(old)) persist()
+        if (!old.open.length) delete live[old.key]
+        entry.provisional = null
+        cancelPendingTile(entry)
+        return waiting
+    }
+
     // `adopted` windows were open before the script started (reload, KWin restart):
     // they are left where they are and only saved when they close.
     function trackWindow(w, adopted) {
         if (!isValidWindow(w)) return
-        // Keyed once, here: a window keeps its app key until it closes.
         var resourceClass = String(w.resourceClass)
-        var cls = Engine.appKeyFor(resourceClass, w.desktopFileName)
+        var named = Engine.appKeyFor(resourceClass, w.desktopFileName)
         // Either name excludes it, so lists written for window classes keep working.
-        if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
-            dbg('ignoring excluded app: ' + cls)
+        if (Engine.isListed(named, excluded) || Engine.isListed(resourceClass, excluded)) {
+            dbg('ignoring excluded app: ' + named)
             return
         }
         var id = String(w.internalId)
         if (tracked[id]) return
+        // KWin may name a window only after showing it: a rule matching a web app's title applies
+        // once the browser sets it. A window that opens the way one did before it was renamed is
+        // taken for that app from the start, so it is restored at once, as itself.
+        var caption = Engine.openingTitle(w.caption)
+        var predicted = adopted ? null : Engine.predictedKey(store, named, caption)
+        if (predicted && Engine.isListed(predicted, excluded)) predicted = null
+        var cls = predicted || named
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
-            assigned: !!adopted, userPlaced: false, provisional: null,
+            assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, unmaximizedUntil: 0,
+            openedKey: named, openingCaption: caption, learnedAs: null, learnings: 0, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
-            desktopsHandler: null, outputHandler: null
+            desktopsHandler: null, outputHandler: null, desktopFileHandler: null
         }
         tracked[id] = entry
         var group = joinGroup(entry)
@@ -221,12 +248,23 @@ Item {
         entry.tileHandler = connectSignal(w, 'tileChanged', function () { noteTile(id) })
         entry.desktopsHandler = connectSignal(w, 'desktopsChanged', function () { onDesktopsChanged(id) })
         entry.outputHandler = connectSignal(w, 'outputChanged', function () { onOutputChanged(id) })
+        entry.desktopFileHandler = connectSignal(w, 'desktopFileNameChanged', function () { onAppKeyChanged(id) })
         noteGeometry(id)
-        dbg('tracking window for ' + entry.label)
-        var rule = adopted ? null : geometryRuleOf(w)
-        if (adopted) {
-            group.settled = true
-        } else if (group.session && group.session.monitor && !sameMonitor(group.session.monitor, monitorOf(entry))) {
+        dbg('tracking window for ' + entry.label + (predicted ? ', opened as ' + named + ' titled "' + caption + '", as it does before KWin names it' : ''))
+        if (predicted) ensureTick()
+        if (!adopted) placeNewWindow(entry, group)
+        // Without a restore under way, the app is running here from this window on.
+        if (!group.session) group.settled = true
+    }
+
+    // A window new to its group: restored from the group's layout, unless a window rule places
+    // it or a restore for another monitor is under way.
+    function placeNewWindow(entry, group) {
+        // Nothing saved that this window could be restored from: no need to read the rules.
+        if (!group.session && !Engine.layoutFor(store, group.cls, group.desktopKey) &&
+                !(group.legacyCls && Engine.layoutFor(store, group.legacyCls, group.desktopKey))) return
+        var rule = geometryRuleOf(entry.w)
+        if (group.session && group.session.monitor && !sameMonitor(group.session.monitor, monitorOf(entry))) {
             dbg(entry.label + ': a restore for another monitor is under way, leaving this window')
         } else if (rule) {
             // Still saved, so removing the rule brings restores back. On a fresh start the app's
@@ -237,8 +275,6 @@ Item {
         } else if (group.session || startSessionFor(entry)) {
             joinSession(group, entry)
         }
-        // Without a restore under way, the app is running here from this window on.
-        if (!group.session) group.settled = true
     }
 
     // The first KWin window rule that places or sizes this window, or null. The rules file is
@@ -254,10 +290,11 @@ Item {
                     if (r.unreadable) logOnce('rule:' + r.id + '/' + r.unreadable, 'cannot read the regular expression of KWin window rule ' +
                         (r.description || r.id) + ' (' + r.unreadable + '): matching its plain text instead')
                 })
+                // captionNormal, as KWin matches rules: without the " <2>" or "(Not Responding)" it adds.
                 return Engine.geometryRuleFor(rules, {
                     resourceClass: String(w.resourceClass),
                     resourceName: String(w.resourceName || ''),
-                    caption: String(w.caption || '')
+                    caption: String(w.captionNormal !== undefined ? w.captionNormal : (w.caption || ''))
                 })
             } finally {
                 file.destroy()
@@ -273,20 +310,13 @@ Item {
     function onDesktopsChanged(id) {
         var entry = tracked[id]
         if (!entry || desktopKeyOf(entry.w) === entry.desktopKey) return
-        var old = live[entry.groupKey]
-        removeFromArray(old.open, id)
-        if (old.session && old.session.pending.indexOf(id) !== -1) {
-            removeFromArray(old.session.pending, id)
+        var label = entry.label
+        if (leaveGroup(entry)) {
             entry.assigned = true
-            unwatchCaption(entry)
-            log(entry.label + ': window moved to another desktop before its restore, not restoring it')
+            log(label + ': window moved to another desktop before its restore, not restoring it')
         }
-        if (old.buffer.length && finalizeLeftMonitors(old)) persist()
-        if (!old.open.length) delete live[old.key]
-        entry.provisional = null
-        cancelPendingTile(entry)
         joinGroup(entry).settled = true
-        dbg('window of ' + old.label + ' moved, now in ' + entry.label)
+        dbg('window of ' + label + ' moved, now in ' + entry.label)
     }
 
     // KWin reports a window's new monitor after moving it. A user move can leave a monitor without
@@ -311,6 +341,111 @@ Item {
         disconnectSignal(entry.w, 'tileChanged', entry.tileHandler)
         disconnectSignal(entry.w, 'desktopsChanged', entry.desktopsHandler)
         disconnectSignal(entry.w, 'outputChanged', entry.outputHandler)
+        disconnectSignal(entry.w, 'desktopFileNameChanged', entry.desktopFileHandler)
+    }
+
+    // ---- app identity: names KWin gives late, openings learned from them ---------------------
+
+    // KWin may give a window its desktop file name after showing it: a window rule matching its
+    // title applies when the app sets the title, and an app may set its id late. The window then
+    // belongs to another app. A fresh one is restored as if it had opened as that app, and a save
+    // it took from the old app's restore goes back to that restore. One that has been open a
+    // while, or that the user placed, only changes app.
+    function onAppKeyChanged(id) {
+        var entry = tracked[id]
+        if (!entry) return
+        var resourceClass = String(entry.w.resourceClass)
+        var cls = Engine.appKeyFor(resourceClass, entry.w.desktopFileName)
+        if (entry.prediction) {
+            // Still named as the app it opened as: KWin hasn't named it yet.
+            if (cls === entry.prediction.from) return
+            entry.prediction = null
+            if (cls === entry.cls) {
+                dbg(entry.label + ': KWin named it as expected')
+                return
+            }
+            // Another app opens the same way: it is learned too below, and predictedKey stops
+            // guessing for an opening two apps share, instead of guessing wrong every other time.
+            log(entry.label + ': KWin named the window ' + cls + ', which opens the same way; not guessing this opening any more')
+        }
+        if (!cls || cls === entry.cls) return
+        // Renamed again: what it was named before was a step on the way, not how that app opens.
+        if (entry.learnedAs && entry.learnedAs !== cls && Engine.forgetOpening(store, entry.learnedAs, entry.openedKey, entry.openingCaption)) persist()
+        var label = entry.label
+        var fresh = !entry.userPlaced && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS
+        var from = entry.restoredFrom
+        if (fresh && from && live[entry.groupKey].session === from.session) {
+            from.session.taken[from.index] = false
+            from.session.remaining++
+        }
+        var waiting = leaveGroup(entry)
+        if (fresh && from) undoRestore(entry, from)
+        entry.cls = cls
+        entry.resourceClass = resourceClass
+        entry.restoredFrom = null
+        if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
+            untrack(entry)
+            dbg('window of ' + label + ' is now ' + cls + ', an excluded app: no longer tracked')
+            return
+        }
+        var group = joinGroup(entry)
+        dbg('window of ' + label + ' now belongs to ' + entry.label)
+        // Renamed right after opening, untouched: its next window opening the same way is this
+        // app, unless the old app's own windows have that title too.
+        // At most twice per window (a name on the way, then the last): a window renaming itself
+        // over and over must not fill the saved data and push out real layouts.
+        if (!entry.userPlaced && entry.learnings < 2 && Date.now() - entry.openedAt < Engine.LEARN_MS && !isOwnTitle(entry.openedKey, entry.openingCaption) &&
+                Engine.learnOpening(store, cls, entry.openedKey, entry.openingCaption, Date.now())) {
+            entry.learnedAs = cls
+            entry.learnings++
+            log(entry.label + ': learned that it opens as ' + entry.openedKey + ' titled "' + entry.openingCaption + '"')
+            persist()
+        }
+        if (fresh) {
+            entry.assigned = false
+            placeNewWindow(entry, group)
+        } else if (waiting) {
+            entry.assigned = true
+        }
+        if (!group.session) group.settled = true
+    }
+
+    // Whether windows of app `cls`, saved or open, have this title.
+    function isOwnTitle(cls, caption) {
+        if (Engine.captionSavedFor(store, cls, caption)) return true
+        for (var id in tracked) {
+            if (tracked[id].cls === cls && Engine.openingTitle(tracked[id].w.caption) === caption) return true
+        }
+        return false
+    }
+
+    // Puts a window back the way KWin opened it, before the old app's restore tiled, maximized
+    // or moved it: otherwise the new app's restore would leave it as the old app left it.
+    function undoRestore(entry, from) {
+        var w = entry.w
+        try {
+            dropRetries(entry.id)
+            var before = from.before
+            // The app opened it maximized, or KWin tiled it: the restore didn't touch it.
+            if (before.maximized || before.tile) return
+            if (w.tile) {
+                if (typeof w.tile.unmanage === 'function') w.tile.unmanage(w)
+                else w.tile = null
+            }
+            if (from.save.maximized && w.maximizeMode) {
+                w.setMaximize(false, false)
+                // The frame stays maximized until the app follows: canPlace must not wait for it.
+                entry.unmaximizedUntil = Date.now() + Engine.RETRY_MAX_AGE_MS
+            }
+            setGeometry(w, before)
+            entry.free = null
+            // The old app's place on a missing screen is not the window's own.
+            entry.home = null
+            entry.provisional = null
+            dbg(entry.label + ': put back as KWin opened it, before restoring it as its new app')
+        } catch (e) {
+            log(entry.label + ': undoing the restore of its old app failed: ' + e)
+        }
     }
 
     // ---- observing windows -----------------------------------------------------------------
@@ -417,6 +552,8 @@ Item {
             }
             var frame = geometryOf(w.output, w.x, w.y, w.width, w.height)
             entry.home = frame
+            // Unmaximized by the script and the app has followed: maximized means maximized again.
+            if (entry.unmaximizedUntil && !isMaximizedLike(w)) entry.unmaximizedUntil = 0
             if (w.tile) {
                 noteTile(id)
             } else {
@@ -424,7 +561,9 @@ Item {
                 entry.tile = null
                 // Not when screen-sized: an app opening at its maximized size, or a maximized window
                 // being dragged out (its size shrinks only once the app has followed).
-                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w)) entry.free = frame
+                // Nor while a quick tile waits: the window waits at the tile's rect, and its pre-tile
+                // geometry is the one written just before tiling (see quickTileWhenActive).
+                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w) && !entry.pendingTile) entry.free = frame
             }
         } catch (e) {
             logOnce('geometry', 'reading window geometry failed: ' + e)
@@ -470,7 +609,7 @@ Item {
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
-            fields.caption = String(w.caption || '')
+            fields.caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
@@ -498,11 +637,16 @@ Item {
         var group = live[entry.groupKey]
         removeFromArray(group.open, id)
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
-        var awaitingRestore = !!group.session && group.session.pending.indexOf(id) !== -1
+        // Nor a window taken for an app KWin hasn't confirmed: it may belong to another.
+        var awaitingRestore = !!entry.prediction || (!!group.session && group.session.pending.indexOf(id) !== -1)
         if (group.session) removeFromArray(group.session.pending, id)
         // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
-        var snap = awaitingRestore ? null : snapshotWindow(entry)
-        untrack(entry)
+        var snap = null
+        try {
+            snap = awaitingRestore ? null : snapshotWindow(entry)
+        } finally {
+            untrack(entry)
+        }
         if (snap) {
             group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
@@ -654,7 +798,7 @@ Item {
     // save from it.
     function startSession(group, monitor) {
         var saved = Engine.layoutFor(store, group.cls, group.desktopKey)
-        var legacy = !saved && !!group.legacyCls && !store.apps[group.cls]
+        var legacy = !saved && !!group.legacyCls && !Engine.hasLayouts(store.apps[group.cls])
         if (legacy) saved = Engine.layoutFor(store, group.legacyCls, group.desktopKey)
         if (!saved) return false
         var saves = saved.saves
@@ -668,7 +812,7 @@ Item {
         if (!legacy) saved.lastAccess = store.apps[group.cls].lastAccess = Date.now()
         group.session = {
             saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0,
-            legacy: legacy, captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
+            captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
         }
         dbg(group.label + ': restore session started - ' + saves.length + ' saved window(s)' +
             (monitor ? ' for ' + monitor.name + ', where it has no window yet' : '') +
@@ -717,9 +861,12 @@ Item {
         log(entry.label + ': window placed by the user, not restoring it')
     }
 
-    function matchFor(entry, session) {
+    // `scores` (optional): this window's caption scores against the session's saves, kept by a
+    // caller that matches it again (endSession).
+    function matchFor(entry, session, scores) {
         var w = entry.w
-        var caption = String(w.caption || '')
+        var caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
+        scores = scores || []
         var taken = session.taken
         var candidates = 0
         if (session.captionOnly) {
@@ -728,11 +875,12 @@ Item {
             taken = session.taken.slice()
             for (var i = 0; i < session.saves.length; i++) {
                 if (taken[i]) continue
-                if (Engine.captionScore(session.saves[i].caption, caption) < Engine.CAPTION_FALLBACK) taken[i] = true
+                if (scores[i] === undefined) scores[i] = Engine.captionScore(session.saves[i].caption, caption)
+                if (scores[i] < Engine.CAPTION_FALLBACK) taken[i] = true
                 else candidates++
             }
         }
-        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken)
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken, scores)
         // The other app's saves never arrive: one save left for this caption is a clear match.
         if (match) match.only = candidates === 1
         return match
@@ -760,6 +908,12 @@ Item {
         session.taken[match.index] = true
         session.remaining--
         entry.assigned = true
+        var w = entry.w
+        // What the window was like before: an undo (see undoRestore) reverts only what changed.
+        entry.restoredFrom = {
+            session: session, index: match.index, save: session.saves[match.index],
+            before: { x: w.x, y: w.y, w: w.width, h: w.height, maximized: w.maximizeMode || 0, tile: w.tile || null }
+        }
         unwatchCaption(entry)
         removeFromArray(session.pending, entry.id)
         var moved = false
@@ -776,10 +930,13 @@ Item {
     // Deadline: give each waiting window the best remaining save, best pair first.
     function endSession(group) {
         var session = group.session
+        // Caption scores don't change while the sweep runs: each pair is scored once.
+        var scores = {}
         for (;;) {
             var best = null
             for (var i = 0; i < session.pending.length; i++) {
-                var match = matchFor(tracked[session.pending[i]], session)
+                var id = session.pending[i]
+                var match = matchFor(tracked[id], session, scores[id] || (scores[id] = []))
                 if (match && (!best || Engine.isBetterMatch(match, best.match))) best = { id: session.pending[i], match: match }
             }
             if (!best) break
@@ -792,9 +949,12 @@ Item {
 
     // ---- placement -------------------------------------------------------------------------
 
-    // Windows that KWin, the app or the user is managing right now are never moved.
+    // Windows that KWin, the app or the user is managing right now are never moved. A window
+    // the script just unmaximized still shows its maximized frame until the app follows.
     function canPlace(w) {
-        return !w.tile && !w.fullScreen && w.moveable && !w.move && !w.resize && !isMaximizedLike(w)
+        var entry = tracked[String(w.internalId)]
+        var unmaximized = !!entry && entry.unmaximizedUntil > Date.now()
+        return !w.tile && !w.fullScreen && w.moveable && !w.move && !w.resize && (unmaximized || !isMaximizedLike(w))
     }
 
     function fitLength(saved, min, max, limit) {
@@ -842,6 +1002,12 @@ Item {
                Math.round(w.width) === target.w && Math.round(w.height) === target.h
     }
 
+    function dropRetries(id) {
+        for (var i = retries.length - 1; i >= 0; i--) {
+            if (retries[i].id === id) retries.splice(i, 1)
+        }
+    }
+
     function setGeometry(w, rect) {
         w.frameGeometry = Qt.rect(rect.x, rect.y, rect.w, rect.h)
     }
@@ -856,26 +1022,29 @@ Item {
         if (save.maximized && w.maximizable) return applyMaximized(entry, save, until)
         if (!canPlace(w)) return false
         var tiling = restoreTiles && save.tile && w.resizeable ? planTile(entry, save) : null
-        var target = targetFor(w, tiling && save.free ? save.free : save)
+        var free = tiling && save.free ? targetFor(w, save.free) : null
         // The pre-tile geometry was on a screen that is missing: start from the tile rect.
-        if (target && tiling && target.provisional) target = targetFor(w, save)
+        if (free && free.provisional) free = null
+        // A quick tile waiting for the window to become active: the window waits at the tile's
+        // rect, so it doesn't show at its floating geometry first (see quickTileWhenActive).
+        var target = free && tiling.tile ? free : targetFor(w, save)
         if (!target) return false
         entry.provisional = target.provisional ? { save: save, until: until } : null
         if (target.provisional) entry.home = copyGeometry(save)
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)
-            for (var i = retries.length - 1; i >= 0; i--) {
-                if (retries[i].id === entry.id) retries.splice(i, 1)
-            }
+            dropRetries(entry.id)
             retries.push({ id: entry.id, target: target.rect, tries: 1, born: Date.now() })
             ensureTick()
         }
         if (tiling) {
             // On Wayland the frame of this write arrives after the window is tiled, so
             // noteGeometry never sees it: record the pre-tile geometry here.
-            var r = target.rect
-            entry.free = geometryOf(target.output || w.output, r.x, r.y, r.w, r.h)
+            var pre = free || target
+            var r = pre.rect
+            entry.free = geometryOf(pre.output || w.output, r.x, r.y, r.w, r.h)
+            tiling.free = free ? free.rect : null
             startTile(entry, tiling, until)
         }
         return moved
@@ -1001,7 +1170,7 @@ Item {
     function startTile(entry, tiling, until) {
         if (!tiling.tile) {
             cancelPendingTile(entry)
-            var pending = { index: tiling.quick, rel: tiling.rel, output: tiling.output, until: until, handler: null }
+            var pending = { index: tiling.quick, rel: tiling.rel, output: tiling.output, free: tiling.free, until: until, handler: null }
             pending.handler = connectSignal(entry.w, 'activeChanged', function () { quickTileWhenActive(entry.id) })
             if (!pending.handler) return
             entry.pendingTile = pending
@@ -1040,6 +1209,10 @@ Item {
         if (!w.active || Workspace.activeWindow !== w || w.output !== pending.output) return
         cancelPendingTile(entry)
         try {
+            // The pre-tile geometry goes in just before tiling: KWin keeps the requested
+            // geometry for a drag out of the tile, and the app is only asked for the tile.
+            dropRetries(entry.id)
+            if (pending.free && !rectEquals(w, pending.free)) setGeometry(w, pending.free)
             Workspace[Engine.QUICK_TILE_ACTIONS[pending.index]]()
             log(entry.label + ': put the window back into its quick tile')
             restoreQuickSplit(entry, pending.rel)
@@ -1076,7 +1249,7 @@ Item {
         entry.pendingTile = null
     }
 
-    // ---- timer: retries and session deadlines ----------------------------------------------
+    // ---- timer: retries, session deadlines, unconfirmed guesses -----------------------------
 
     function sweepRetries(now) {
         for (var i = retries.length - 1; i >= 0; i--) {
@@ -1113,8 +1286,30 @@ Item {
         }
     }
 
+    // A window taken for an app it opens as, but that KWin didn't name so in time: it is that
+    // app after all, and the opening is forgotten.
+    function sweepPredictions(now) {
+        for (var id in tracked) {
+            var entry = tracked[id]
+            if (!entry.prediction || now < entry.prediction.until) continue
+            try {
+                Engine.forgetOpening(store, entry.cls, entry.prediction.from, entry.openingCaption)
+                log(entry.label + ': KWin did not name the window as learned; it is ' + entry.prediction.from + ' after all, left where it is')
+                entry.prediction = null
+                persist()
+                onAppKeyChanged(id)
+            } catch (e) {
+                log(entry.label + ': correcting a mistaken app failed: ' + e)
+                entry.prediction = null
+            }
+        }
+    }
+
     function isIdle() {
         if (retries.length > 0) return false
+        for (var id in tracked) {
+            if (tracked[id].prediction) return false
+        }
         for (var key in live) {
             if (live[key].session) return false
         }
@@ -1129,6 +1324,7 @@ Item {
         var now = Date.now()
         sweepRetries(now)
         sweepSessions(now)
+        sweepPredictions(now)
         if (isIdle()) tickTimer.stop()
     }
 
@@ -1153,7 +1349,11 @@ Item {
 
     function startup() {
         loadConfig()
-        loadPersisted()
+        try {
+            loadPersisted()
+        } catch (e) {
+            log('loading saved window data failed: ' + e)
+        }
         var windows = Workspace.stackingOrder
         for (var i = 0; i < windows.length; i++) {
             try {

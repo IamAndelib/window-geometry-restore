@@ -33,7 +33,8 @@ is_loaded() {
 
 SRC_DIR_REAL="$(realpath "${SRC_DIR}")"
 TEMP_DIR="$(mktemp -d ./src.XXXXXX)"
-trap 'rm -rf "${TEMP_DIR}"' EXIT INT TERM
+trap 'rm -rf "${TEMP_DIR}"' EXIT
+trap 'exit 130' INT TERM
 cp -a "${SRC_DIR_REAL}"/. "${TEMP_DIR}"/
 
 MAIN_QML_REL="contents/ui/main.qml"

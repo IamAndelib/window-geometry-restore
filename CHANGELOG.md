@@ -2,6 +2,28 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.2] - 2026-11-10
+
+**Fixes**
+- **Web apps named by a window rule on their title open straight at their place, like any app.** A browser shows a web app's window under a placeholder title (WhatsApp: `web.whatsapp.com_/`), and only once it sets the real title does a KWin rule give the window its desktop file name. 1.4.1 took such a window for a browser window: it could reopen with the browser's state (maximized), or at KWin's default place and then jump. Now the script learns how each web app opens: when a window is renamed within 3 s of opening, it remembers the app and title it opened with. A later window opening that way is taken for the web app from the start and restored at once, like Konsole or Dolphin; KWin's name then confirms it and moves nothing. The browser's own windows are restored at once as before. The first launch of a web app is learned this way and corrected after the rename. A guess KWin doesn't confirm within 10 s is forgotten, and the window becomes the browser's again where it is. Titles the browser's own windows have, and windows you have already moved, are never learned from; an opening two web apps share is not guessed.
+
+- **Quick-tiled windows no longer show at their floating size first.** A window restored into a quick tile waits for focus before KWin tiles it; it used to wait at its floating geometry and jump into the tile a moment later. It now waits in the tile's place, and its floating size is handed to KWin only as it tiles, so a drag out of the tile still gives it back.
+
+**Security and performance** (from an expert review of the whole script)
+- An app naming itself `__proto__` or `constructor` could alter the JavaScript engine that KWin shares between all scripts and its task switcher. App and desktop names are now kept in maps without a prototype.
+- An app with a huge window title could make the script work for seconds inside KWin, freezing the desktop. Titles are stored, matched and tested against window rules only up to their first 256 characters (also limiting what is kept on disk), saves per layout are capped at 32, and matching windows at a restore's deadline scores each title pair once.
+- A window renaming itself over and over could force a save on every rename and push out your saved layouts. A window teaches at most two openings, and apps holding nothing but a forgotten opening are dropped first.
+- Exclusion-list wildcards are matched without regular expressions, so a long app id can't stall matching.
+- Window rules with `\S`, `\D`, `\W` or `\B` in a regular expression are read correctly (they were lowercased into their opposites), and titles are matched as KWin matches them, without the " <2>" or "(Not Responding)" it adds.
+- Control characters in app names can't fake lines in the log. A failure loading saved data no longer stops windows that are already open from being adopted.
+- The window rules file is read only for apps with a layout to restore.
+- The README says what is stored, titles included.
+- CI: read-only token by default, write only for publishing a release, no token kept in the checkout, actions pinned to commits. Ctrl-C stops `install.sh` and `bin/load.sh`.
+
+**Under the hood**
+- Saved data: an app may carry `o`, how its windows open before KWin names them (optional; older versions ignore it).
+- New real-KWin scenarios: a window shown as "New Tab" and renamed to match a title rule, and the browser saved maximized with its web app quick-tiled, reopened with the browser closed and open. Both fail with 1.4.1. 46 scenarios, 230 unit tests.
+
 ## [1.4.1] - 2026-11-10
 
 **New**

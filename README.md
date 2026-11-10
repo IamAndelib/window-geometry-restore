@@ -35,12 +35,12 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - **When the app starts again,** every window goes back to its own monitor, on the desktop it opens on.
   - **While the app is running,** a new window it opens on a monitor where it has no window yet gets that monitor's layout and stays there. A window opened next to one already open is left where KWin put it.
   - **Each desktop is independent.** Konsole closed on desktop 2 comes back the way you left it on desktop 2, whether or not Konsole is open on desktop 1. An app opening on a desktop where you never closed it opens where it opens. Windows set to show on all desktops share one layout of their own.
-- **Which app a window belongs to.** Windows are told apart by their desktop file name, or by their window class when that names the same app. So a browser's web apps (a WhatsApp or Calendar web app) are apps of their own, as in the taskbar: each keeps its own layout and is restored while the browser is open. A Flatpak browser's web apps only get their own desktop file name from a KWin rule (*Desktop file name*, Force) or the web app's `StartupWMClass`, as Web App Hub sets up.
+- **Which app a window belongs to.** Windows are told apart by their desktop file name, or by their window class when that names the same app. So a browser's web apps (a WhatsApp or Calendar web app) are apps of their own, as in the taskbar: each keeps its own layout and is restored while the browser is open. A Flatpak browser's web apps only get their own desktop file name from a KWin rule (*Desktop file name*, Force) or the web app's `StartupWMClass`, as Web App Hub sets up. A rule that matches the web app by its title works too. The browser shows the window under a placeholder title first and the rule names it a moment later; the script learns which placeholder each web app opens with, so from the second launch on the web app opens straight at its place, like any app.
 - **Matching.** Windows are matched to their remembered slots by caption and size. A clear match applies at once; otherwise the window gets one within a few seconds. If you move a window yourself first, your placement wins.
 - **Tiles.**
   - **Back in its tile:** a window that was tiled when it closed (a quick tile or a custom Meta+T tile) reopens in the same tile. Dragging it out gives back the size it had before you tiled it.
   - **Resized quick tiles** come back at their size.
-  - **When it applies:** custom tiles right away, quick tiles as soon as the window has focus. The script never focuses a window itself.
+  - **When it applies:** custom tiles right away, quick tiles as soon as the window has focus; until then the window waits in the tile's place. The script never focuses a window itself.
   - **Shared tiles:** if another window already sits in that tile, the reopened window takes the tile's current size, because in KWin one tile has one size.
   - **Changed layouts:** if the tile layout changed in the meantime, the window reopens at the tile's position and size instead.
 - **Works with KWin:**
@@ -54,6 +54,7 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - Each monitor's part of a desktop's layout is kept until the app's next close on that monitor replaces it.
   - Unreadable data, or data from a newer version of the script, is set aside, never destroyed.
   - Layouts unused for 30 days expire.
+  - **What is stored:** each remembered window's place, size, tile and title (the first 256 characters, used to match windows to their places), in `~/.config/kde.org/kwin.conf`. Window titles can contain document names or page titles; add apps you don't want remembered to the exclusion list.
 
 ### Upgrading from 1.4.0
 
