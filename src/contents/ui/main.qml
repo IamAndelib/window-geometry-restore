@@ -54,8 +54,10 @@ Item {
 
     // ---- logging and signals -------------------------------------------------------------
 
+    // Messages carry app-chosen names and titles: control characters (a newline faking a log
+    // line) are replaced.
     function log(message) {
-        console.warn('WindowGeometryRestore: ' + message)
+        console.warn('WindowGeometryRestore: ' + String(message).replace(/[\x00-\x1f\x7f]/g, ' '))
     }
 
     function dbg(message) {
@@ -234,7 +236,7 @@ Item {
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
             assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, unmaximizedUntil: 0,
-            openedKey: named, openingCaption: caption, learnedAs: null, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
+            openedKey: named, openingCaption: caption, learnedAs: null, learnings: 0, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
             desktopsHandler: null, outputHandler: null, desktopFileHandler: null
@@ -258,6 +260,9 @@ Item {
     // A window new to its group: restored from the group's layout, unless a window rule places
     // it or a restore for another monitor is under way.
     function placeNewWindow(entry, group) {
+        // Nothing saved that this window could be restored from: no need to read the rules.
+        if (!group.session && !Engine.layoutFor(store, group.cls, group.desktopKey) &&
+                !(group.legacyCls && Engine.layoutFor(store, group.legacyCls, group.desktopKey))) return
         var rule = geometryRuleOf(entry.w)
         if (group.session && group.session.monitor && !sameMonitor(group.session.monitor, monitorOf(entry))) {
             dbg(entry.label + ': a restore for another monitor is under way, leaving this window')
@@ -285,10 +290,11 @@ Item {
                     if (r.unreadable) logOnce('rule:' + r.id + '/' + r.unreadable, 'cannot read the regular expression of KWin window rule ' +
                         (r.description || r.id) + ' (' + r.unreadable + '): matching its plain text instead')
                 })
+                // captionNormal, as KWin matches rules: without the " <2>" or "(Not Responding)" it adds.
                 return Engine.geometryRuleFor(rules, {
                     resourceClass: String(w.resourceClass),
                     resourceName: String(w.resourceName || ''),
-                    caption: String(w.caption || '')
+                    caption: String(w.captionNormal !== undefined ? w.captionNormal : (w.caption || ''))
                 })
             } finally {
                 file.destroy()
@@ -364,7 +370,7 @@ Item {
         }
         if (!cls || cls === entry.cls) return
         // Renamed again: what it was named before was a step on the way, not how that app opens.
-        if (entry.learnedAs && entry.learnedAs !== cls) Engine.forgetOpening(store, entry.learnedAs, entry.openedKey, entry.openingCaption)
+        if (entry.learnedAs && entry.learnedAs !== cls && Engine.forgetOpening(store, entry.learnedAs, entry.openedKey, entry.openingCaption)) persist()
         var label = entry.label
         var fresh = !entry.userPlaced && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS
         var from = entry.restoredFrom
@@ -386,9 +392,12 @@ Item {
         dbg('window of ' + label + ' now belongs to ' + entry.label)
         // Renamed right after opening, untouched: its next window opening the same way is this
         // app, unless the old app's own windows have that title too.
-        if (!entry.userPlaced && Date.now() - entry.openedAt < Engine.LEARN_MS && !isOwnTitle(entry.openedKey, entry.openingCaption) &&
+        // At most twice per window (a name on the way, then the last): a window renaming itself
+        // over and over must not fill the saved data and push out real layouts.
+        if (!entry.userPlaced && entry.learnings < 2 && Date.now() - entry.openedAt < Engine.LEARN_MS && !isOwnTitle(entry.openedKey, entry.openingCaption) &&
                 Engine.learnOpening(store, cls, entry.openedKey, entry.openingCaption, Date.now())) {
             entry.learnedAs = cls
+            entry.learnings++
             log(entry.label + ': learned that it opens as ' + entry.openedKey + ' titled "' + entry.openingCaption + '"')
             persist()
         }
@@ -600,7 +609,7 @@ Item {
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
-            fields.caption = String(w.caption || '')
+            fields.caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
@@ -632,8 +641,12 @@ Item {
         var awaitingRestore = !!entry.prediction || (!!group.session && group.session.pending.indexOf(id) !== -1)
         if (group.session) removeFromArray(group.session.pending, id)
         // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
-        var snap = awaitingRestore ? null : snapshotWindow(entry)
-        untrack(entry)
+        var snap = null
+        try {
+            snap = awaitingRestore ? null : snapshotWindow(entry)
+        } finally {
+            untrack(entry)
+        }
         if (snap) {
             group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
@@ -848,9 +861,12 @@ Item {
         log(entry.label + ': window placed by the user, not restoring it')
     }
 
-    function matchFor(entry, session) {
+    // `scores` (optional): this window's caption scores against the session's saves, kept by a
+    // caller that matches it again (endSession).
+    function matchFor(entry, session, scores) {
         var w = entry.w
-        var caption = String(w.caption || '')
+        var caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
+        scores = scores || []
         var taken = session.taken
         var candidates = 0
         if (session.captionOnly) {
@@ -859,11 +875,12 @@ Item {
             taken = session.taken.slice()
             for (var i = 0; i < session.saves.length; i++) {
                 if (taken[i]) continue
-                if (Engine.captionScore(session.saves[i].caption, caption) < Engine.CAPTION_FALLBACK) taken[i] = true
+                if (scores[i] === undefined) scores[i] = Engine.captionScore(session.saves[i].caption, caption)
+                if (scores[i] < Engine.CAPTION_FALLBACK) taken[i] = true
                 else candidates++
             }
         }
-        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken)
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken, scores)
         // The other app's saves never arrive: one save left for this caption is a clear match.
         if (match) match.only = candidates === 1
         return match
@@ -913,10 +930,13 @@ Item {
     // Deadline: give each waiting window the best remaining save, best pair first.
     function endSession(group) {
         var session = group.session
+        // Caption scores don't change while the sweep runs: each pair is scored once.
+        var scores = {}
         for (;;) {
             var best = null
             for (var i = 0; i < session.pending.length; i++) {
-                var match = matchFor(tracked[session.pending[i]], session)
+                var id = session.pending[i]
+                var match = matchFor(tracked[id], session, scores[id] || (scores[id] = []))
                 if (match && (!best || Engine.isBetterMatch(match, best.match))) best = { id: session.pending[i], match: match }
             }
             if (!best) break
@@ -1329,7 +1349,11 @@ Item {
 
     function startup() {
         loadConfig()
-        loadPersisted()
+        try {
+            loadPersisted()
+        } catch (e) {
+            log('loading saved window data failed: ' + e)
+        }
         var windows = Workspace.stackingOrder
         for (var i = 0; i < windows.length; i++) {
             try {

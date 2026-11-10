@@ -559,7 +559,7 @@ test('corrupt persisted data is discarded safely, saving still works afterwards'
     const rt = buildRuntime('{"apps": broken json{{{')
 
     assert.ok(rt.getLogs().some((l) => l.includes('unreadable')), 'corruption logged')
-    assert.deepEqual(rt.storeRef().apps, {})
+    assert.deepEqual(Object.keys(rt.storeRef().apps), [])
     assert.equal(rt.stored.windowgeometryrestore_windows_corrupt, '{"apps": broken json{{{', 'unreadable data kept aside')
 
     const w = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 500, height: 400 })
@@ -2235,7 +2235,9 @@ test('a rules file with several rules, as System Settings writes it, is read', (
 })
 
 test('a rule with a regular expression the script cannot read is logged once', () => {
-    const rt = buildRuntime('{}', {}, { rules: 'r1', 'r1/wmclass': '(?>konsole)+', 'r1/wmclassmatch': '3', 'r1/positionrule': '3' })
+    // Rules are read for an app with something to restore.
+    const rt = buildRuntime(savedLayouts({ dolphin: [{ c: 'Doc', x: 40, y: 40, w: 800, h: 600, o: null }] }), {},
+        { rules: 'r1', 'r1/wmclass': '(?>konsole)+', 'r1/wmclassmatch': '3', 'r1/positionrule': '3' })
     for (let i = 0; i < 3; i++) rt.trackWindow(makeWindow({ cls: 'dolphin', caption: 'Doc ' + i }))
     assert.equal(rt.getLogs().filter((l) => l.includes('cannot read the regular expression')).length, 1)
 })
@@ -3180,4 +3182,73 @@ test('a long opening title is learned and recognised', () => {
     const again = makeWindow({ cls: CHROME, caption: long })
     rt.trackWindow(again)
     assert.ok(groupOf(rt, WHATSAPP), 'guessed from the first 256 characters')
+})
+
+// --- Security and performance: app-controlled names and titles, hostile saved data ---
+
+test('an app id "__proto__" must not pollute Object.prototype of the shared engine', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: '__proto__', caption: 'hostile', x: 10, y: 10, width: 500, height: 400 })
+    rt.trackWindow(w)
+    w.emitClosed()
+    const polluted = ({}).saves !== undefined || ({}).desktops !== undefined
+    const blobApps = Object.keys(JSON.parse(rt.blobRef()).apps)
+    // a later restart decodes a quick tile's split as "no size": decodeRel's for-in sees the inherited keys
+    const rel = Engine.decodeRel({ x: 0, y: 0, w: 0.5, h: 1 })
+    // shutdown walks tracked with for-in and hits the inherited keys
+    const other = makeWindow({ cls: 'editor', caption: 'Editor' })
+    rt.trackWindow(other)
+    rt.shutdown()
+    const shutdownErrors = rt.getLogs().filter((l) => /shutdown failed/.test(l))
+    delete Object.prototype.saves; delete Object.prototype.desktops; delete Object.prototype.lastAccess
+    assert.deepEqual({ polluted, blobApps, rel, shutdownErrors }, { polluted: false, blobApps: ['__proto__'], rel: { x: 0, y: 0, width: 0.5, height: 1 }, shutdownErrors: [] },
+        'saved like any app, without touching the shared prototype')
+})
+
+test('a corrupt blob with a "__proto__" desktop key must not abort startup', () => {
+    const blob = '{"version":2,"apps":{"a":{"t":1000000000,"d":{"desk-uuid-1":{"t":1000000000,"w":[{"c":"y","x":0,"y":0,"w":10,"h":10}]},"__proto__":{"t":1000000000,"w":[{"c":"x","x":0,"y":0,"w":10,"h":10}]}}}}}'
+    assert.doesNotThrow(() => buildRuntime(blob))
+})
+
+test('saved captions are bounded', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'x'.repeat(100000) })
+    rt.trackWindow(w)
+    w.emitClosed()
+    const c = savedApp(rt, 'app').w[0].c
+    assert.ok(c.length <= Engine.MAX_CAPTION, 'caption stored with ' + c.length + ' chars')
+})
+
+test('one restore deadline with 64 windows and 4 KB titles stays fast', () => {
+    const rt = buildRuntime()
+    const cap = (i) => ('Some long document title ' + i + ' ').repeat(200).slice(0, 4096)
+    const first = []
+    for (let i = 0; i < 64; i++) { const w = makeWindow({ cls: 'browser', caption: cap(i) + 'a', width: 800, height: 600 }); rt.trackWindow(w); first.push(w) }
+    for (const w of first) w.emitClosed()
+    for (let i = 0; i < 64; i++) rt.trackWindow(makeWindow({ cls: 'browser', caption: cap(i + 500) + 'b', width: 800, height: 600 }))
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    const t = process.hrtime.bigint()
+    rt.tick()
+    const ms = Number(process.hrtime.bigint() - t) / 1e6
+    assert.ok(ms < 100, 'deadline sweep took ' + ms.toFixed(0) + ' ms')
+})
+
+test('one window spamming app id changes cannot force a save per change or evict other apps', () => {
+    const rt = buildRuntime(savedLayouts({ 'org.user.editor': [{ c: 'Editor', x: 1, y: 2, w: 900, h: 700, o: null }] }))
+    const w = makeWindow({ cls: 'com.evil.App', caption: 'x' })
+    rt.trackWindow(w)
+    for (let n = 0; n < 600; n++) renameTo(w, 'com.evil.App.n' + n, 'x')
+    const learned = rt.getLogs().filter((l) => /learned that it opens/.test(l)).length
+    const kept = !!JSON.parse(rt.blobRef()).apps['org.user.editor']
+    assert.ok(learned <= 2, 'learned ' + learned + ' openings from one window')
+    assert.ok(kept, 'the user\'s layout is kept')
+    assert.deepEqual(Object.keys(JSON.parse(rt.blobRef()).apps), ['org.user.editor'], 'nothing else saved')
+})
+
+test('an app id with control characters cannot fake a log line', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'evil\nWindowGeometryRestore: fake line', caption: 'x' })
+    rt.trackWindow(w)
+    w.emitClosed()
+    assert.ok(rt.getLogs().length > 0 && rt.getLogs().every((l) => !/[\x00-\x1f]/.test(l)))
 })

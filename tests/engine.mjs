@@ -46,6 +46,70 @@ test('isSubApp: a desktop file name inside the class, as a Flatpak browser\'s we
     assert.equal(engine.isSubApp('a.b', null), false)
 })
 
+test('bestMatch scores each save\'s caption once when given a cache', () => {
+    const saves = [{ caption: 'One', width: 1, height: 1 }, { caption: 'Two', width: 2, height: 2 }]
+    const scores = []
+    const first = engine.bestMatch(saves, { caption: 'Two', width: 9, height: 9 }, [], scores)
+    assert.equal(first.index, 1)
+    assert.deepEqual(scores.length, 2, 'filled')
+    scores[0] = 100 // a cached score is used as is
+    assert.equal(engine.bestMatch(saves, { caption: 'Two', width: 9, height: 9 }, [false, true], scores).index, 0)
+})
+
+test('wildcards match in linear time, without a regular expression', () => {
+    const parsed = engine.parseList('steam*\n*proton*\na*b*c\n*')
+    assert.equal(engine.isListed('steam_app_1', parsed), true)
+    assert.equal(engine.isListed('com.valve.proton.x', parsed), true)
+    assert.equal(engine.isListed('axxbxxc', parsed), true)
+    assert.equal(engine.matchesWildcard('ac', ['a', 'b', 'c']), false)
+    assert.equal(engine.matchesWildcard('abc', ['ab', 'bc']), false, 'parts may not overlap')
+    assert.equal(engine.matchesWildcard('abbc', ['ab', 'bc']), true)
+    const long = 'a'.repeat(200000)
+    const start = Date.now()
+    assert.equal(engine.matchesWildcard(long, ['', 'a', 'b', 'c', '']), false)
+    assert.ok(Date.now() - start < 50, 'a long hostile app id is matched quickly')
+})
+
+test('regular-expression rules keep \\S, \\D, \\W and \\B (not lowercased)', () => {
+    const rule = (title) => engine.parseRules(rulesFile({ r: { wmclass: 'kate', wmclassmatch: '1', title, titlematch: '3', positionrule: '2' } }))
+    const win = (caption) => ({ resourceClass: 'kate', resourceName: 'kate', caption })
+    assert.ok(engine.geometryRuleFor(rule('^\\S+ - Kate$'), win('notes.txt - Kate')))
+    assert.equal(engine.geometryRuleFor(rule('^\\S+ - Kate$'), win('my notes - Kate')), null)
+    assert.ok(engine.geometryRuleFor(rule('^\\D+$'), win('Notes')))
+})
+
+test('app ids and desktop ids never reach Object.prototype', () => {
+    const state = engine.newState()
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+        engine.recordLayout(state, key, '__proto__', [engine.makeSave({ caption: 'x', x: 1, y: 1, width: 10, height: 10 })], 1)
+        engine.learnOpening(state, key, 'other', 'title', 1)
+    }
+    assert.equal(({}).saves, undefined)
+    assert.equal(({}).desktops, undefined)
+    const back = engine.decodeState(engine.encodeState(state)).state
+    assert.deepEqual(Object.keys(back.apps).sort(), ['__proto__', 'constructor', 'prototype'])
+    assert.equal(back.apps.__proto__.desktops.__proto__.saves[0].caption, 'x')
+})
+
+test('saved data is bounded: titles and saves per layout', () => {
+    const save = { c: 'x'.repeat(10000), x: 1, y: 1, w: 10, h: 10 }
+    const back = engine.decodeState(JSON.stringify({ version: 2, apps: { a: { t: 1, d: { k: { t: 1, w: Array(100).fill(save) } } } } })).state
+    assert.equal(back.apps.a.desktops.k.saves.length, engine.MAX_SAVES)
+    assert.equal(back.apps.a.desktops.k.saves[0].caption.length, engine.MAX_CAPTION)
+})
+
+test('learned-only and empty apps are pruned before apps with layouts', () => {
+    const state = engine.newState()
+    engine.recordLayout(state, 'real', 'k', [engine.makeSave({ caption: 'x', x: 1, y: 1, width: 10, height: 10 })], 1)
+    for (let i = 0; i < engine.MAX_APPS; i++) engine.learnOpening(state, 'web' + i, 'browser', 'title' + i, 2)
+    engine.learnOpening(state, 'empty', 'browser', 'gone', 2)
+    engine.forgetOpening(state, 'empty', 'browser', 'gone')
+    engine.pruneExpired(state, 3)
+    assert.ok(state.apps.real, 'the oldest app with a layout is kept')
+    assert.equal(state.apps.empty, undefined)
+    assert.equal(Object.keys(state.apps).length, engine.MAX_APPS)
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)

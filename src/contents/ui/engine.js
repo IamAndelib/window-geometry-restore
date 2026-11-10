@@ -43,7 +43,10 @@ var RESTORE_TIMEOUT_MS = 10000
 var LEARN_MS = 3000
 var PREDICTION_MS = RESTORE_TIMEOUT_MS
 var MAX_OPENINGS = 4
+// Titles are app-controlled and may be huge: stored, matched and tested against rules only up
+// to this length (matching is O(length) per pair, and saved titles are kept on disk).
 var MAX_CAPTION = 256
+var MAX_SAVES = 32
 var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
 var TICK_MS = 250
@@ -66,10 +69,6 @@ function isObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function escapeRegExp(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 function parseList(text) {
     var parsed = { exact: [], patterns: [] }
     if (!text) return parsed
@@ -77,13 +76,8 @@ function parseList(text) {
     for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim().toLowerCase()
         if (!line) continue
-        if (line.indexOf('*') === -1) {
-            parsed.exact.push(line)
-        } else {
-            var parts = line.split('*')
-            for (var j = 0; j < parts.length; j++) parts[j] = escapeRegExp(parts[j])
-            parsed.patterns.push(new RegExp('^' + parts.join('.*') + '$'))
-        }
+        if (line.indexOf('*') === -1) parsed.exact.push(line)
+        else parsed.patterns.push(line.split('*'))
     }
     return parsed
 }
@@ -112,8 +106,24 @@ function isListed(name, parsed) {
     name = String(name).toLowerCase()
     if (parsed.exact.indexOf(name) !== -1) return true
     for (var i = 0; i < parsed.patterns.length; i++)
-        if (parsed.patterns[i].test(name)) return true
+        if (matchesWildcard(name, parsed.patterns[i])) return true
     return false
+}
+
+// `parts`: a pattern split at its wildcards. Linear in the name: an app id is app-controlled,
+// and a backtracking regular expression over a long one could stall KWin.
+function matchesWildcard(name, parts) {
+    var first = parts[0], last = parts[parts.length - 1]
+    if (name.length < first.length + last.length) return false
+    if (name.slice(0, first.length) !== first || name.slice(name.length - last.length) !== last) return false
+    var at = first.length
+    var end = name.length - last.length
+    for (var i = 1; i < parts.length - 1; i++) {
+        var found = name.indexOf(parts[i], at)
+        if (found === -1 || found + parts[i].length > end) return false
+        at = found + parts[i].length
+    }
+    return true
 }
 
 function captionScore(a, b) {
@@ -150,7 +160,14 @@ function isBetterMatch(a, b) {
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
 // Returns { index, tier, dims, score } or null.
-function bestMatch(saves, live, taken) {
+// `scores` (optional): caption scores of this window against the saves, filled as computed, for
+// callers that match the same window again.
+function bestMatch(saves, live, taken, scores) {
+    var score = function (i) {
+        if (!scores) return captionScore(saves[i].caption, live.caption)
+        if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
+        return scores[i]
+    }
     var best = null
     var free = -1
     var freeCount = 0
@@ -160,17 +177,17 @@ function bestMatch(saves, live, taken) {
         freeCount++
         var s = saves[i]
         var dims = (s.width === live.width ? 1 : 0) + (s.height === live.height ? 1 : 0)
-        var score = captionScore(s.caption, live.caption)
+        var caption = score(i)
         var tier
-        if (score === 100 && dims === 2) tier = 1
+        if (caption === 100 && dims === 2) tier = 1
         else if (dims === 2) tier = 2
-        else if (score >= CAPTION_FALLBACK) tier = 3
+        else if (caption >= CAPTION_FALLBACK) tier = 3
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: score }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: captionScore(saves[free].caption, live.caption) }
+        return { index: free, tier: 4, dims: 0, score: score(free) }
     }
     return best
 }
@@ -189,8 +206,15 @@ function makeSave(fields) {
     }
 }
 
+// Maps keyed by names apps choose (app ids, desktop ids) have no prototype: an app id like
+// "__proto__" or "constructor" must not reach Object.prototype, which every script in KWin's
+// QML engine shares.
+function newMap() {
+    return Object.create(null)
+}
+
 function newState() {
-    return { apps: {} }
+    return { apps: newMap() }
 }
 
 function encodeOutput(output) {
@@ -271,7 +295,7 @@ function decodeSave(s) {
     var geometry = decodeGeometry(s)
     if (!geometry) return null
     var tile = decodeTile(s.t)
-    geometry.caption = typeof s.c === 'string' ? s.c : ''
+    geometry.caption = typeof s.c === 'string' ? s.c.slice(0, MAX_CAPTION) : ''
     geometry.tile = tile
     geometry.free = tile ? decodeGeometry(s.f) : null
     geometry.maximized = isIndex(s.max, 4) ? s.max : 0
@@ -281,7 +305,7 @@ function decodeSave(s) {
 function decodeSaves(list) {
     var saves = []
     if (!Array.isArray(list)) return saves
-    for (var i = 0; i < list.length; i++) {
+    for (var i = 0; i < list.length && saves.length < MAX_SAVES; i++) {
         var save = decodeSave(list[i])
         if (save) saves.push(save)
     }
@@ -289,7 +313,7 @@ function decodeSaves(list) {
 }
 
 function decodeDesktops(d, fallbackTime) {
-    var desktops = {}
+    var desktops = newMap()
     if (!isObject(d)) return desktops
     for (var key in d) {
         if (!key || key.length > MAX_DESKTOP_KEY || !isObject(d[key])) continue
@@ -341,7 +365,7 @@ function encodeSaves(saves) {
 }
 
 function encodeState(state) {
-    var out = { version: SCHEMA_VERSION, apps: {} }
+    var out = { version: SCHEMA_VERSION, apps: newMap() }
     if (!state || !state.apps) return JSON.stringify(out)
     for (var cls in state.apps) {
         var app = state.apps[cls]
@@ -351,10 +375,10 @@ function encodeState(state) {
         if (Array.isArray(app.opens) && app.opens.length) {
             encoded.o = app.opens.map(function (o) { return { k: o.cls, c: o.caption } })
         }
-        var desktops = isObject(app.desktops) ? app.desktops : {}
+        var desktops = isObject(app.desktops) ? app.desktops : newMap()
         var keys = Object.keys(desktops)
         if (keys.length) {
-            encoded.d = {}
+            encoded.d = newMap()
             for (var i = 0; i < keys.length; i++) {
                 var layout = desktops[keys[i]]
                 encoded.d[keys[i]] = { t: numberOr(layout.lastAccess, 0), w: encodeSaves(layout.saves) }
@@ -386,7 +410,7 @@ function learnOpening(state, key, cls, caption, now) {
     caption = openingTitle(caption)
     if (!caption || !key || !cls || key === cls) return false
     var app = state.apps[key]
-    if (!app) app = state.apps[key] = { lastAccess: now, saves: [], desktops: {} }
+    if (!app) app = state.apps[key] = { lastAccess: now, saves: [], desktops: newMap() }
     var opens = (app.opens || []).filter(function (o) { return !(o.cls === cls && o.caption === caption) })
     opens.unshift({ cls: cls, caption: caption })
     app.opens = opens.slice(0, MAX_OPENINGS)
@@ -403,10 +427,13 @@ function captionSavedFor(state, cls, caption) {
     return layouts.some(function (saves) { return saves.some(function (s) { return openingTitle(s.caption) === caption }) })
 }
 
+// Returns whether there was such an opening.
 function forgetOpening(state, key, cls, caption) {
     var app = state.apps[key]
-    if (!app || !app.opens) return
+    if (!app || !app.opens) return false
+    var count = app.opens.length
     app.opens = app.opens.filter(function (o) { return !(o.cls === cls && o.caption === caption) })
+    return app.opens.length < count
 }
 
 // The app a new window of app `cls` titled `caption` will turn into, as learned, or null. Null
@@ -436,8 +463,9 @@ function layoutFor(state, cls, key) {
 
 function recordLayout(state, cls, key, saves, now) {
     var app = state.apps[cls]
-    if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: {} }
-    if (!isObject(app.desktops)) app.desktops = {}
+    if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: newMap() }
+    if (!isObject(app.desktops)) app.desktops = newMap()
+    saves = saves.slice(-MAX_SAVES)
     app.desktops[key] = { lastAccess: now, saves: saves }
     app.saves = saves
     app.lastAccess = now
@@ -449,7 +477,8 @@ function pruneExpired(state, now) {
     var keys = Object.keys(state.apps)
     for (var i = 0; i < keys.length; i++) {
         var app = state.apps[keys[i]]
-        if (app.lastAccess < cutoff) {
+        // Nothing left (a learned opening forgotten): nothing to keep either.
+        if (app.lastAccess < cutoff || !hasData(app)) {
             delete state.apps[keys[i]]
             removed++
             continue
@@ -461,7 +490,11 @@ function pruneExpired(state, now) {
     }
     var remaining = Object.keys(state.apps)
     if (remaining.length > MAX_APPS) {
-        remaining.sort(function (a, b) { return state.apps[a].lastAccess - state.apps[b].lastAccess })
+        // Apps with only a learned opening go before apps with layouts, then the least used.
+        remaining.sort(function (a, b) {
+            var x = state.apps[a], y = state.apps[b]
+            return (hasLayouts(x) - hasLayouts(y)) || (x.lastAccess - y.lastAccess)
+        })
         for (var j = 0; j < remaining.length - MAX_APPS; j++) {
             delete state.apps[remaining[j]]
             removed++
@@ -485,7 +518,7 @@ function mergeDiskApps(state, diskState) {
             adopted++
             continue
         }
-        if (!isObject(known.desktops)) known.desktops = {}
+        if (!isObject(known.desktops)) known.desktops = newMap()
         if (known.opens === undefined && app.opens && app.opens.length) known.opens = app.opens
         for (var key in app.desktops || {}) {
             if (!known.desktops[key]) {
@@ -539,15 +572,16 @@ function literalOf(pattern) {
 // of its literal text: erring towards KWin, without one odd rule covering every window.
 function ruleCondition(pattern, mode) {
     mode = parseInt(mode, 10) || 0
-    pattern = pattern.toLowerCase()
     if (mode === 0) return { test: function () { return true } }
-    if (mode === 1) return { test: function (v) { return v === pattern } }
-    if (mode === 2) return { test: function (v) { return v.indexOf(pattern) !== -1 } }
+    var lower = pattern.toLowerCase()
+    if (mode === 1) return { test: function (v) { return v === lower } }
+    if (mode === 2) return { test: function (v) { return v.indexOf(lower) !== -1 } }
+    // Not lowercased: that would turn \S, \D, \W, \B into \s, \d, \w, \b. The i flag is enough.
     try {
         var re = new RegExp(pattern.replace(/^\(\?[a-z]+\)/, ''), 'i')
         return { test: function (v) { return re.test(v) } }
     } catch (e) {
-        var literal = literalOf(pattern)
+        var literal = literalOf(lower)
         return { unreadable: true, test: function (v) { return !!literal && v.indexOf(literal) !== -1 } }
     }
 }
@@ -608,7 +642,7 @@ function geometryRuleFor(rules, win) {
         if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) continue
         var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
         if (!r.wmclass.test(normalizeRuleText(cls).toLowerCase())) continue
-        if (!r.title.test(normalizeRuleText(win.caption).toLowerCase())) continue
+        if (!r.title.test(normalizeRuleText(String(win.caption).slice(0, MAX_CAPTION * 4)).toLowerCase())) continue
         return r
     }
     return null
