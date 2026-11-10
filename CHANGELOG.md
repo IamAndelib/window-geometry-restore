@@ -2,6 +2,19 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.1] - 2026-11-10
+
+**New**
+- **Web apps are apps of their own** ([#5](https://github.com/IamAndelib/window-geometry-restore/issues/5)). Windows are told apart by their desktop file name, as the taskbar does, instead of their window class. A browser's web apps (Web App Hub, a Flatpak Chrome's WhatsApp) each keep their own layout, are restored while the browser is open, and no longer mix their layouts with the browser's. Apps whose desktop file name is their class keep their layouts as before.
+- **Upgrading:** an app whose key changes restores once from what 1.4.0 remembered under its class. A web app takes only a save with its caption, and only until its browser next closes there.
+- The exclusion list matches the desktop file name as well as the window class.
+
+**Fixes**
+- **Window rules are recognised again on Plasma 6.8.** KWin 6.8 lists rules under a new key in `kwinrulesrc` (and rewrites older files to it), so the script no longer saw any rule and placed windows that a rule places or sizes. Rules switched off in System Settings are now ignored, as KWin does.
+
+**Under the hood**
+- `tests/kwin` now runs against KWin 6.8.2: 41 scenarios, three new ones for web apps. Unit tests: 189. Each change was checked with a mutation.
+
 ## [1.4.0] - 2026-10-30
 
 Tiles, virtual desktops and monitors, and working with KWin instead of around it. Every change was checked against a real KWin.

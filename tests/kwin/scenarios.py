@@ -554,6 +554,72 @@ def s_desktops_are_independent():
         check(rect(w) == (1000, 300, 800, 550), "desktop 2's layout: %s" % (rect(w),))
 
 
+# ---- app keys ----------------------------------------------------------------------
+
+# A browser's web apps share its app id as their window class (Flatpak on Wayland). A rule
+# that forces their desktop file name, as Web App Hub's setup does, is what tells them apart.
+BROWSER = "org.example.browser"
+WEB_APP = "org.example.browser.webapp-abc"
+
+
+def web_app_rule(title):
+    return rule(BROWSER, title=title, titlematch="1", desktopfile=WEB_APP, desktopfilerule=2)
+
+
+def s_web_app_restored_with_browser_open():
+    """A web app with its own desktop file name is restored while its browser runs."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        a = sb.open_app(BROWSER, "WhatsApp")
+        w = sb.window("WhatsApp")
+        check(w["cls"] == BROWSER and w["df"] == WEB_APP, "precondition: the rule set its desktop file name: %s" % (w,))
+        check(not logged(sb.script_log(), "leaving it to KWin"), "a desktop file rule is not a geometry rule")
+        sb.set_geometry("WhatsApp", 900, 300, 700, 500)
+        a.close()
+        sb.open_app(BROWSER, "Browser")
+        sb.settle(0.5)
+        sb.open_app(BROWSER, "WhatsApp")
+        w = sb.window("WhatsApp")
+        check(rect(w) == (900, 300, 700, 500), "restored beside the open browser: %s" % (rect(w),))
+        saved = sb.saved()["apps"]
+        check(WEB_APP in saved and BROWSER not in saved, "saved under its own key: %s" % (list(saved),))
+
+
+def s_browser_and_web_app_separate():
+    """Closing the browser does not overwrite its web app's layout, nor the other way round."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser")
+        a = sb.open_app(BROWSER, "WhatsApp")
+        sb.set_geometry("Browser", 100, 100, 800, 600)
+        sb.set_geometry("WhatsApp", 1000, 300, 700, 500)
+        a.close()
+        b.close()
+        sb.settle(0.3)
+        saved = sb.saved()["apps"]
+        captions = lambda key: [s["c"] for s in saved[key]["w"]]
+        check(captions(BROWSER) == ["Browser"] and captions(WEB_APP) == ["WhatsApp"], "separate layouts: %s" % (saved,))
+        sb.open_app(BROWSER, "WhatsApp")
+        sb.open_app(BROWSER, "Browser")
+        check(rect(sb.window("WhatsApp")) == (1000, 300, 700, 500), "web app: %s" % (rect(sb.window("WhatsApp")),))
+        check(rect(sb.window("Browser")) == (100, 100, 800, 600), "browser: %s" % (rect(sb.window("Browser")),))
+
+
+def s_web_app_from_older_saves():
+    """Saved by 1.4.0 under the browser's class: the web app restores from there once, by its caption."""
+    with sandbox(outputs=1, desktop_ids=[DESK1], rules=[web_app_rule("WhatsApp")]) as sb:
+        desk = sb.probe("return workspace.desktops[0].id")["result"]
+        check(desk == DESK1, "precondition: the desktop keeps its id across the restart")
+        now = int(time.time() * 1000)
+        out = {"x": 0, "y": 0, "s": "", "n": "Virtual-0"}
+        saves = [{"c": "Browser", "x": 100, "y": 100, "w": 700, "h": 500, "o": dict(out, x=100, y=100)},
+                 {"c": "WhatsApp", "x": 1000, "y": 300, "w": 700, "h": 500, "o": dict(out, x=1000, y=300)}]
+        sb.restart_kwin(store=json.dumps({"version": 2, "apps": {BROWSER: {"t": now, "w": saves, "d": {desk: {"t": now, "w": saves}}}}}))
+        sb.open_app(BROWSER, "WhatsApp", size=(700, 500))
+        w = sb.window("WhatsApp")
+        check(w["df"] == WEB_APP, "precondition: keyed by its desktop file name")
+        check(logged(sb.script_log(), "by an earlier version"), "restored through the fallback")
+        check(rect(w) == (1000, 300, 700, 500), "its own save from the browser's layout: %s" % (rect(w),))
+
+
 # ---- monitors ----------------------------------------------------------------------
 
 def s_late_monitor():
@@ -815,6 +881,9 @@ SCENARIOS = [
     s_logout_with_tiles,
     s_tile_on_desktop_not_shown,
     s_desktops_are_independent,
+    s_web_app_restored_with_browser_open,
+    s_browser_and_web_app_separate,
+    s_web_app_from_older_saves,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

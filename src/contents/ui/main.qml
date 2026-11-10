@@ -185,6 +185,7 @@ Item {
         if (!live[entry.groupKey]) {
             live[entry.groupKey] = {
                 key: entry.groupKey, cls: entry.cls, desktopKey: entry.desktopKey, label: entry.label,
+                legacyCls: entry.resourceClass !== entry.cls ? entry.resourceClass : null,
                 open: [], buffer: [], session: null, settled: false
             }
         }
@@ -196,15 +197,18 @@ Item {
     // they are left where they are and only saved when they close.
     function trackWindow(w, adopted) {
         if (!isValidWindow(w)) return
-        var cls = w.resourceClass
-        if (Engine.isListed(cls, excluded)) {
+        // Keyed once, here: a window keeps its app key until it closes.
+        var resourceClass = String(w.resourceClass)
+        var cls = Engine.appKeyFor(resourceClass, w.desktopFileName)
+        // Either name excludes it, so lists written for window classes keep working.
+        if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
             dbg('ignoring excluded app: ' + cls)
             return
         }
         var id = String(w.internalId)
         if (tracked[id]) return
         var entry = {
-            id: id, w: w, cls: cls, desktopKey: '', groupKey: '', label: cls,
+            id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
             assigned: !!adopted, userPlaced: false, provisional: null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
@@ -644,8 +648,14 @@ Item {
 
     // Only the layout saved on the group's own desktop is restored: desktops are independent.
     // With `monitor`, only that monitor's part of it.
+    // An app keyed by its desktop file name that has nothing saved under that key yet (saved by
+    // a version that keyed by window class) restores once from its class's layout, read only.
+    // A web app shared that layout with its browser: only windows whose caption matches take a
+    // save from it.
     function startSession(group, monitor) {
         var saved = Engine.layoutFor(store, group.cls, group.desktopKey)
+        var legacy = !saved && !!group.legacyCls && !store.apps[group.cls]
+        if (legacy) saved = Engine.layoutFor(store, group.legacyCls, group.desktopKey)
         if (!saved) return false
         var saves = saved.saves
         if (monitor) {
@@ -655,10 +665,14 @@ Item {
             }
             if (!saves.length) return false
         }
-        saved.lastAccess = store.apps[group.cls].lastAccess = Date.now()
-        group.session = { saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0 }
+        if (!legacy) saved.lastAccess = store.apps[group.cls].lastAccess = Date.now()
+        group.session = {
+            saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0,
+            legacy: legacy, captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
+        }
         dbg(group.label + ': restore session started - ' + saves.length + ' saved window(s)' +
-            (monitor ? ' for ' + monitor.name + ', where it has no window yet' : ''))
+            (monitor ? ' for ' + monitor.name + ', where it has no window yet' : '') +
+            (legacy ? ' saved under ' + group.legacyCls + ' by an earlier version' : ''))
         ensureTick()
         return true
     }
@@ -705,11 +719,23 @@ Item {
 
     function matchFor(entry, session) {
         var w = entry.w
-        return Engine.bestMatch(session.saves, {
-            caption: String(w.caption || ''),
-            width: Math.round(w.width),
-            height: Math.round(w.height)
-        }, session.taken)
+        var caption = String(w.caption || '')
+        var taken = session.taken
+        var candidates = 0
+        if (session.captionOnly) {
+            // The class's layout holds another app's windows (the browser of a web app):
+            // only a caption tells them apart, so saves with another caption are out.
+            taken = session.taken.slice()
+            for (var i = 0; i < session.saves.length; i++) {
+                if (taken[i]) continue
+                if (Engine.captionScore(session.saves[i].caption, caption) < Engine.CAPTION_FALLBACK) taken[i] = true
+                else candidates++
+            }
+        }
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken)
+        // The other app's saves never arrive: one save left for this caption is a clear match.
+        if (match) match.only = candidates === 1
+        return match
     }
 
     // Unambiguous matches apply at once; the rest wait for the set to arrive or the deadline.
@@ -720,7 +746,7 @@ Item {
         var session = group.session
         if (!session) return
         var match = matchFor(entry, session)
-        if (!match || (match.tier !== 1 && session.remaining !== 1)) return
+        if (!match || (match.tier !== 1 && session.remaining !== 1 && !match.only)) return
         assignSave(entry, session, match, false)
         if (session.remaining === 0) {
             endSession(group)
