@@ -2,6 +2,17 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.2] - 2026-11-10
+
+**Fixes**
+- **Web apps named by a window rule on their title open straight at their place, like any app.** A browser shows a web app's window under a placeholder title (WhatsApp: `web.whatsapp.com_/`), and only once it sets the real title does a KWin rule give the window its desktop file name. 1.4.1 took such a window for a browser window: it could reopen with the browser's state (maximized), or at KWin's default place and then jump. Now the script learns how each web app opens: when a window is renamed right after opening, it remembers the app and title it opened with. A later window opening that way is taken for the web app from the start and restored at once, like Konsole or Dolphin; the rename then changes nothing. The browser's own windows are restored at once as before. The first time a web app is seen it is learned this way, and corrected after the rename. A guess that KWin doesn't confirm within 5 s is dropped and forgotten, and the window becomes the browser's again. Titles the browser's own windows have are never learned.
+
+- **Quick-tiled windows no longer show at their floating size first.** A window restored into a quick tile waits for focus before KWin tiles it; it used to wait at its floating geometry and jump into the tile a moment later. It now waits in the tile's place, and its floating size is handed to KWin only as it tiles, so a drag out of the tile still gives it back.
+
+**Under the hood**
+- Saved data: an app may carry `o`, how its windows open before KWin names them (optional; older versions ignore it).
+- New real-KWin scenarios: a window shown as "New Tab" and renamed to match a title rule, and the browser saved maximized with its web app quick-tiled, reopened with the browser closed and open. Both fail with 1.4.1. 43 scenarios, 206 unit tests.
+
 ## [1.4.1] - 2026-11-10
 
 **New**

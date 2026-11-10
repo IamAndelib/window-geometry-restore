@@ -442,6 +442,28 @@ test('parseRules reads KWin 6.8\'s Order first, and skips disabled rules', () =>
     assert.deepEqual(engine.parseRules(rulesFile({ a: { positionrule: '2', Enabled: 'true' } })).map((r) => r.id), ['a'])
 })
 
+test('learned openings: saved, read back, bounded, predicted, forgotten', () => {
+    const state = engine.newState()
+    assert.equal(engine.learnOpening(state, 'web', 'browser', 'web.app_/', 5), true)
+    assert.equal(engine.learnOpening(state, 'web', 'web', 'x', 5), false, 'not from itself')
+    assert.equal(engine.learnOpening(state, 'web', 'browser', '', 5), false, 'not from an empty title')
+    for (let i = 0; i < 6; i++) engine.learnOpening(state, 'web', 'browser', 't' + i, 5)
+    assert.equal(state.apps.web.opens.length, engine.MAX_OPENINGS)
+    engine.learnOpening(state, 'web', 'browser', 'web.app_/', 6)
+    assert.deepEqual(state.apps.web.opens[0], { cls: 'browser', caption: 'web.app_/' }, 'relearned goes first, no duplicate')
+    const back = engine.decodeState(engine.encodeState(state)).state
+    assert.deepEqual(back.apps.web.opens, state.apps.web.opens, 'kept without any layout')
+    assert.equal(engine.hasLayouts(back.apps.web), false)
+    assert.equal(engine.predictedKey(back, 'browser', 'web.app_/'), 'web')
+    assert.equal(engine.predictedKey(back, 'browser', 'Other'), null)
+    assert.equal(engine.predictedKey(back, 'other', 'web.app_/'), null, 'only from the app it opens as')
+    assert.equal(engine.predictedKey(back, 'browser', ''), null)
+    engine.forgetOpening(back, 'web', 'browser', 'web.app_/')
+    assert.equal(engine.predictedKey(back, 'browser', 'web.app_/'), null)
+    const odd = engine.decodeState(JSON.stringify({ version: 2, apps: { a: { t: 1, o: [{ k: 1, c: 'x' }, 'bad', { k: 'b', c: '' }] } } })).state
+    assert.equal(odd.apps.a, undefined, 'unreadable openings are dropped, and with them an app that has nothing else')
+})
+
 test('a rule that only sets the desktop file name is not a geometry rule', () => {
     assert.deepEqual(engine.parseRules(rulesFile({ r: { wmclass: 'a', wmclassmatch: '1', desktopfile: 'a.webapp', desktopfilerule: '2' } })), [])
 })

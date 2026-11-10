@@ -1,14 +1,16 @@
 // A test window for the KWin sandbox (tests/kwin/sandbox.py builds it).
 //
-//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [maximized]
+//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [maximized] [retitle=NEW]
 //
 // The app id becomes the window's resourceClass in KWin, so scenarios can run
 // several apps side by side. "fixed" makes the window non-resizable; "maximized"
-// opens it maximized, as apps that remember being maximized do.
+// opens it maximized, as apps that remember being maximized do. "retitle=NEW"
+// changes the title to NEW shortly after the window is shown, as browsers do.
 #include <QColor>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QRasterWindow>
+#include <QTimer>
 
 class Window : public QRasterWindow
 {
@@ -43,6 +45,12 @@ int main(int argc, char **argv)
         window.showMaximized();
     } else {
         window.show();
+    }
+    for (const QString &arg : args) {
+        if (arg.startsWith(QStringLiteral("retitle="))) {
+            const QString title = arg.mid(8);
+            QTimer::singleShot(300, &window, [&window, title]() { window.setTitle(title); });
+        }
     }
     return app.exec();
 }

@@ -39,7 +39,9 @@ on, and how to test a change before it reaches anyone's desktop.
 - **Groups.** Windows are tracked per *group*: an app on one virtual desktop key (the desktop's
   UUID, or `*` for windows on all or several desktops).
   - The app is its *app key* (`Engine.appKeyFor`): the window's desktop file name, or its
-    class when the two differ only in case. It is read once, when the window is tracked.
+    class when the two differ only in case. It is read when the window is tracked and again
+    whenever KWin changes its desktop file name: a fresh window is then restored as the new app,
+    an older one only changes group.
     Saved data is keyed by it too. A key with nothing saved yet restores once from its class's
     layout (data from 1.4.0, which keyed by class); by caption only when the key is inside the
     class (a browser's web app, which shared that layout).
@@ -57,10 +59,17 @@ on, and how to test a change before it reaches anyone's desktop.
   - A window that starts a group (a fresh start) begins a restore session with the desktop's
     whole layout. In a running app, a window on a monitor the app has no window on gets that
     monitor's part only.
+  - A window that opens the way a renamed one did (same app, same title at open: a web app
+    under its browser's placeholder title) is taken for the app it became, before KWin names
+    it. The script learns this from renames within 10 s of opening.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
     rest wait up to 10 s for the set to arrive.
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
-    geometry for a drag out of the tile.
+    geometry for a drag out of the tile. A quick tile that waits for the window to become
+    active waits at the tile's rect instead; the pre-tile geometry is written just before the
+    quick-tile action, which keeps the requested geometry (`moveResizeGeometry`, updated at
+    once by a script write) as the one to return to. So the window is never shown at its
+    pre-tile geometry first.
 - **While a window is open:**
   - its last tile and last floating geometry are recorded from KWin's signals;
   - its geometry on its own monitor (`home`) is kept while that monitor is unplugged.
@@ -90,8 +99,13 @@ on, and how to test a change before it reaches anyone's desktop.
   from the app id. For a sandboxed (Flatpak) client whose app id doesn't start with the sandbox's
   id, KWin uses the sandbox's id instead, so a Flatpak browser's web apps get the browser's class.
   `initialize()` applies a *Desktop file name* rule, and `windowAdded` is only emitted once the
-  window is ready for painting, so the script sees the final name. A later app id change sets
-  the name again, through the rule (a Force rule keeps it). On X11 the name comes from
+  window is ready for painting. A later app id change sets the name again, through the rule (a
+  Force rule keeps it).
+  - **A rule with a title condition is re-evaluated when the title changes** (`Rules::match`
+    connects `captionNormalChanged` to `evaluateWindowRules`, which re-applies Force rules, the
+    desktop file name included). Browsers show a web app as "New Tab" and set its title a moment
+    later, so its desktop file name arrives after `windowAdded`: the script follows
+    `desktopFileNameChanged`. On X11 the name comes from
   `_KDE_NET_WM_DESKTOP_FILE`, `_GTK_APPLICATION_ID`, or a desktop file's `StartupWMClass`.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences

@@ -6,7 +6,9 @@
 // Saved data, compact on purpose (it lives in a single KConfig entry):
 //   root: { version: SCHEMA_VERSION, apps: { appKey: app } }  (appKeyFor: the desktop file
 //         name, or the window class)
-//   app:  { t: lastAccessTime, w: [saves], d: { desktopKey: { t, w: [saves] } } }
+//   app:  { t: lastAccessTime, w: [saves], d: { desktopKey: { t, w: [saves] } },
+//           o: [{ k: appKey, c: caption }] }  optional: how this app's windows open before KWin
+//              names them (as app k, titled c; a web app named by a rule on its title)
 //         d holds one layout per virtual desktop (key: the desktop's id, or '*' for windows on
 //         all or several desktops); restores read only d. w is the latest layout from any
 //         desktop, kept so that versions without d still work.
@@ -35,6 +37,12 @@ var MAX_TILE_DEPTH = 32
 var CAPTION_FALLBACK = 80
 var BURST_MS = 1500
 var RESTORE_TIMEOUT_MS = 10000
+// A window renamed within this time of opening teaches how the app opens; a predicted window
+// that isn't renamed within PREDICTION_MS was mispredicted.
+var LEARN_MS = 10000
+var PREDICTION_MS = 5000
+var MAX_OPENINGS = 4
+var MAX_CAPTION = 256
 var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
 var TICK_MS = 250
@@ -295,6 +303,11 @@ function hasLayouts(app) {
                      (isObject(app.desktops) && Object.keys(app.desktops).length > 0))
 }
 
+// Worth keeping: a layout, or how the app's windows open (learned before its first close).
+function hasData(app) {
+    return hasLayouts(app) || (!!app && Array.isArray(app.opens) && app.opens.length > 0)
+}
+
 // Never throws. Returns { state, error, version } - error is null when the blob was usable.
 function decodeState(text) {
     var state = newState()
@@ -314,8 +327,8 @@ function decodeState(text) {
         var app = apps[cls]
         if (!isObject(app)) continue
         var lastAccess = numberOr(app.t, 0)
-        var decoded = { lastAccess: lastAccess, saves: decodeSaves(app.w), desktops: decodeDesktops(app.d, lastAccess) }
-        if (hasLayouts(decoded)) state.apps[cls] = decoded
+        var decoded = { lastAccess: lastAccess, saves: decodeSaves(app.w), desktops: decodeDesktops(app.d, lastAccess), opens: decodeOpenings(app.o) }
+        if (hasData(decoded)) state.apps[cls] = decoded
     }
     return { state: state, error: null, version: version }
 }
@@ -331,9 +344,12 @@ function encodeState(state) {
     if (!state || !state.apps) return JSON.stringify(out)
     for (var cls in state.apps) {
         var app = state.apps[cls]
-        if (!hasLayouts(app)) continue
+        if (!hasData(app)) continue
         var encoded = { t: numberOr(app.lastAccess, 0) }
         if (Array.isArray(app.saves) && app.saves.length) encoded.w = encodeSaves(app.saves)
+        if (Array.isArray(app.opens) && app.opens.length) {
+            encoded.o = app.opens.map(function (o) { return { k: o.cls, c: o.caption } })
+        }
         var desktops = isObject(app.desktops) ? app.desktops : {}
         var keys = Object.keys(desktops)
         if (keys.length) {
@@ -349,6 +365,62 @@ function encodeState(state) {
 }
 
 // The layout an app left on one desktop: { lastAccess, saves } or null.
+function decodeOpenings(list) {
+    var opens = []
+    if (!Array.isArray(list)) return opens
+    for (var i = 0; i < list.length && opens.length < MAX_OPENINGS; i++) {
+        var o = list[i]
+        if (!isObject(o) || typeof o.k !== 'string' || !o.k || typeof o.c !== 'string' || !o.c) continue
+        opens.push({ cls: o.k, caption: o.c.slice(0, MAX_CAPTION) })
+    }
+    return opens
+}
+
+// Remembers that a window of app `cls` titled `caption` at open turned into app `key`.
+function learnOpening(state, key, cls, caption, now) {
+    caption = String(caption || '').slice(0, MAX_CAPTION)
+    if (!caption || !key || !cls || key === cls) return false
+    var app = state.apps[key]
+    if (!app) app = state.apps[key] = { lastAccess: now, saves: [], desktops: {} }
+    var opens = (app.opens || []).filter(function (o) { return !(o.cls === cls && o.caption === caption) })
+    opens.unshift({ cls: cls, caption: caption })
+    app.opens = opens.slice(0, MAX_OPENINGS)
+    return true
+}
+
+// Whether a window of app `cls` was saved with this title: then it is that app's own title,
+// not a sign of another app.
+function captionSavedFor(state, cls, caption) {
+    var app = state.apps[cls]
+    if (!app) return false
+    var layouts = [app.saves || []]
+    for (var key in app.desktops || {}) layouts.push(app.desktops[key].saves || [])
+    return layouts.some(function (saves) { return saves.some(function (s) { return s.caption === caption }) })
+}
+
+function forgetOpening(state, key, cls, caption) {
+    var app = state.apps[key]
+    if (!app || !app.opens) return
+    app.opens = app.opens.filter(function (o) { return !(o.cls === cls && o.caption === caption) })
+}
+
+// The app a new window of app `cls` titled `caption` will turn into, as learned, or null.
+// The most recently used app wins if several opened that way.
+function predictedKey(state, cls, caption) {
+    if (!caption) return null
+    var best = null
+    for (var key in state.apps) {
+        var app = state.apps[key]
+        if (!app.opens || key === cls) continue
+        for (var i = 0; i < app.opens.length; i++) {
+            if (app.opens[i].cls !== cls || app.opens[i].caption !== caption) continue
+            if (!best || app.lastAccess > state.apps[best].lastAccess) best = key
+            break
+        }
+    }
+    return best
+}
+
 function layoutFor(state, cls, key) {
     var app = state.apps[cls]
     return app && isObject(app.desktops) && app.desktops[key] ? app.desktops[key] : null
@@ -398,7 +470,7 @@ function mergeDiskApps(state, diskState) {
     if (!diskState || !diskState.apps) return adopted
     for (var cls in diskState.apps) {
         var app = diskState.apps[cls]
-        if (!hasLayouts(app)) continue
+        if (!hasData(app)) continue
         var known = state.apps[cls]
         if (!known) {
             state.apps[cls] = app
@@ -406,6 +478,7 @@ function mergeDiskApps(state, diskState) {
             continue
         }
         if (!isObject(known.desktops)) known.desktops = {}
+        if ((!known.opens || !known.opens.length) && app.opens && app.opens.length) known.opens = app.opens
         for (var key in app.desktops || {}) {
             if (!known.desktops[key]) {
                 known.desktops[key] = app.desktops[key]
@@ -491,12 +564,12 @@ function parseRules(read) {
         for (var j = 0; j < RULE_GEOMETRY.length; j++) {
             if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
         }
-        if (!geometry.length) continue
         var text = function (key) {
             var v = read(id + '/' + key)
             if (isList(v)) return Array.prototype.slice.call(v).join(',')
             return v === undefined || v === null ? '' : String(v)
         }
+        if (!geometry.length) continue
         var wmclass = ruleCondition(normalizeRuleText(text('wmclass')), text('wmclassmatch'))
         var title = ruleCondition(normalizeRuleText(text('title')), text('titlematch'))
         rules.push({
@@ -524,11 +597,15 @@ function normalizeRuleText(text) {
 function geometryRuleFor(rules, win) {
     for (var i = 0; i < rules.length; i++) {
         var r = rules[i]
-        if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) continue
-        var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
-        if (!r.wmclass.test(normalizeRuleText(cls).toLowerCase())) continue
+        if (!ruleMatchesClass(r, win)) continue
         if (!r.title.test(normalizeRuleText(win.caption).toLowerCase())) continue
         return r
     }
     return null
+}
+
+function ruleMatchesClass(r, win) {
+    if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) return false
+    var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
+    return r.wmclass.test(normalizeRuleText(cls).toLowerCase())
 }
