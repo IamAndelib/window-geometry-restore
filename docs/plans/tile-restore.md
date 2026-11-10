@@ -91,7 +91,7 @@ New tests cover:
 
 ## Risks and limits to state plainly
 - **A visible jump on Wayland:** KWin reports a new window to scripts only after its first frame, so a tiled window appears briefly before it snaps into its tile. Plain geometry restores already do this.
-- **Quick tiles need the window to become active within ~10 s.** A window that opens in the background, without focus, stays at its plain tiled rect.
+- **Quick tiles need the window to become active within ~10 s.** A window that opens in the background, without focus, stays untiled at its tile's rect (from 1.4.2 it waits there rather than at its pre-tile geometry). Its pre-tile size is kept.
 - **A custom layout edited between sessions** may not resolve. The geometry check rejects a wrong tile, and the window falls back to a plain restore.
 - **Unverified Wayland timing:** the timing in KWin's code (the tile is committed only when the app acknowledges) has only been checked by reading the code. It needs a live test on the user's Plasma 6 Wayland session before release.
 - **Optional, only if live testing shows apps fighting the tile:** if an app (e.g. Electron) resizes itself out of the tile in the first seconds, re-apply the tile once. This is goblincakes' "re-assert" guard; add it only if needed.

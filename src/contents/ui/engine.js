@@ -37,10 +37,11 @@ var MAX_TILE_DEPTH = 32
 var CAPTION_FALLBACK = 80
 var BURST_MS = 1500
 var RESTORE_TIMEOUT_MS = 10000
-// A window renamed within this time of opening teaches how the app opens; a predicted window
-// that isn't renamed within PREDICTION_MS was mispredicted.
-var LEARN_MS = 10000
-var PREDICTION_MS = 5000
+// A window renamed this soon after opening, untouched, teaches how its app opens (observed:
+// ~0.8 s; a user navigating a browser tab takes longer). A predicted window that isn't renamed
+// within PREDICTION_MS was mispredicted: then it is no longer fresh, so it only changes app.
+var LEARN_MS = 3000
+var PREDICTION_MS = RESTORE_TIMEOUT_MS
 var MAX_OPENINGS = 4
 var MAX_CAPTION = 256
 var RETRY_MAX_AGE_MS = 10000
@@ -364,7 +365,6 @@ function encodeState(state) {
     return JSON.stringify(out)
 }
 
-// The layout an app left on one desktop: { lastAccess, saves } or null.
 function decodeOpenings(list) {
     var opens = []
     if (!Array.isArray(list)) return opens
@@ -377,8 +377,13 @@ function decodeOpenings(list) {
 }
 
 // Remembers that a window of app `cls` titled `caption` at open turned into app `key`.
+// A title as openings keep it.
+function openingTitle(caption) {
+    return String(caption || '').slice(0, MAX_CAPTION)
+}
+
 function learnOpening(state, key, cls, caption, now) {
-    caption = String(caption || '').slice(0, MAX_CAPTION)
+    caption = openingTitle(caption)
     if (!caption || !key || !cls || key === cls) return false
     var app = state.apps[key]
     if (!app) app = state.apps[key] = { lastAccess: now, saves: [], desktops: {} }
@@ -395,7 +400,7 @@ function captionSavedFor(state, cls, caption) {
     if (!app) return false
     var layouts = [app.saves || []]
     for (var key in app.desktops || {}) layouts.push(app.desktops[key].saves || [])
-    return layouts.some(function (saves) { return saves.some(function (s) { return s.caption === caption }) })
+    return layouts.some(function (saves) { return saves.some(function (s) { return openingTitle(s.caption) === caption }) })
 }
 
 function forgetOpening(state, key, cls, caption) {
@@ -404,23 +409,26 @@ function forgetOpening(state, key, cls, caption) {
     app.opens = app.opens.filter(function (o) { return !(o.cls === cls && o.caption === caption) })
 }
 
-// The app a new window of app `cls` titled `caption` will turn into, as learned, or null.
-// The most recently used app wins if several opened that way.
+// The app a new window of app `cls` titled `caption` will turn into, as learned, or null. Null
+// too when several apps opened that way (web apps sharing a placeholder title): a guess would be
+// wrong every other time.
 function predictedKey(state, cls, caption) {
     if (!caption) return null
-    var best = null
+    var found = null
     for (var key in state.apps) {
         var app = state.apps[key]
         if (!app.opens || key === cls) continue
         for (var i = 0; i < app.opens.length; i++) {
             if (app.opens[i].cls !== cls || app.opens[i].caption !== caption) continue
-            if (!best || app.lastAccess > state.apps[best].lastAccess) best = key
+            if (found) return null
+            found = key
             break
         }
     }
-    return best
+    return found
 }
 
+// The layout an app left on one desktop: { lastAccess, saves } or null.
 function layoutFor(state, cls, key) {
     var app = state.apps[cls]
     return app && isObject(app.desktops) && app.desktops[key] ? app.desktops[key] : null
@@ -478,7 +486,7 @@ function mergeDiskApps(state, diskState) {
             continue
         }
         if (!isObject(known.desktops)) known.desktops = {}
-        if ((!known.opens || !known.opens.length) && app.opens && app.opens.length) known.opens = app.opens
+        if (known.opens === undefined && app.opens && app.opens.length) known.opens = app.opens
         for (var key in app.desktops || {}) {
             if (!known.desktops[key]) {
                 known.desktops[key] = app.desktops[key]
@@ -564,12 +572,12 @@ function parseRules(read) {
         for (var j = 0; j < RULE_GEOMETRY.length; j++) {
             if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
         }
+        if (!geometry.length) continue
         var text = function (key) {
             var v = read(id + '/' + key)
             if (isList(v)) return Array.prototype.slice.call(v).join(',')
             return v === undefined || v === null ? '' : String(v)
         }
-        if (!geometry.length) continue
         var wmclass = ruleCondition(normalizeRuleText(text('wmclass')), text('wmclassmatch'))
         var title = ruleCondition(normalizeRuleText(text('title')), text('titlematch'))
         rules.push({
@@ -597,15 +605,11 @@ function normalizeRuleText(text) {
 function geometryRuleFor(rules, win) {
     for (var i = 0; i < rules.length; i++) {
         var r = rules[i]
-        if (!ruleMatchesClass(r, win)) continue
+        if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) continue
+        var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
+        if (!r.wmclass.test(normalizeRuleText(cls).toLowerCase())) continue
         if (!r.title.test(normalizeRuleText(win.caption).toLowerCase())) continue
         return r
     }
     return null
-}
-
-function ruleMatchesClass(r, win) {
-    if (r.types !== '' && !(parseInt(r.types, 10) & NORMAL_WINDOW_TYPE)) return false
-    var cls = r.wmclasscomplete ? win.resourceName + ' ' + win.resourceClass : win.resourceClass
-    return r.wmclass.test(normalizeRuleText(cls).toLowerCase())
 }

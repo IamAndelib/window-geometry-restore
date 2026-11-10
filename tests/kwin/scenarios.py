@@ -692,6 +692,84 @@ def s_web_app_same_with_or_without_browser():
         reopen_web_app("browser open")
 
 
+def learn_web_app(sb, title, geometry, first="New Tab"):
+    """Open a web app once (shown as `first`, renamed by its rule), place it as the user would,
+    close it: the script learns how it opens and saves its place."""
+    a = sb.open_app(BROWSER, title, size=(700, 464), first_title=first)
+    w = sb.window(title)
+    sb.drag(titlebar(w), (titlebar(w)[0] + 40, titlebar(w)[1] + 40))
+    sb.set_geometry(title, *geometry)
+    a.close()
+
+
+def watch(sb, titles, seconds):
+    """Every distinct (rect, maximized) state a window shows during `seconds`."""
+    seen, end = [], time.time() + seconds
+    while time.time() < end:
+        w = next((sb.window(t) for t in titles if sb.window(t)), None)
+        state = (rect(w), w["maximized"]) if w else None
+        if state and (not seen or seen[-1] != state):
+            seen.append(state)
+        time.sleep(0.1)
+    return seen
+
+
+def s_wrong_guess_left_alone():
+    """A browser window opening like a learned web app, but never named so: taken for the web
+    app at once, and when no name comes it becomes the browser's again where it is, never
+    maximized as the browser. The opening is forgotten."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 200, 150, 900, 600)
+        sb.probe("win('Browser').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        b.close()
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        sb.script_log()
+        sb.open_app(BROWSER, "Docs", size=(700, 464), first_title="New Tab", settle=0)
+        seen = watch(sb, ["New Tab", "Docs"], 11.5)
+        log = sb.script_log()
+        check(logged(log, "after all, left where it is"), "the guess ran out: %s" % log)
+        check(seen[-1] == ((1000, 300, 700, 500), 0) and all(m == 0 for _, m in seen), "placed once, never moved again: %s" % seen)
+        check(not sb.saved()["apps"].get(WEB_APP, {}).get("o"), "forgotten")
+
+
+def s_two_web_apps_same_opening():
+    """Two web apps of one browser open as "New Tab". Once both are known, neither is guessed:
+    each waits for its name and is restored once, at its own place."""
+    rules = [web_app_rule("WhatsApp"), rule(BROWSER, title="Telegram", titlematch="1", desktopfile=WEB_APP + "2", desktopfilerule=2)]
+    with sandbox(outputs=1, rules=rules) as sb:
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        learn_web_app(sb, "Telegram", (100, 100, 600, 400))
+        for title, geometry in [("WhatsApp", (1000, 300, 700, 500)), ("Telegram", (100, 100, 600, 400)), ("WhatsApp", (1000, 300, 700, 500))]:
+            sb.script_log()
+            a = sb.open_app(BROWSER, title, size=(700, 464), first_title="New Tab")
+            sb.settle(0.5)
+            log = sb.script_log()
+            check(rect(sb.window(title)) == geometry, "%s at its place: %s" % (title, rect(sb.window(title))))
+            check(not any("as it does before KWin names it" in l for l in log), "%s not guessed: %s" % (title, log))
+            check(not any("put back as KWin opened it" in l for l in log), "%s nothing to undo: %s" % (title, log))
+            a.close()
+
+
+def s_slow_rename_confirmed():
+    """The learned web app is named only after 6 s (a slow start): it is placed once, and the
+    late name confirms it without moving it."""
+    with sandbox(outputs=1, rules=[web_app_rule("WhatsApp")]) as sb:
+        b = sb.open_app(BROWSER, "Browser", first_title="Loading")
+        sb.set_geometry("Browser", 200, 150, 900, 600)
+        sb.probe("win('Browser').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        b.close()
+        learn_web_app(sb, "WhatsApp", (1000, 300, 700, 500))
+        sb.script_log()
+        sb.open_app(BROWSER, "WhatsApp", size=(700, 464), first_title="New Tab", retitle_ms=6000, settle=0)
+        seen = watch(sb, ["New Tab", "WhatsApp"], 8)
+        log = sb.script_log()
+        check(logged(log, "KWin named it as expected"), "confirmed: %s" % log)
+        check(seen[-1] == ((1000, 300, 700, 500), 0) and all(m == 0 for _, m in seen), "placed once, never moved again: %s" % seen)
+
+
 # ---- monitors ----------------------------------------------------------------------
 
 def s_late_monitor():
@@ -958,6 +1036,9 @@ SCENARIOS = [
     s_web_app_from_older_saves,
     s_web_app_named_by_its_title,
     s_web_app_same_with_or_without_browser,
+    s_wrong_guess_left_alone,
+    s_two_web_apps_same_opening,
+    s_slow_rename_confirmed,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

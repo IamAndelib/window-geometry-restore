@@ -61,7 +61,10 @@ on, and how to test a change before it reaches anyone's desktop.
     monitor's part only.
   - A window that opens the way a renamed one did (same app, same title at open: a web app
     under its browser's placeholder title) is taken for the app it became, before KWin names
-    it. The script learns this from renames within 10 s of opening.
+    it. The script learns this from renames within 3 s of opening, of windows the user hasn't
+    touched, and never from a title the old app's own windows have. KWin's name confirms the
+    guess; without it within 10 s the window becomes its old app's again, where it is. An
+    opening two apps share is not guessed.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
     rest wait up to 10 s for the set to arrive.
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that

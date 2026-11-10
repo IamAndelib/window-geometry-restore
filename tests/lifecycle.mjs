@@ -41,14 +41,14 @@ const extracted = extractFunctions(qml)
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'logOnce', 'removeFromArray', 'connectSignal', 'disconnectSignal',
     'loadConfig', 'loadPersisted', 'persist',
-    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'readRules', 'ruleWindow', 'geometryRuleOf', 'onDesktopsChanged',
-    'onAppKeyChanged', 'isOwnTitle', 'undoRestore', 'onOutputChanged', 'untrack',
+    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
+    'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
     'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
-    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
+    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
     'sweepRetries', 'sweepSessions', 'sweepPredictions', 'isIdle', 'ensureTick', 'onTick',
@@ -2971,13 +2971,13 @@ test('the browser\'s own windows are restored at once as the browser', () => {
     assert.ok(groupOf(rt, CHROME))
 })
 
-test('a window taken for a learned app that KWin does not name so becomes its own app again', () => {
+test('a window taken for a learned app that KWin does not name so becomes its own app again, where it is', () => {
     const rt = buildRuntime(learnedBlob())
     const w = openWebApp(rt)
     assert.deepEqual([w.x, w.y], [300, 200], 'precondition: taken for the web app')
     advanceClock(rt, Engine.PREDICTION_MS + 1)
     rt.tick()
-    assert.equal(w.maximizeMode, 3, 'restored as the browser after all')
+    assert.deepEqual([w.x, w.y, w.maximizeMode], [300, 200, 0], 'not moved again')
     assert.ok(groupOf(rt, CHROME) && !groupOf(rt, WHATSAPP))
     assert.equal(JSON.parse(rt.blobRef()).apps[WHATSAPP].o, undefined, 'the opening is forgotten')
     assert.equal(rt.trackedRef()[w.internalId].prediction, null)
@@ -2994,13 +2994,46 @@ test('a mistaken window the user already placed is not moved when it is correcte
     assert.ok(groupOf(rt, CHROME))
 })
 
-test('a window KWin names as another app than learned goes to that app, and the opening is forgotten', () => {
+test('a window KWin names as another app than guessed goes to that app, and the shared opening is not guessed again', () => {
     const rt = buildRuntime(learnedBlob())
     const w = openWebApp(rt)
     renameTo(w, 'com.google.Chrome.chrome-wah-other', 'Other')
     assert.ok(groupOf(rt, 'com.google.Chrome.chrome-wah-other') && !groupOf(rt, WHATSAPP))
-    assert.ok(!(rt.storeRef().apps[WHATSAPP].opens || []).length)
-    assert.deepEqual(rt.storeRef().apps['com.google.Chrome.chrome-wah-other'].opens, [{ cls: CHROME, caption: OPENING }], 'learned for the right app')
+    assert.deepEqual(rt.storeRef().apps['com.google.Chrome.chrome-wah-other'].opens, [{ cls: CHROME, caption: OPENING }])
+    assert.equal(Engine.predictedKey(rt.storeRef(), CHROME, OPENING), null, 'two apps open this way')
+})
+
+test('a window renamed twice right after opening teaches only its last name', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: CHROME, caption: OPENING })
+    rt.trackWindow(w)
+    renameTo(w, 'com.google.Chrome.step', 'Step')
+    renameTo(w, WHATSAPP, 'WhatsApp')
+    assert.equal(Engine.predictedKey(rt.storeRef(), CHROME, OPENING), WHATSAPP)
+})
+
+test('a window navigated by the user is not learned from', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: CHROME, caption: 'New Tab - Google Chrome' })
+    rt.trackWindow(w)
+    w._emit('interactiveMoveResizeStarted')
+    renameTo(w, WHATSAPP, 'WhatsApp')
+    assert.equal(Engine.predictedKey(rt.storeRef(), CHROME, 'New Tab - Google Chrome'), null)
+})
+
+test('a quick tile waiting for focus keeps its pre-tile size when it closes before tiling (Wayland)', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'doc', makeQuickRoot(outputs[0]).tiles[0])
+    const other = makeWindow({ cls: 'other', caption: 'Other' })
+    other._activate()
+    const w = makeWindow({ cls: 'doc', caption: 'Doc', x: 40, y: 40, width: 960, height: 1080 })
+    w._async = true
+    rt.trackWindow(w)
+    w._commit()
+    assert.deepEqual([w.x, w.y, w.width, w.height], [0, 0, 960, 1080], 'precondition: waits at the tile rect')
+    w.emitClosed()
+    const save = JSON.parse(rt.blobRef()).apps.doc.d['desk-uuid-1'].w[0]
+    assert.deepEqual([save.f.w, save.f.h], [1000, 700], 'pre-tile size, not the tile rect')
 })
 
 test('a title the browser\'s own windows have is never learned', () => {
@@ -3018,4 +3051,133 @@ test('a window renamed long after opening teaches nothing', () => {
     advanceClock(rt, Engine.LEARN_MS + 1)
     renameTo(w, WHATSAPP, 'WhatsApp')
     assert.ok(!(rt.storeRef().apps[WHATSAPP] && rt.storeRef().apps[WHATSAPP].opens))
+})
+
+test('a predicted window whose desktop file name arrives as its own class is still corrected', () => {
+    const rt = buildRuntime(learnedBlob())
+    // Opens with no desktop file name yet; the app sets its id (the class, case aside) a moment later.
+    const w = makeWindow({ cls: CHROME, df: '', caption: OPENING, x: 500, y: 300, width: 900, height: 700 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [300, 200], 'precondition: taken for the web app')
+    renameTo(w, 'com.google.chrome', OPENING)
+    advanceClock(rt, Engine.PREDICTION_MS + 1)
+    rt.tick()
+    assert.ok(groupOf(rt, CHROME) && !groupOf(rt, WHATSAPP), 'a browser window is the browser again')
+})
+
+test('a window the old app restored onto a fallback screen saves its own place under its new app', () => {
+    const rt = buildRuntime(savedLayouts({
+        [CHROME]: [{ c: 'Google Chrome', x: 2100, y: 150, w: 900, h: 600, o: { n: 'HDMI-A-1', s: 'SER-2', x: 100, y: 150 } }],
+        [WHATSAPP]: [{ c: 'WhatsApp', x: 300, y: 200, w: 700, h: 500, o: { n: 'DP-1', s: 'SER-1', x: 300, y: 200 } }]
+    }))
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const app = makeWindow({ cls: CHROME, caption: '', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(app)
+        renameTo(app, WHATSAPP, 'WhatsApp')
+        assert.deepEqual([app.x, app.y, app.width, app.height], [300, 200, 700, 500], 'precondition: restored as itself')
+        app.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const saves = JSON.parse(rt.blobRef()).apps[WHATSAPP].d['desk-uuid-1'].w
+    assert.deepEqual(saves.map((s) => [s.x, s.y, s.w, s.o && s.o.n]), [[300, 200, 700, 'DP-1']], 'not the browser\'s save on its missing screen')
+})
+
+test('undoing the old app\'s maximized restore keeps a window the app opened maximized maximized', () => {
+    const rt = buildRuntime(savedLayouts({ [CHROME]: [{ c: 'Google Chrome', x: 40, y: 40, w: 945, h: 693, o: null, max: 3 }] }))
+    const app = makeWindow({ cls: CHROME, caption: 'Loading', x: 0, y: 0, width: 1920, height: 1080 })
+    app.maximizeMode = 3
+    rt.trackWindow(app)
+    assert.equal(app.maximizeMode, 3)
+    renameTo(app, 'com.google.Chrome.chrome-wah-new', 'New web app')
+    assert.equal(app.maximizeMode, 3, 'KWin opened it maximized; nothing saved for the new app')
+})
+
+test('two web apps that open with the same title: once both are known, neither is guessed', () => {
+    const OTHER = 'com.google.Chrome.chrome-wah-other'
+    const rt = buildRuntime(savedLayouts({
+        [WHATSAPP]: [{ c: 'WhatsApp', x: 300, y: 200, w: 900, h: 700, o: { n: 'DP-1', s: 'SER-1', x: 300, y: 200 } }],
+        [OTHER]: [{ c: 'Other', x: 1000, y: 100, w: 600, h: 500, o: { n: 'DP-1', s: 'SER-1', x: 1000, y: 100 } }]
+    }))
+    const open = (to, caption) => {
+        const w = makeWindow({ cls: CHROME, caption: 'about:blank', x: 500, y: 300, width: 900, height: 700 })
+        rt.trackWindow(w)
+        const first = [w.x, w.y]
+        advanceClock(rt, 800)
+        renameTo(w, to, caption)
+        advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+        rt.tick()
+        w.emitClosed()
+        return first
+    }
+    open(WHATSAPP, 'WhatsApp')
+    open(OTHER, 'Other')
+    const third = open(WHATSAPP, 'WhatsApp')
+    assert.deepEqual(third, [500, 300], 'not guessed: left where KWin put it until KWin names it')
+    assert.equal(Engine.predictedKey(rt.storeRef(), CHROME, 'about:blank'), null)
+})
+
+test('an app that only has a learned opening still restores once from the class layout', () => {
+    const blob = JSON.parse(savedLayouts({ [CHROME]: [
+        { c: 'Google Chrome', x: 40, y: 40, w: 900, h: 700, o: null },
+        { c: 'WhatsApp', x: 600, y: 250, w: 800, h: 600, o: null }] }))
+    blob.apps[WHATSAPP] = { t: 1000000000, o: [{ k: CHROME, c: OPENING }] }
+    const rt = buildRuntime(JSON.stringify(blob))
+    const w = openWebApp(rt)
+    assert.ok(groupOf(rt, WHATSAPP), 'predicted')
+    w.caption = 'WhatsApp'
+    w.emitCaptionChanged()
+    renameTo(w, WHATSAPP, 'WhatsApp')
+    assert.deepEqual([w.x, w.y], [600, 250])
+})
+
+test('a guess KWin confirms only after it ran out does not move the window', () => {
+    const rt = buildRuntime(learnedBlob())
+    const w = openWebApp(rt)
+    advanceClock(rt, Engine.PREDICTION_MS + 1)
+    rt.tick()
+    const between = [w.x, w.y, w.maximizeMode]
+    advanceClock(rt, 1000)
+    renameTo(w, WHATSAPP, 'WhatsApp')
+    assert.deepEqual(between, [300, 200, 0], 'left where the guess put it, not the browser\'s maximized state')
+    assert.deepEqual([w.x, w.y, w.maximizeMode], [300, 200, 0], 'nor moved when KWin names it after all')
+})
+
+test('a guessed window closed before KWin confirms it is not saved under the guessed app', () => {
+    const rt = buildRuntime(learnedBlob())
+    const w = openWebApp(rt)
+    w.caption = 'New Tab - Google Chrome'
+    w.emitCaptionChanged()
+    advanceClock(rt, 2000)
+    w.emitClosed()
+    const wa = JSON.parse(rt.blobRef()).apps[WHATSAPP].d['desk-uuid-1'].w.map((s) => s.c)
+    assert.ok(!wa.includes('New Tab - Google Chrome'), 'saved ' + JSON.stringify(wa))
+})
+
+test('once the app follows an unmaximize, a maximized window is never placed over', () => {
+    const rt = buildRuntime(chromeMaximizedAndWhatsappSaved())
+    const app = makeWindow({ cls: CHROME, caption: 'Loading', x: 500, y: 300, width: 900, height: 700 })
+    app._async = true
+    rt.trackWindow(app)
+    app._commit()
+    renameTo(app, WHATSAPP, 'WhatsApp')
+    app._commit()
+    const entry = rt.trackedRef()[app.internalId]
+    assert.equal(entry.unmaximizedUntil, 0, 'the exception ends with the app\'s unmaximized frame')
+    app._async = false
+    app.setMaximize(true, true) // the user maximizes it again
+    assert.equal(rt.canPlace(app), false)
+})
+
+test('a long opening title is learned and recognised', () => {
+    const long = 'https://example.com/' + 'x'.repeat(400)
+    const rt = buildRuntime()
+    const first = makeWindow({ cls: CHROME, caption: long })
+    rt.trackWindow(first)
+    renameTo(first, WHATSAPP, 'WhatsApp')
+    first.emitClosed()
+    const again = makeWindow({ cls: CHROME, caption: long })
+    rt.trackWindow(again)
+    assert.ok(groupOf(rt, WHATSAPP), 'guessed from the first 256 characters')
 })

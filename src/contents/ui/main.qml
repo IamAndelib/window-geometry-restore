@@ -227,14 +227,14 @@ Item {
         // KWin may name a window only after showing it: a rule matching a web app's title applies
         // once the browser sets it. A window that opens the way one did before it was renamed is
         // taken for that app from the start, so it is restored at once, as itself.
-        var caption = String(w.caption || '')
+        var caption = Engine.openingTitle(w.caption)
         var predicted = adopted ? null : Engine.predictedKey(store, named, caption)
         if (predicted && Engine.isListed(predicted, excluded)) predicted = null
         var cls = predicted || named
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
             assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, unmaximizedUntil: 0,
-            openedKey: named, openingCaption: caption, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
+            openedKey: named, openingCaption: caption, learnedAs: null, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
             desktopsHandler: null, outputHandler: null, desktopFileHandler: null
@@ -272,12 +272,12 @@ Item {
         }
     }
 
-    // The KWin window rules that place or size windows. The rules file
-    // is read afresh, never created or written: StandardPaths finds it only if it exists.
-    function readRules() {
+    // The first KWin window rule that places or sizes this window, or null. The rules file is
+    // read afresh, never created or written: StandardPaths finds it only if it exists.
+    function geometryRuleOf(w) {
         try {
             var url = String(StandardPaths.locate(StandardPaths.GenericConfigLocation, 'kwinrulesrc') || '')
-            if (!url) return []
+            if (!url) return null
             var file = Qt.createQmlObject('import QtCore; Settings { location: ' + JSON.stringify(url) + ' }', root)
             try {
                 var rules = Engine.parseRules(function (key) { return file.value(key, undefined) })
@@ -285,27 +285,18 @@ Item {
                     if (r.unreadable) logOnce('rule:' + r.id + '/' + r.unreadable, 'cannot read the regular expression of KWin window rule ' +
                         (r.description || r.id) + ' (' + r.unreadable + '): matching its plain text instead')
                 })
-                return rules
+                return Engine.geometryRuleFor(rules, {
+                    resourceClass: String(w.resourceClass),
+                    resourceName: String(w.resourceName || ''),
+                    caption: String(w.caption || '')
+                })
             } finally {
                 file.destroy()
             }
         } catch (e) {
             logOnce('rules', 'reading KWin window rules failed: ' + e)
-            return []
+            return null
         }
-    }
-
-    function ruleWindow(w) {
-        return {
-            resourceClass: String(w.resourceClass),
-            resourceName: String(w.resourceName || ''),
-            caption: String(w.caption || '')
-        }
-    }
-
-    // The first KWin window rule that places or sizes this window, or null.
-    function geometryRuleOf(w) {
-        return Engine.geometryRuleFor(readRules(), ruleWindow(w))
     }
 
     // A window moved to another desktop joins that desktop's group, as a window of a running
@@ -320,98 +311,6 @@ Item {
         }
         joinGroup(entry).settled = true
         dbg('window of ' + label + ' moved, now in ' + entry.label)
-    }
-
-    // KWin may give a window its desktop file name after showing it: a window rule matching its
-    // title applies when the app sets the title, and an app may set its id late. The window then
-    // belongs to another app. A fresh one is restored as if it had opened as that app, and a save
-    // it took from the old app's restore goes back to that restore. One that has been open a
-    // while, or that the user placed, only changes app.
-    function onAppKeyChanged(id) {
-        var entry = tracked[id]
-        if (!entry) return
-        var resourceClass = String(entry.w.resourceClass)
-        var cls = Engine.appKeyFor(resourceClass, entry.w.desktopFileName)
-        if (entry.prediction) {
-            var predicted = entry.cls
-            var from = entry.prediction.from
-            entry.prediction = null
-            if (cls === predicted) {
-                dbg(entry.label + ': KWin named it as expected')
-                return
-            }
-            if (cls === from) return
-            Engine.forgetOpening(store, predicted, from, entry.openingCaption)
-            log(entry.label + ': KWin named the window ' + cls + ', not as it learned; forgetting that')
-        }
-        if (!cls || cls === entry.cls) return
-        var label = entry.label
-        var fresh = !entry.userPlaced && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS
-        var from = entry.restoredFrom
-        if (fresh && from && live[entry.groupKey].session === from.session) {
-            from.session.taken[from.index] = false
-            from.session.remaining++
-        }
-        var waiting = leaveGroup(entry)
-        if (fresh && from) undoRestore(entry, from)
-        entry.cls = cls
-        entry.resourceClass = resourceClass
-        entry.restoredFrom = null
-        if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
-            untrack(entry)
-            dbg('window of ' + label + ' is now ' + cls + ', an excluded app: no longer tracked')
-            return
-        }
-        var group = joinGroup(entry)
-        dbg('window of ' + label + ' now belongs to ' + entry.label)
-        // Renamed right after opening: its next window opening the same way is this app, unless
-        // the old app's own windows have that title too.
-        if (Date.now() - entry.openedAt < Engine.LEARN_MS && !isOwnTitle(entry.openedKey, entry.openingCaption) &&
-                Engine.learnOpening(store, cls, entry.openedKey, entry.openingCaption, Date.now())) {
-            log(entry.label + ': learned that it opens as ' + entry.openedKey + ' titled "' + entry.openingCaption + '"')
-            persist()
-        }
-        if (fresh) {
-            entry.assigned = false
-            placeNewWindow(entry, group)
-        } else if (waiting) {
-            entry.assigned = true
-        }
-        if (!group.session) group.settled = true
-    }
-
-    // Whether windows of app `cls`, saved or open, have this title.
-    function isOwnTitle(cls, caption) {
-        if (Engine.captionSavedFor(store, cls, caption)) return true
-        for (var id in tracked) {
-            if (tracked[id].cls === cls && String(tracked[id].w.caption || '') === caption) return true
-        }
-        return false
-    }
-
-    // Puts a window back the way KWin opened it, before the old app's restore tiled, maximized
-    // or moved it: otherwise the new app's restore would leave it as the old app left it.
-    function undoRestore(entry, from) {
-        var w = entry.w
-        try {
-            for (var i = retries.length - 1; i >= 0; i--) {
-                if (retries[i].id === entry.id) retries.splice(i, 1)
-            }
-            if (from.save.tile && w.tile) {
-                if (typeof w.tile.unmanage === 'function') w.tile.unmanage(w)
-                else w.tile = null
-            }
-            if (from.save.maximized) {
-                w.setMaximize(false, false)
-                // The frame stays maximized until the app follows: canPlace must not wait for it.
-                entry.unmaximizedUntil = Date.now() + Engine.RETRY_MAX_AGE_MS
-            }
-            setGeometry(w, from.before)
-            entry.free = null
-            dbg(entry.label + ': put back as KWin opened it, before restoring it as its new app')
-        } catch (e) {
-            log(entry.label + ': undoing the restore of its old app failed: ' + e)
-        }
     }
 
     // KWin reports a window's new monitor after moving it. A user move can leave a monitor without
@@ -437,6 +336,107 @@ Item {
         disconnectSignal(entry.w, 'desktopsChanged', entry.desktopsHandler)
         disconnectSignal(entry.w, 'outputChanged', entry.outputHandler)
         disconnectSignal(entry.w, 'desktopFileNameChanged', entry.desktopFileHandler)
+    }
+
+    // ---- app identity: names KWin gives late, openings learned from them ---------------------
+
+    // KWin may give a window its desktop file name after showing it: a window rule matching its
+    // title applies when the app sets the title, and an app may set its id late. The window then
+    // belongs to another app. A fresh one is restored as if it had opened as that app, and a save
+    // it took from the old app's restore goes back to that restore. One that has been open a
+    // while, or that the user placed, only changes app.
+    function onAppKeyChanged(id) {
+        var entry = tracked[id]
+        if (!entry) return
+        var resourceClass = String(entry.w.resourceClass)
+        var cls = Engine.appKeyFor(resourceClass, entry.w.desktopFileName)
+        if (entry.prediction) {
+            // Still named as the app it opened as: KWin hasn't named it yet.
+            if (cls === entry.prediction.from) return
+            entry.prediction = null
+            if (cls === entry.cls) {
+                dbg(entry.label + ': KWin named it as expected')
+                return
+            }
+            // Another app opens the same way: it is learned too below, and predictedKey stops
+            // guessing for an opening two apps share, instead of guessing wrong every other time.
+            log(entry.label + ': KWin named the window ' + cls + ', which opens the same way; not guessing this opening any more')
+        }
+        if (!cls || cls === entry.cls) return
+        // Renamed again: what it was named before was a step on the way, not how that app opens.
+        if (entry.learnedAs && entry.learnedAs !== cls) Engine.forgetOpening(store, entry.learnedAs, entry.openedKey, entry.openingCaption)
+        var label = entry.label
+        var fresh = !entry.userPlaced && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS
+        var from = entry.restoredFrom
+        if (fresh && from && live[entry.groupKey].session === from.session) {
+            from.session.taken[from.index] = false
+            from.session.remaining++
+        }
+        var waiting = leaveGroup(entry)
+        if (fresh && from) undoRestore(entry, from)
+        entry.cls = cls
+        entry.resourceClass = resourceClass
+        entry.restoredFrom = null
+        if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
+            untrack(entry)
+            dbg('window of ' + label + ' is now ' + cls + ', an excluded app: no longer tracked')
+            return
+        }
+        var group = joinGroup(entry)
+        dbg('window of ' + label + ' now belongs to ' + entry.label)
+        // Renamed right after opening, untouched: its next window opening the same way is this
+        // app, unless the old app's own windows have that title too.
+        if (!entry.userPlaced && Date.now() - entry.openedAt < Engine.LEARN_MS && !isOwnTitle(entry.openedKey, entry.openingCaption) &&
+                Engine.learnOpening(store, cls, entry.openedKey, entry.openingCaption, Date.now())) {
+            entry.learnedAs = cls
+            log(entry.label + ': learned that it opens as ' + entry.openedKey + ' titled "' + entry.openingCaption + '"')
+            persist()
+        }
+        if (fresh) {
+            entry.assigned = false
+            placeNewWindow(entry, group)
+        } else if (waiting) {
+            entry.assigned = true
+        }
+        if (!group.session) group.settled = true
+    }
+
+    // Whether windows of app `cls`, saved or open, have this title.
+    function isOwnTitle(cls, caption) {
+        if (Engine.captionSavedFor(store, cls, caption)) return true
+        for (var id in tracked) {
+            if (tracked[id].cls === cls && Engine.openingTitle(tracked[id].w.caption) === caption) return true
+        }
+        return false
+    }
+
+    // Puts a window back the way KWin opened it, before the old app's restore tiled, maximized
+    // or moved it: otherwise the new app's restore would leave it as the old app left it.
+    function undoRestore(entry, from) {
+        var w = entry.w
+        try {
+            dropRetries(entry.id)
+            var before = from.before
+            // The app opened it maximized, or KWin tiled it: the restore didn't touch it.
+            if (before.maximized || before.tile) return
+            if (w.tile) {
+                if (typeof w.tile.unmanage === 'function') w.tile.unmanage(w)
+                else w.tile = null
+            }
+            if (from.save.maximized && w.maximizeMode) {
+                w.setMaximize(false, false)
+                // The frame stays maximized until the app follows: canPlace must not wait for it.
+                entry.unmaximizedUntil = Date.now() + Engine.RETRY_MAX_AGE_MS
+            }
+            setGeometry(w, before)
+            entry.free = null
+            // The old app's place on a missing screen is not the window's own.
+            entry.home = null
+            entry.provisional = null
+            dbg(entry.label + ': put back as KWin opened it, before restoring it as its new app')
+        } catch (e) {
+            log(entry.label + ': undoing the restore of its old app failed: ' + e)
+        }
     }
 
     // ---- observing windows -----------------------------------------------------------------
@@ -543,6 +543,8 @@ Item {
             }
             var frame = geometryOf(w.output, w.x, w.y, w.width, w.height)
             entry.home = frame
+            // Unmaximized by the script and the app has followed: maximized means maximized again.
+            if (entry.unmaximizedUntil && !isMaximizedLike(w)) entry.unmaximizedUntil = 0
             if (w.tile) {
                 noteTile(id)
             } else {
@@ -550,7 +552,9 @@ Item {
                 entry.tile = null
                 // Not when screen-sized: an app opening at its maximized size, or a maximized window
                 // being dragged out (its size shrinks only once the app has followed).
-                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w)) entry.free = frame
+                // Nor while a quick tile waits: the window waits at the tile's rect, and its pre-tile
+                // geometry is the one written just before tiling (see quickTileWhenActive).
+                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w) && !entry.pendingTile) entry.free = frame
             }
         } catch (e) {
             logOnce('geometry', 'reading window geometry failed: ' + e)
@@ -624,7 +628,8 @@ Item {
         var group = live[entry.groupKey]
         removeFromArray(group.open, id)
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
-        var awaitingRestore = !!group.session && group.session.pending.indexOf(id) !== -1
+        // Nor a window taken for an app KWin hasn't confirmed: it may belong to another.
+        var awaitingRestore = !!entry.prediction || (!!group.session && group.session.pending.indexOf(id) !== -1)
         if (group.session) removeFromArray(group.session.pending, id)
         // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
         var snap = awaitingRestore ? null : snapshotWindow(entry)
@@ -794,7 +799,7 @@ Item {
         if (!legacy) saved.lastAccess = store.apps[group.cls].lastAccess = Date.now()
         group.session = {
             saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0,
-            legacy: legacy, captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
+            captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
         }
         dbg(group.label + ': restore session started - ' + saves.length + ' saved window(s)' +
             (monitor ? ' for ' + monitor.name + ', where it has no window yet' : '') +
@@ -887,7 +892,11 @@ Item {
         session.remaining--
         entry.assigned = true
         var w = entry.w
-        entry.restoredFrom = { session: session, index: match.index, save: session.saves[match.index], before: { x: w.x, y: w.y, w: w.width, h: w.height } }
+        // What the window was like before: an undo (see undoRestore) reverts only what changed.
+        entry.restoredFrom = {
+            session: session, index: match.index, save: session.saves[match.index],
+            before: { x: w.x, y: w.y, w: w.width, h: w.height, maximized: w.maximizeMode || 0, tile: w.tile || null }
+        }
         unwatchCaption(entry)
         removeFromArray(session.pending, entry.id)
         var moved = false
@@ -973,6 +982,12 @@ Item {
                Math.round(w.width) === target.w && Math.round(w.height) === target.h
     }
 
+    function dropRetries(id) {
+        for (var i = retries.length - 1; i >= 0; i--) {
+            if (retries[i].id === id) retries.splice(i, 1)
+        }
+    }
+
     function setGeometry(w, rect) {
         w.frameGeometry = Qt.rect(rect.x, rect.y, rect.w, rect.h)
     }
@@ -999,9 +1014,7 @@ Item {
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)
-            for (var i = retries.length - 1; i >= 0; i--) {
-                if (retries[i].id === entry.id) retries.splice(i, 1)
-            }
+            dropRetries(entry.id)
             retries.push({ id: entry.id, target: target.rect, tries: 1, born: Date.now() })
             ensureTick()
         }
@@ -1178,9 +1191,7 @@ Item {
         try {
             // The pre-tile geometry goes in just before tiling: KWin keeps the requested
             // geometry for a drag out of the tile, and the app is only asked for the tile.
-            for (var i = retries.length - 1; i >= 0; i--) {
-                if (retries[i].id === entry.id) retries.splice(i, 1)
-            }
+            dropRetries(entry.id)
             if (pending.free && !rectEquals(w, pending.free)) setGeometry(w, pending.free)
             Workspace[Engine.QUICK_TILE_ACTIONS[pending.index]]()
             log(entry.label + ': put the window back into its quick tile')
@@ -1218,7 +1229,7 @@ Item {
         entry.pendingTile = null
     }
 
-    // ---- timer: retries and session deadlines ----------------------------------------------
+    // ---- timer: retries, session deadlines, unconfirmed guesses -----------------------------
 
     function sweepRetries(now) {
         for (var i = retries.length - 1; i >= 0; i--) {
@@ -1263,7 +1274,7 @@ Item {
             if (!entry.prediction || now < entry.prediction.until) continue
             try {
                 Engine.forgetOpening(store, entry.cls, entry.prediction.from, entry.openingCaption)
-                log(entry.label + ': KWin did not name the window as learned; it is ' + entry.prediction.from + ' after all')
+                log(entry.label + ': KWin did not name the window as learned; it is ' + entry.prediction.from + ' after all, left where it is')
                 entry.prediction = null
                 persist()
                 onAppKeyChanged(id)

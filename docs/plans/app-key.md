@@ -20,14 +20,22 @@ already uses to show it apart.
   `WhatsApp Web` (which the rule doesn't match), and is renamed ~0.8 s after opening, while normal
   Chrome windows open with their final title and never change. Titles don't say "still loading".
   But the opening title of a web app is constant. So:
-  - a window renamed within `LEARN_MS` of opening teaches its new app the (app, title) it opened
-    with, unless windows of the old app, saved or open, have that title (a generic title like
-    "New Tab - Google Chrome" would make every browser window look like the web app);
+  - a window renamed within `LEARN_MS` (3 s; observed ~0.8 s) of opening, untouched by the user,
+    teaches its new app the (app, title) it opened with, unless windows of the old app, saved
+    or open, have that title (a generic title like "New Tab - Google Chrome" would make every
+    browser window look like the web app). A user navigating a tab takes longer, and moves it.
   - a new window matching a learned opening is taken for that app at once (`entry.prediction`),
-    grouped and restored as it, like any app; KWin's rename then confirms it and changes nothing;
-  - KWin naming it otherwise forgets the opening and moves it to the real app; no naming within
-    `PREDICTION_MS` (5 s) forgets it and makes the window its old app's again (the undo below).
+    grouped and restored as it, like any app; KWin's rename then confirms it and changes nothing.
+    It waits up to `PREDICTION_MS` (= `RESTORE_TIMEOUT_MS`, 10 s) for a slow start.
+  - No name within that time: the opening is forgotten and the window becomes its old app's
+    again, where it is (no longer fresh, so nothing is undone or re-placed).
+  - KWin naming it as another app: that app learns the opening too, and `predictedKey` doesn't
+    guess an opening two apps share (otherwise each launch would guess the previous app).
+  - A window renamed twice in a row teaches only its last name. An unconfirmed guess that closes
+    is not saved.
   - The first launch of a web app after this is learned the hard way (the undo path).
+  - Pressure-tested (2026-11-10) by a code review, a state-machine adversary and a KWin source
+    audit; their findings are covered by tests in `lifecycle.mjs` and `tests/kwin`.
 - **Follows the window's desktop file name** (`onAppKeyChanged`, from 1.4.2), for renames no
   rule predicts. If the old app's restore had placed a fresh window, `undoRestore` puts it back
   as KWin opened it (untiled, unmaximized, at its first place) before the new app's restore;
