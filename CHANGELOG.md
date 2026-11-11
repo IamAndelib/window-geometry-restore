@@ -2,6 +2,11 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.3] - 2026-11-11
+
+**Fixes**
+- **A window moved to another monitor reopens where it was closed** ([#8](https://github.com/IamAndelib/window-geometry-restore/issues/8)). Its save on the monitor it left was kept next to the new one, and when both had the same size, the old one won. A closing window now replaces the save it was restored from, on whatever monitor that save is. Monitors the app didn't open a window on this time still keep their part of the layout.
+
 ## [1.4.2] - 2026-11-10
 
 **Fixes**

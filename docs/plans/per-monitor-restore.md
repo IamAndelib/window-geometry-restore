@@ -3,7 +3,8 @@
 ## Decisions (user, 2026-10-30)
 Option 2: independent while the app runs, back to their own monitors on a fresh start.
 - **Saving:** when an app's last window on a monitor closes, that monitor's part of the app's
-  layout (per desktop) is replaced. The other monitors' parts stay.
+  layout (per desktop) is replaced. The other monitors' parts stay, except the saves the closing
+  windows were restored from (issue #8).
 - **Fresh start** (the app is not running on this desktop): the whole layout is restored, every
   window back on its own monitor. That includes monitors whose windows closed at different times.
 - **App already running:** a new window opened on a monitor where the app has no window gets that

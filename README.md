@@ -51,7 +51,7 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - **Through KWin.** Tiles and maximizing are restored with KWin's own calls; focus, stacking and desktops stay KWin's.
 - **Reliable storage.**
   - Layouts are written to disk the moment a window closes, so a crash or power loss still restores the last layout.
-  - Each monitor's part of a desktop's layout is kept until the app's next close on that monitor replaces it.
+  - Each monitor's part of a desktop's layout is kept until the app's next close on that monitor replaces it. A window moved to another monitor and closed there takes its save along: it reopens where it closed.
   - Unreadable data, or data from a newer version of the script, is set aside, never destroyed.
   - Layouts unused for 30 days expire.
   - **What is stored:** each remembered window's place, size, tile and title (the first 256 characters, used to match windows to their places), in `~/.config/kde.org/kwin.conf`. Window titles can contain document names or page titles; add apps you don't want remembered to the exclusion list.

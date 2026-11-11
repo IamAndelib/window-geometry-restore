@@ -868,6 +868,25 @@ def s_fresh_start_both_monitors():
         check(r["output"] == "Virtual-1" and rect(r)[:2] == (2400, 300), "Right back on monitor 2: %s %s" % (rect(r), r["output"]))
 
 
+def s_moved_to_other_monitor():
+    """Restored on monitor 2, moved to monitor 1 at the same size and closed there: it reopens
+    on monitor 1, although KWin opens it on monitor 2."""
+    with sandbox(outputs=2) as sb:
+        a = sb.open_app("org.example.alpha", "Alpha", size=(900, 600))
+        move_to(sb, "Alpha", 2300, 150)
+        a.close()
+        sb.pointer.move(400, 400)
+        a = sb.open_app("org.example.alpha", "Alpha", size=(900, 600))
+        check(sb.window("Alpha")["output"] == "Virtual-1", "precondition: restored on monitor 2")
+        move_to(sb, "Alpha", 300, 200)
+        check(sb.window("Alpha")["output"] == "Virtual-0", "precondition: moved to monitor 1")
+        a.close()
+        sb.pointer.move(2600, 400)
+        sb.open_app("org.example.alpha", "Alpha", size=(900, 600))
+        w = sb.window("Alpha")
+        check(w["output"] == "Virtual-0" and rect(w)[:2] == (300, 200), "back on monitor 1: %s on %s" % (rect(w), w["output"]))
+
+
 def s_undock_two_of_three_monitors():
     """Three monitors, the app open on each; monitors 2 and 3 go at once (undocking), the
     parked windows close at different times; docked again, each window returns to its monitor."""
@@ -966,12 +985,17 @@ def s_desktops_times_monitors():
     """One app with its own layout on each desktop and monitor: each combination comes back."""
     with sandbox(outputs=2, desktops=2) as sb:
         spots = {(0, 0): (200, 150), (0, 1): (2300, 250), (1, 0): (600, 350), (1, 1): (2700, 450)}
-        for (desk, mon), spot in spots.items():
+        # Both windows of a desktop are open at once: a window restored from one monitor's save
+        # and moved to the other would take that save along.
+        for desk in (0, 1):
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
-            title = "D%d M%d" % (desk, mon)
-            a = sb.open_app("org.example.grid", title)
-            move_to(sb, title, *spot)
-            a.close()
+            apps = []
+            for mon in (0, 1):
+                title = "D%d M%d" % (desk, mon)
+                apps.append(sb.open_app("org.example.grid", title))
+                move_to(sb, title, *spots[(desk, mon)])
+            for a in apps:
+                a.close()
         for (desk, mon), spot in spots.items():
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
             sb.pointer.move(400 + 1920 * mon, 400)
@@ -1044,6 +1068,7 @@ SCENARIOS = [
     s_monitors_independent_while_running,
     s_new_window_beside_open_one_left_alone,
     s_fresh_start_both_monitors,
+    s_moved_to_other_monitor,
     s_undock_two_of_three_monitors,
     s_many_windows_logout,
     s_logout_two_monitors_two_desktops,

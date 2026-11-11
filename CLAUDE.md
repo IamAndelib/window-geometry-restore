@@ -26,7 +26,7 @@ needs on top.
 ## State model (main.qml)
 - `store`: persisted layouts per app and desktop (`d`), plus the latest one (`w`) for older
   versions. Each monitor's part of a desktop's layout is replaced by the app's next close on
-  that monitor.
+  that monitor. A closing window also drops the save it was restored from, on any monitor.
 - `live`: runtime groups (an app on one desktop key) with `open`, `buffer`, `session` and
   `settled`.
 - `tracked`: runtime entries per window id, with `home`, `tile`, `free` and `pendingTile`.

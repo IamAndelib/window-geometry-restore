@@ -2060,12 +2060,65 @@ test('a window moved to another monitor is saved in that monitor\'s layout', () 
     stays.emitClosed()
     const w = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Stays')
     const mover = onMonitor(rt, 'konsole', 0, { x: 300, y: 300, width: 700, height: 500 }, 'Mover')
+    // Restored as Older: its size, and the only save left.
+    assert.deepEqual([mover.x, mover.y], [900, 300], 'precondition')
     mover._output = outputs[1]
     mover._setFrame({ x: 2200, y: 200, width: 700, height: 500 })
     mover.emitClosed()
     const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
-    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Older', 'DP-1'], ['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
+    // Older's save went along with the window restored from it.
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
     assert.ok(w, 'precondition')
+})
+
+test('a window moved to another monitor reopens there, not on the monitor it left', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'chat', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Chat').emitClosed()
+    const w = onMonitor(rt, 'chat', 1, { x: 2050, y: 50, width: 900, height: 600 }, 'Chat')
+    assert.deepEqual([w.x, w.y], [2100, 150], 'precondition: restored on HDMI-A-1')
+    // Moved to DP-1 at the same size, and closed there.
+    w._output = outputs[0]
+    w._setFrame({ x: 500, y: 200, width: 900, height: 600 })
+    w.emitClosed()
+
+    const saved = savedApp(rt, 'chat').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => s.o.n), ['DP-1'], 'the monitor it left keeps no save')
+    // KWin opens it on HDMI-A-1 again, at its own last size.
+    const again = onMonitor(rt, 'chat', 1, { x: 2050, y: 50, width: 900, height: 600 }, 'Chat')
+    assert.deepEqual([again.x, again.y], [500, 200], 'back where it was closed')
+})
+
+test('a monitor the app opened no window on this time keeps its part of the layout', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'konsole', 0, { x: 100, y: 100, width: 800, height: 600 }, 'Left')
+    const right = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Right')
+    closeAll(left, right)
+    // Only the left window comes back this time; it is closed again on its own monitor.
+    const again = onMonitor(rt, 'konsole', 0, { x: 0, y: 0, width: 800, height: 600 }, 'Left')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.deepEqual([again.x, again.y], [100, 100], 'precondition: restored')
+    again.emitClosed()
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Left', 'DP-1'], ['Right', 'HDMI-A-1']])
+})
+
+test('one of two windows moved to another monitor takes only its own save along', () => {
+    const rt = buildRuntime()
+    const one = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Doc')
+    const two = onMonitor(rt, 'konsole', 1, { x: 2300, y: 400, width: 700, height: 500 }, 'Doc')
+    closeAll(one, two)
+    const a = onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 900, height: 600 }, 'Doc')
+    const b = onMonitor(rt, 'konsole', 1, { x: 2000, y: 0, width: 700, height: 500 }, 'Doc')
+    assert.deepEqual([a.x, b.x], [2100, 2300], 'precondition: both restored')
+    a._moveToOutput(outputs[0], { x: 500, y: 200, width: 900, height: 600 })
+    a.emitClosed()
+    const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.w, s.o.n]).sort(), [[700, 'HDMI-A-1'], [900, 'DP-1']],
+        'the window still open on HDMI-A-1 keeps its save there')
+    b.emitClosed()
+    const after = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(after.map((s) => [s.w, s.o.n]).sort(), [[700, 'HDMI-A-1'], [900, 'DP-1']])
 })
 
 test('a window whose monitor is unplugged is saved in that monitor\'s layout', () => {

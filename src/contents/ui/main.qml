@@ -36,8 +36,8 @@ Item {
     // instance wrote in between, and saving skips reading it back.
     property string lastWritten: ''
     // Persisted: { apps: { cls: { lastAccess, saves, desktops: { desktopKey: { lastAccess, saves } } } } }.
-    // A desktop's layout keeps each monitor's part until the app's next close on that monitor,
-    // so a crash or power loss still restores the last layout.
+    // A desktop's layout keeps each monitor's part until the app's next close on that monitor
+    // (or of a window restored from it), so a crash or power loss still restores the last layout.
     property var store: Engine.newState()
     // Runtime, per group (an app on one desktop key, see desktopKeyOf) with open windows:
     // { key, cls, desktopKey, label, open: [ids], buffer: [closes], session, settled }
@@ -648,7 +648,7 @@ Item {
             untrack(entry)
         }
         if (snap) {
-            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output })
+            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output, from: entry.restoredFrom ? entry.restoredFrom.save : null })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
         }
         var saved = finalizeLeftMonitors(group)
@@ -671,7 +671,8 @@ Item {
     }
 
     // The windows that closed together on one monitor (each within BURST_MS of the next) become
-    // that monitor's part of the app's layout on this desktop. Other monitors keep theirs.
+    // that monitor's part of the app's layout on this desktop. Other monitors keep theirs, except
+    // the saves these windows were restored from: a window moved here keeps no save where it left.
     function finalizeMonitor(group, monitor) {
         var closed = []
         var others = []
@@ -686,10 +687,17 @@ Item {
             saves.unshift(closed[j].snap)
             last = closed[j].closeTime
         }
+        var replaced = closed.map(function (close) { return close.from })
         var layout = Engine.layoutFor(store, group.cls, group.desktopKey)
         var kept = []
         for (var k = 0; layout && k < layout.saves.length; k++) {
-            if (!sameMonitor(layout.saves[k].output, monitor)) kept.push(layout.saves[k])
+            var save = layout.saves[k]
+            if (sameMonitor(save.output, monitor)) continue
+            if (replaced.indexOf(save) !== -1) {
+                dbg(group.label + ': dropped the save on ' + (save.output ? save.output.name : 'no screen') + ' of a window moved away from it')
+                continue
+            }
+            kept.push(save)
         }
         Engine.recordLayout(store, group.cls, group.desktopKey, kept.concat(saves), Date.now())
         log(group.label + ' closed' + (monitor ? ' on ' + monitor.name : '') + ', saved ' + saves.length + ' window(s)')
