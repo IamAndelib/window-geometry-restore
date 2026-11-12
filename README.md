@@ -8,6 +8,10 @@
 ![License](https://img.shields.io/github/license/IamAndelib/window-geometry-restore)
 ![KDE Plasma](https://img.shields.io/badge/Plasma-6.4%2B-1d99f3)
 
+<p align="center">
+  <a href="https://ko-fi.com/iamandelib"><img src="https://storage.ko-fi.com/cdn/kofi2.png?v=6" alt="Buy Me a Coffee at ko-fi.com" height="40"></a>
+</p>
+
 A KWin script for KDE Plasma 6 on Wayland. It remembers how you left your application windows (position, size, screen and tile) on each virtual desktop and monitor, and puts them back when the app reopens. Built for apps that don't remember their own geometry, like Chrome web apps (WhatsApp Web) and Electron apps. It works with KWin, not against it: window rules, tiling, maximizing and monitor changes stay KWin's.
 
 ## Install
@@ -96,6 +100,10 @@ qdbus6 org.kde.KWin /KWin reconfigure
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md): how the script works, the KWin behaviour it relies on, the tests (unit tests, plus scenarios against a real headless KWin) and how to try a change without logging out.
+
+## Support
+
+Window Geometry Restore is free and stays that way. If it saves you from rearranging your windows every day, you can buy me a coffee on [Ko-fi](https://ko-fi.com/iamandelib).
 
 ## License & credits
 
