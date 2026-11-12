@@ -22,6 +22,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install the type checker
+        run: npm ci --no-audit --no-fund
+
       - name: Check tag matches metadata.json version
         run: |
           version=$(node -p "require('./src/metadata.json').KPlugin.Version")

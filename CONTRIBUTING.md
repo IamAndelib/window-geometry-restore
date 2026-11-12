@@ -139,10 +139,21 @@ anything.
 
 | Layer | Command | What it covers |
 |---|---|---|
-| Unit | `make test` (Node 22) | `engine.js`, plus `main.qml`'s functions against a fake KWin. Runs in CI. |
+| Unit | `make test` (Node 22; `npm ci` once) | A type check of `engine.js` and `main.qml`'s functions, then `engine.js`, plus `main.qml`'s functions against a fake KWin. Runs in CI. |
 | Real KWin | `make test-kwin` (`K=name` to filter) | Real windows, monitors, tiles, rules and logouts in a headless KWin, about 5 minutes |
 
 - **`make test`** runs before every commit.
+- **Types.** `make test` first type-checks the shipped JavaScript as it is (`tests/typecheck.mjs`,
+  TypeScript in strict mode; nothing is compiled or shipped differently). Types are JSDoc
+  comments in `engine.js` and `main.qml`, and declarations in `types/`:
+  - `kwin.d.ts`: the KWin API the script uses, checked against KWin's source. A name KWin
+    doesn't give scripts reads as `undefined`, silently: add one only after checking it there.
+  - `state.d.ts`: saves (in memory, and the compact form on disk), entries, groups, sessions.
+  - `qml.d.ts`: main.qml's properties and what QML gives it.
+
+  A new function needs `@param`/`@returns`, a new field its place in `state.d.ts`. A type
+  cast (`/** @type {X} */ (value)`) says what the code can't show; it comes with a comment why.
+  Errors are reported at the real file and line.
 - **`make test-kwin`** runs for anything touching screens, tiles, placement, rules or saving.
   - Every scenario also fails if the script logged an error.
   - Scenarios assert their own preconditions, so they can't pass vacuously.

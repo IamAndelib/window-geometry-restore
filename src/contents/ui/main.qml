@@ -56,21 +56,36 @@ Item {
 
     // Messages carry app-chosen names and titles: control characters (a newline faking a log
     // line) are replaced.
+    /**
+     * @param {string} message
+     */
     function log(message) {
         console.warn('WindowGeometryRestore: ' + String(message).replace(/[\x00-\x1f\x7f]/g, ' '))
     }
 
+    /**
+     * @param {string} message
+     */
     function dbg(message) {
         if (debugMode) log(message)
     }
 
     // For problems that would repeat on every window or frame.
+    /**
+     * @param {string} key
+     * @param {string} message
+     */
     function logOnce(key, message) {
         if (reported[key]) return
         reported[key] = true
         log(message)
     }
 
+    /**
+     * @template T
+     * @param {T[]} array
+     * @param {T} item
+     */
     function removeFromArray(array, item) {
         var index = array.indexOf(item)
         if (index !== -1) array.splice(index, 1)
@@ -78,10 +93,16 @@ Item {
 
     // Connects `handler`, wrapped so that an error is logged under the script's name instead of
     // reaching KWin's log as an anonymous QML error. Returns what disconnectSignal needs.
+    /**
+     * @param {KWindow} w
+     * @param {KWindowSignal} name
+     * @param {KHandler} handler
+     * @returns {KHandler | null}
+     */
     function connectSignal(w, name, handler) {
         var guarded = function () {
             try {
-                handler.apply(null, arguments)
+                handler.apply(null, /** @type {any} */ (arguments))
             } catch (e) {
                 log('handling ' + name + ' failed: ' + e)
             }
@@ -95,6 +116,11 @@ Item {
         }
     }
 
+    /**
+     * @param {KWindow} w
+     * @param {KWindowSignal} name
+     * @param {KHandler | null} handler
+     */
     function disconnectSignal(w, name, handler) {
         if (!handler) return
         try {
@@ -161,6 +187,10 @@ Item {
 
     // ---- tracking windows ------------------------------------------------------------------
 
+    /**
+     * @param {KWindow | null} w
+     * @returns {boolean}
+     */
     function isValidWindow(w) {
         if (!w || w.deleted) return false
         if (!w.normalWindow || w.popupWindow || w.skipTaskbar) return false
@@ -171,6 +201,10 @@ Item {
 
     // The desktop a window's layout belongs to: the desktop's id when the window is on exactly
     // one desktop, '*' when it is on all or several. Ids survive logins and desktop reordering.
+    /**
+     * @param {KWindow} w
+     * @returns {string}
+     */
     function desktopKeyOf(w) {
         var desktops = w.desktops || []
         if (w.onAllDesktops || desktops.length !== 1) return '*'
@@ -178,6 +212,10 @@ Item {
     }
 
     // Puts a tracked window in the group of its app on its current desktop key.
+    /**
+     * @param {Entry} entry
+     * @returns {Group}
+     */
     function joinGroup(entry) {
         var w = entry.w
         entry.desktopKey = desktopKeyOf(w)
@@ -198,11 +236,15 @@ Item {
     // Takes a window out of its group when it moves to another desktop or app. Closes buffered
     // there are completed if it leaves a monitor without the app's windows. Returns whether the
     // window was still waiting for its restore in that group.
+    /**
+     * @param {Entry} entry
+     * @returns {boolean}
+     */
     function leaveGroup(entry) {
         var old = live[entry.groupKey]
         removeFromArray(old.open, entry.id)
         var waiting = !!old.session && old.session.pending.indexOf(entry.id) !== -1
-        if (waiting) {
+        if (waiting && old.session) {
             removeFromArray(old.session.pending, entry.id)
             unwatchCaption(entry)
         }
@@ -215,6 +257,10 @@ Item {
 
     // `adopted` windows were open before the script started (reload, KWin restart):
     // they are left where they are and only saved when they close.
+    /**
+     * @param {KWindow} w
+     * @param {boolean} adopted
+     */
     function trackWindow(w, adopted) {
         if (!isValidWindow(w)) return
         var resourceClass = String(w.resourceClass)
@@ -233,6 +279,7 @@ Item {
         var predicted = adopted ? null : Engine.predictedKey(store, named, caption)
         if (predicted && Engine.isListed(predicted, excluded)) predicted = null
         var cls = predicted || named
+        /** @type {Entry} */
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
             assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, placedFrom: null, dialog: null, unmaximizedUntil: 0,
@@ -259,6 +306,10 @@ Item {
 
     // A window new to its group: restored from the group's layout, unless a window rule places
     // it or a restore for another monitor is under way.
+    /**
+     * @param {Entry} entry
+     * @param {Group} group
+     */
     function placeNewWindow(entry, group) {
         // Nothing saved that this window could be restored from: no need to read the rules.
         if (!group.session && !Engine.layoutFor(store, group.cls, group.desktopKey) &&
@@ -271,7 +322,8 @@ Item {
             // other windows restore as usual; for a running app, the window occupies its monitor.
             entry.assigned = true
             log(entry.label + ': a KWin window rule places this window (' + (rule.description || rule.id) + '), leaving it to KWin')
-            if (group.session || (!group.settled && startSession(group, null))) extendSession(group.session)
+            if (!group.session && !group.settled) startSession(group, null)
+            if (group.session) extendSession(group.session)
         } else if (group.session || startSessionFor(entry)) {
             joinSession(group, entry)
         }
@@ -279,6 +331,10 @@ Item {
 
     // The first KWin window rule that places or sizes this window, or null. The rules file is
     // read afresh, never created or written: StandardPaths finds it only if it exists.
+    /**
+     * @param {KWindow} w
+     * @returns {Rule | null}
+     */
     function geometryRuleOf(w) {
         try {
             var url = String(StandardPaths.locate(StandardPaths.GenericConfigLocation, 'kwinrulesrc') || '')
@@ -307,6 +363,9 @@ Item {
 
     // A window moved to another desktop joins that desktop's group, as a window of a running
     // app there. Leaving is not a close: the old desktop keeps its saved layout.
+    /**
+     * @param {string} id
+     */
     function onDesktopsChanged(id) {
         var entry = tracked[id]
         if (!entry || desktopKeyOf(entry.w) === entry.desktopKey) return
@@ -321,6 +380,9 @@ Item {
 
     // KWin reports a window's new monitor after moving it. A user move can leave a monitor without
     // windows of the app, which completes the closes buffered there.
+    /**
+     * @param {string} id
+     */
     function onOutputChanged(id) {
         var entry = tracked[id]
         if (!entry) return
@@ -332,6 +394,9 @@ Item {
         }
     }
 
+    /**
+     * @param {Entry} entry
+     */
     function untrack(entry) {
         delete tracked[entry.id]
         unwatchCaption(entry)
@@ -351,6 +416,9 @@ Item {
     // belongs to another app. A fresh one is restored as if it had opened as that app, and a save
     // it took from the old app's restore goes back to that restore. One that has been open a
     // while, or that the user placed, only changes app.
+    /**
+     * @param {string} id
+     */
     function onAppKeyChanged(id) {
         var entry = tracked[id]
         if (!entry) return
@@ -413,6 +481,11 @@ Item {
     }
 
     // Whether windows of app `cls`, saved or open, have this title.
+    /**
+     * @param {string} cls
+     * @param {string} caption
+     * @returns {boolean}
+     */
     function isOwnTitle(cls, caption) {
         if (Engine.captionSavedFor(store, cls, caption)) return true
         for (var id in tracked) {
@@ -423,6 +496,10 @@ Item {
 
     // Puts a window back the way KWin opened it, before the old app's restore tiled, maximized
     // or moved it: otherwise the new app's restore would leave it as the old app left it.
+    /**
+     * @param {Entry} entry
+     * @param {RestoredFrom} from
+     */
     function undoRestore(entry, from) {
         var w = entry.w
         try {
@@ -453,6 +530,14 @@ Item {
     // ---- observing windows -----------------------------------------------------------------
 
     // A rect in save shape: global position plus the position on `output`.
+    /**
+     * @param {KOutput | null} output
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     * @returns {Geometry}
+     */
     function geometryOf(output, x, y, width, height) {
         var relative = output ? output.mapFromGlobal(Qt.point(x, y)) : null
         return {
@@ -460,7 +545,7 @@ Item {
             y: Math.round(y),
             width: Math.round(width),
             height: Math.round(height),
-            output: output ? {
+            output: output && relative ? {
                 x: Math.round(relative.x),
                 y: Math.round(relative.y),
                 serial: String(output.serialNumber || ''),
@@ -469,6 +554,10 @@ Item {
         }
     }
 
+    /**
+     * @param {Geometry} g
+     * @returns {Geometry}
+     */
     function copyGeometry(g) {
         return { x: g.x, y: g.y, width: g.width, height: g.height, output: g.output }
     }
@@ -476,6 +565,10 @@ Item {
     // { kind: 'quick', index, rel } | { kind: 'custom', path, rel } | null. Quick tiles have no
     // layoutDirection and sit directly under their root, in KWin's fixed creation order.
     // Custom tiles are found again by their child-index path from the root.
+    /**
+     * @param {KTile | null} tile
+     * @returns {TileRef | null}
+     */
     function describeTile(tile) {
         if (!tile) return null
         try {
@@ -490,7 +583,7 @@ Item {
                 path.unshift(index)
             }
             var g = tile.relativeGeometry
-            var round = function (v) { return Math.round(v * 10000) / 10000 }
+            var round = /** @param {number} v */ function (v) { return Math.round(v * 10000) / 10000 }
             var rel = { x: round(g.x), y: round(g.y), width: round(g.width), height: round(g.height) }
             if (tile.layoutDirection === undefined) {
                 return path.length === 1 && path[0] < Engine.QUICK_TILES ? { kind: 'quick', index: path[0], rel: rel } : null
@@ -506,6 +599,10 @@ Item {
     // returns. Those moves are not the user's: while the window's own screen is missing, its
     // last geometry there (`home`) is what counts. A window the script placed on a fallback
     // screen belongs to its saved screen the same way. The user moving it ends this.
+    /**
+     * @param {{ w: KWindow, home: Home | null }} entry
+     * @returns {boolean}
+     */
     function isAway(entry) {
         var home = entry.home && entry.home.output
         if (!home) return false
@@ -520,11 +617,19 @@ Item {
     }
 
     // KWin's own maximize state (MaximizeRestore is 0).
+    /**
+     * @param {KWindow} w
+     * @returns {boolean}
+     */
     function isMaximized(w) {
         return !!w.maximizeMode
     }
 
     // As large as the work area: never moved, never taken for the floating size.
+    /**
+     * @param {KWindow} w
+     * @returns {boolean}
+     */
     function isMaximizedLike(w) {
         try {
             var area = Workspace.clientArea(KWin.MaximizeArea, w)
@@ -536,6 +641,9 @@ Item {
 
     // Only records a tile, never clears one: KWin may drop the tile while it closes the
     // window, and that close must still save the tile. A floating frame clears it instead.
+    /**
+     * @param {string} id
+     */
     function noteTile(id) {
         var entry = tracked[id]
         if (entry && entry.w.tile && !isAway(entry)) entry.tile = describeTile(entry.w.tile) || entry.tile
@@ -543,6 +651,9 @@ Item {
 
     // KWin sets the requested tile before it moves the window into it, so tile-sized
     // frames always arrive with `tile` set and are never taken as the floating size.
+    /**
+     * @param {string} id
+     */
     function noteGeometry(id) {
         var entry = tracked[id]
         if (!entry) return
@@ -584,6 +695,11 @@ Item {
     // KWin carries a tiled or maximized window's restore geometry along when it sends the window
     // to another monitor. The floating geometry follows the same way: same place on the window's
     // current monitor.
+    /**
+     * @param {Geometry | null} g
+     * @param {KWindow} w
+     * @returns {Geometry | null}
+     */
     function onCurrentMonitor(g, w) {
         var output = w.output
         if (!g || !g.output || !output || sameMonitor(g.output, monitorOf({ w: w, home: null }))) return g
@@ -592,36 +708,47 @@ Item {
     }
 
     // A quick tile still waiting for the window to get focus is the window's tile all the same.
+    /**
+     * @param {Entry} entry
+     * @returns {QuickTileRef | null}
+     */
     function waitingQuickTile(entry) {
         var pending = entry.pendingTile
         return pending ? { kind: 'quick', index: pending.index, rel: pending.rel || null } : null
     }
 
+    /**
+     * @param {Entry} entry
+     * @returns {Save | null}
+     */
     function snapshotWindow(entry) {
         var w = entry.w
         try {
             if (w.fullScreen || !(w.width >= 1) || !(w.height >= 1)) return null
-            var away = isAway(entry)
+            // Away only with a home (see isAway).
+            var home = isAway(entry) ? entry.home : null
+            var away = !!home
+            /** @type {SaveFields} */
             var fields
-            if (away) {
+            if (home) {
                 // KWin keeps a maximized window maximized on the screen it moves it to: its
                 // normal geometry at home is the one to save, as for any maximized window.
-                if (isMaximized(w) && !w.tile && entry.free && sameMonitor(entry.free.output, entry.home.output)) {
+                if (isMaximized(w) && !w.tile && entry.free && sameMonitor(entry.free.output, home.output)) {
                     fields = copyGeometry(entry.free)
                     fields.maximized = w.maximizeMode
                 } else {
-                    fields = copyGeometry(entry.home)
+                    fields = copyGeometry(home)
                     // A provisional placement: the save it came from, maximized or tiled.
-                    fields.maximized = entry.home.maximized || 0
+                    fields.maximized = home.maximized || 0
                 }
-                dbg(entry.label + ': closed while its screen ' + entry.home.output.name + ' is missing, saved its place there')
+                dbg(entry.label + ': closed while its screen ' + (home.output ? home.output.name : '') + ' is missing, saved its place there')
             } else if (isMaximized(w) && !w.tile) {
                 // Saved as its normal geometry, to maximize it with again (see applyMaximized).
                 if (!entry.free) {
                     dbg(entry.label + ': closed maximized, normal geometry unknown, not saved')
                     return null
                 }
-                fields = copyGeometry(onCurrentMonitor(entry.free, w))
+                fields = copyGeometry(/** @type {Geometry} */ (onCurrentMonitor(entry.free, w)))
                 fields.maximized = w.maximizeMode
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
@@ -631,12 +758,13 @@ Item {
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
             if (w.tile && !current && !away) dbg(entry.label + ': closed in a tile that could not be identified')
-            fields.tile = entry.tile || current || waitingQuickTile(entry) || (away && entry.home.tile) || null
-            fields.free = fields.tile ? (away ? (entry.home.tile ? entry.home.free : entry.free) : onCurrentMonitor(entry.free, w)) : null
-            if (fields.tile) {
-                dbg(entry.label + ': closed in ' + fields.tile.kind + ' tile ' +
-                    (fields.tile.kind === 'quick' ? fields.tile.index : '[' + fields.tile.path.join(',') + ']') +
-                    (fields.tile.rel ? ' at ' + percentText(fields.tile.rel) : '') +
+            var tile = entry.tile || current || waitingQuickTile(entry) || (home && home.tile) || null
+            fields.tile = tile
+            fields.free = tile ? (home ? (home.tile ? home.free : entry.free) : onCurrentMonitor(entry.free, w)) : null
+            if (tile) {
+                dbg(entry.label + ': closed in ' + tile.kind + ' tile ' +
+                    (tile.kind === 'quick' ? tile.index : '[' + tile.path.join(',') + ']') +
+                    (tile.rel ? ' at ' + percentText(tile.rel) : '') +
                     (current ? '' : ' (last tile seen, none at close)') +
                     (fields.free ? ', pre-tile ' + fields.free.width + 'x' + fields.free.height : ', pre-tile size unknown'))
             }
@@ -649,6 +777,10 @@ Item {
 
     // Forgets a window. Returns true when new saves were made: it was the app's last window on
     // its monitor.
+    /**
+     * @param {string} id
+     * @returns {boolean}
+     */
     function releaseWindow(id) {
         var entry = tracked[id]
         var group = live[entry.groupKey]
@@ -676,7 +808,12 @@ Item {
 
     // Saves the closes of every monitor the app has no window on any more: its last window there
     // closed, or was moved to another monitor or desktop.
+    /**
+     * @param {Group} group
+     * @returns {boolean}
+     */
     function finalizeLeftMonitors(group) {
+        /** @type {(SavedScreen | null)[]} */
         var monitors = []
         group.buffer.forEach(function (close) {
             if (!monitors.some(function (m) { return sameMonitor(m, close.monitor) })) monitors.push(close.monitor)
@@ -691,22 +828,32 @@ Item {
     // The windows that closed together on one monitor (each within BURST_MS of the next) become
     // that monitor's part of the app's layout on this desktop. Other monitors keep theirs, except
     // the saves these windows were restored from: a window moved here keeps no save where it left.
+    /**
+     * @param {Group} group
+     * @param {SavedScreen | null} monitor
+     * @returns {boolean}
+     */
     function finalizeMonitor(group, monitor) {
+        /** @type {Close[]} */
         var closed = []
+        /** @type {Close[]} */
         var others = []
         for (var i = 0; i < group.buffer.length; i++) {
             (sameMonitor(group.buffer[i].monitor, monitor) ? closed : others).push(group.buffer[i])
         }
         group.buffer = others
         if (!closed.length) return false
+        /** @type {Save[]} */
         var saves = []
         // The saves these windows were placed from: each is replaced by the window's new save.
         // Only for closes kept here, or a window would lose its old save and its new one.
+        /** @type {Save[]} */
         var replaced = []
         var last = closed[closed.length - 1].closeTime
         for (var j = closed.length - 1; j >= 0 && last - closed[j].closeTime <= Engine.BURST_MS; j--) {
             saves.unshift(closed[j].snap)
-            if (closed[j].from) replaced.push(closed[j].from)
+            var from = closed[j].from
+            if (from) replaced.push(from)
             last = closed[j].closeTime
         }
         var layout = Engine.layoutFor(store, group.cls, group.desktopKey)
@@ -732,6 +879,10 @@ Item {
 
     // Serial + name first, then a serial no other screen shares (identical monitor
     // models often report the same one), then the connector name.
+    /**
+     * @param {MonitorRef} saved
+     * @returns {KOutput | null}
+     */
     function resolveOutput(saved) {
         var screens = Workspace.screens || []
         var bySerial = []
@@ -749,14 +900,24 @@ Item {
 
     // The monitor a window belongs to, as a saved screen: its own while KWin keeps it on
     // another one (see isAway).
+    /**
+     * @param {{ w: KWindow, home: Home | null }} entry
+     * @returns {MonitorRef | null}
+     */
     function monitorOf(entry) {
-        if (isAway(entry)) return entry.home.output
+        // Away only with a home (see isAway).
+        if (entry.home && isAway(entry)) return entry.home.output
         var output = entry.w.output
         return output ? { name: String(output.name || ''), serial: String(output.serialNumber || '') } : null
     }
 
     // Saved screens are the same monitor when they resolve to the same connected screen, or,
     // when neither is connected, have the same name and serial.
+    /**
+     * @param {MonitorRef | null} a
+     * @param {MonitorRef | null} b
+     * @returns {boolean}
+     */
     function sameMonitor(a, b) {
         if (!a || !b) return !a && !b
         var screenA = resolveOutput(a)
@@ -768,6 +929,12 @@ Item {
     // Whether the app has a window open on `monitor` (undefined: on any; null is a save's "no
     // screen"). A dialog without a parent (see matchFor) doesn't count: the app's window still
     // gets restored.
+    /**
+     * @param {Group} group
+     * @param {MonitorRef | null | undefined} monitor
+     * @param {string} [exceptId]
+     * @returns {boolean}
+     */
     function hasWindowOn(group, monitor, exceptId) {
         for (var i = 0; i < group.open.length; i++) {
             var other = tracked[group.open[i]]
@@ -778,6 +945,10 @@ Item {
     }
 
     // The desktop shown on `output`: KWin 6.7 can show a different one on each monitor.
+    /**
+     * @param {KOutput | null} output
+     * @returns {KVirtualDesktop}
+     */
     function currentDesktopOn(output) {
         try {
             if (output && typeof Workspace.currentDesktopForScreen === 'function') return Workspace.currentDesktopForScreen(output)
@@ -785,6 +956,10 @@ Item {
         return Workspace.currentDesktop
     }
 
+    /**
+     * @param {KOutput | null} output
+     * @returns {KRect | null}
+     */
     function workArea(output) {
         try {
             return Workspace.clientArea(KWin.MaximizeArea, output, currentDesktopOn(output))
@@ -793,6 +968,9 @@ Item {
         }
     }
 
+    /**
+     * @returns {KOutput | null}
+     */
     function outputUnderCursor() {
         try {
             var at = Workspace.screenAt(Workspace.cursorPos)
@@ -805,6 +983,11 @@ Item {
         }
     }
 
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @returns {boolean}
+     */
     function isOnScreen(x, y) {
         var screens = Workspace.screens || []
         for (var i = 0; i < screens.length; i++) {
@@ -820,6 +1003,10 @@ Item {
     // monitor. An app already running here restores a new window only from the layout of the
     // monitor KWin opened it on, and only if the app has no other window there.
     // An app with only dialogs open (see matchFor) hasn't started yet: a fresh start.
+    /**
+     * @param {Entry} entry
+     * @returns {boolean}
+     */
     function startSessionFor(entry) {
         var group = live[entry.groupKey]
         if (!group.settled || !hasWindowOn(group, undefined, entry.id)) return startSession(group, null)
@@ -833,10 +1020,15 @@ Item {
     // a version that keyed by window class) restores once from its class's layout, read only.
     // A web app shared that layout with its browser: only windows whose caption matches take a
     // save from it.
+    /**
+     * @param {Group} group
+     * @param {MonitorRef | null} monitor
+     * @returns {boolean}
+     */
     function startSession(group, monitor) {
         var saved = Engine.layoutFor(store, group.cls, group.desktopKey)
         var legacy = !saved && !!group.legacyCls && !Engine.hasLayouts(store.apps[group.cls])
-        if (legacy) saved = Engine.layoutFor(store, group.legacyCls, group.desktopKey)
+        if (legacy && group.legacyCls) saved = Engine.layoutFor(store, group.legacyCls, group.desktopKey)
         if (!saved) return false
         var saves = saved.saves
         if (monitor) {
@@ -858,31 +1050,52 @@ Item {
         return true
     }
 
+    /**
+     * @param {Session} session
+     */
     function extendSession(session) {
         session.deadline = Math.max(session.deadline, Date.now() + Engine.RESTORE_TIMEOUT_MS)
     }
 
+    /**
+     * @param {Group} group
+     */
     function closeSession(group) {
         group.session = null
         group.settled = true
     }
 
+    /**
+     * @param {Group} group
+     * @param {Entry} entry
+     */
     function joinSession(group, entry) {
-        group.session.pending.push(entry.id)
-        extendSession(group.session)
+        // Called once a session runs (placeNewWindow).
+        var session = /** @type {Session} */ (group.session)
+        session.pending.push(entry.id)
+        extendSession(session)
         watchCaption(entry)
         tryAssign(entry.id)
     }
 
+    /**
+     * @param {Entry} entry
+     */
     function watchCaption(entry) {
         if (!entry.captionHandler) entry.captionHandler = connectSignal(entry.w, 'captionChanged', function () { tryAssign(entry.id) })
     }
 
+    /**
+     * @param {Entry} entry
+     */
     function unwatchCaption(entry) {
         disconnectSignal(entry.w, 'captionChanged', entry.captionHandler)
         entry.captionHandler = null
     }
 
+    /**
+     * @param {string} id
+     */
     function onUserMoveResize(id) {
         var entry = tracked[id]
         if (!entry || entry.userPlaced) return
@@ -898,9 +1111,11 @@ Item {
         log(entry.label + ': window placed by the user, not restoring it')
     }
 
-    // `scores` (optional): this window's caption scores against the session's saves, kept by a
-    // caller that matches it again (endSession).
     // A window's size as Engine.isDialog reads it.
+    /**
+     * @param {KWindow} w
+     * @returns {DialogSize}
+     */
     function dialogSizeOf(w) {
         return {
             width: Math.round(w.width),
@@ -910,6 +1125,14 @@ Item {
         }
     }
 
+    // `scores` (optional): this window's caption scores against the session's saves, kept by a
+    // caller that matches it again (endSession).
+    /**
+     * @param {Entry} entry
+     * @param {Session} session
+     * @param {number[]} [scores]
+     * @returns {Match | null}
+     */
     function matchFor(entry, session, scores) {
         var w = entry.w
         var caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
@@ -947,6 +1170,9 @@ Item {
     }
 
     // Unambiguous matches apply at once; the rest wait for the set to arrive or the deadline.
+    /**
+     * @param {string} id
+     */
     function tryAssign(id) {
         var entry = tracked[id]
         if (!entry || entry.assigned) return
@@ -964,6 +1190,12 @@ Item {
         }
     }
 
+    /**
+     * @param {Entry} entry
+     * @param {Session} session
+     * @param {Match} match
+     * @param {boolean} bestEffort
+     */
     function assignSave(entry, session, match, bestEffort) {
         session.taken[match.index] = true
         session.remaining--
@@ -988,9 +1220,14 @@ Item {
     }
 
     // Deadline: give each waiting window the best remaining save, best pair first.
+    /**
+     * @param {Group} group
+     */
     function endSession(group) {
-        var session = group.session
+        // Called for a running session (tryAssign, sweepSessions).
+        var session = /** @type {Session} */ (group.session)
         // Caption scores don't change while the sweep runs: each pair is scored once.
+        /** @type {Record<string, number[]>} */
         var scores = {}
         for (;;) {
             var best = null
@@ -1011,12 +1248,23 @@ Item {
 
     // Windows that KWin, the app or the user is managing right now are never moved. A window
     // the script just unmaximized still shows its maximized frame until the app follows.
+    /**
+     * @param {KWindow} w
+     * @returns {boolean}
+     */
     function canPlace(w) {
         var entry = tracked[String(w.internalId)]
         var unmaximized = !!entry && entry.unmaximizedUntil > Date.now()
         return !w.tile && !w.fullScreen && w.moveable && !w.move && !w.resize && (unmaximized || !isMaximizedLike(w))
     }
 
+    /**
+     * @param {number} saved
+     * @param {number | undefined} min
+     * @param {number | undefined} max
+     * @param {number} limit
+     * @returns {number}
+     */
     function fitLength(saved, min, max, limit) {
         var upper = max ? Math.min(Math.floor(max), limit) : limit
         return Math.max(min ? Math.ceil(min) : 0, Math.min(saved, upper))
@@ -1024,6 +1272,11 @@ Item {
 
     // Returns { rect, provisional, output } or null. `provisional` means the saved screen is
     // missing and a fallback screen was used; the size then fits that screen.
+    /**
+     * @param {KWindow} w
+     * @param {Geometry} save
+     * @returns {Target | null}
+     */
     function targetFor(w, save) {
         var virtual = Workspace.virtualScreenGeometry
         if (!virtual || virtual.width <= 0 || virtual.height <= 0) return null
@@ -1057,17 +1310,29 @@ Item {
         return { rect: { x: Math.round(x), y: Math.round(y), w: Math.round(width), h: Math.round(height) }, provisional: provisional, output: output }
     }
 
+    /**
+     * @param {KWindow} w
+     * @param {PixelRect} target
+     * @returns {boolean}
+     */
     function rectEquals(w, target) {
         return Math.round(w.x) === target.x && Math.round(w.y) === target.y &&
                Math.round(w.width) === target.w && Math.round(w.height) === target.h
     }
 
+    /**
+     * @param {string} id
+     */
     function dropRetries(id) {
         for (var i = retries.length - 1; i >= 0; i--) {
             if (retries[i].id === id) retries.splice(i, 1)
         }
     }
 
+    /**
+     * @param {KWindow} w
+     * @param {PixelRect} rect
+     */
     function setGeometry(w, rect) {
         w.frameGeometry = Qt.rect(rect.x, rect.y, rect.w, rect.h)
     }
@@ -1077,6 +1342,12 @@ Item {
     // A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     // geometry as the one a drag out of the tile gives back. Without its saved screen or its
     // tile, it restores as plain geometry at the tile rect, as untiled saves do.
+    /**
+     * @param {Entry} entry
+     * @param {Save} save
+     * @param {number} until
+     * @returns {boolean}
+     */
     function applySave(entry, save, until) {
         var w = entry.w
         if (save.maximized && w.maximizable) return applyMaximized(entry, save, until)
@@ -1087,7 +1358,7 @@ Item {
         if (free && free.provisional) free = null
         // A quick tile waiting for the window to become active: the window waits at the tile's
         // rect, so it doesn't show at its floating geometry first (see quickTileWhenActive).
-        var target = free && tiling.tile ? free : targetFor(w, save)
+        var target = free && tiling && tiling.tile ? free : targetFor(w, save)
         if (!target) return false
         entry.provisional = target.provisional ? { save: save, until: until } : null
         if (target.provisional) entry.home = save // the whole save: maximized and tile included
@@ -1118,6 +1389,12 @@ Item {
     // maximized size, by themselves leave KWin without that geometry otherwise. KWin takes a
     // restore geometry only when the maximize state changes, so a window that is maximized
     // already is unmaximized first; KWin configures the app once, for the final state.
+    /**
+     * @param {Entry} entry
+     * @param {Save} save
+     * @param {number} until
+     * @returns {boolean}
+     */
     function applyMaximized(entry, save, until) {
         var w = entry.w
         if (w.tile || w.fullScreen || w.move || w.resize) return false
@@ -1158,10 +1435,19 @@ Item {
 
     // ---- tiles -----------------------------------------------------------------------------
 
+    /**
+     * @param {Rel} rel
+     * @returns {string}
+     */
     function percentText(rel) {
         return Math.round(rel.width * 100) + '%x' + Math.round(rel.height * 100) + '%'
     }
 
+    /**
+     * @param {KOutput} output
+     * @param {KVirtualDesktop} desktop
+     * @returns {KTile | null}
+     */
     function rootTileFor(output, desktop) {
         try {
             if (typeof Workspace.rootTile === 'function') return Workspace.rootTile(output, desktop)
@@ -1173,22 +1459,33 @@ Item {
         }
     }
 
+    /**
+     * @param {KTile | null | undefined} tile
+     * @param {Rel} rel
+     * @returns {boolean}
+     */
     function isTileAt(tile, rel) {
         if (!tile || (tile.tiles && tile.tiles.length)) return false
         var g = tile.relativeGeometry
-        var near = function (a, b) { return Math.abs(a - b) <= Engine.TILE_TOLERANCE }
+        var near = /** @param {number} a @param {number} b */ function (a, b) { return Math.abs(a - b) <= Engine.TILE_TOLERANCE }
         return near(g.x, rel.x) && near(g.y, rel.y) && near(g.width, rel.width) && near(g.height, rel.height)
     }
 
     // The saved path first; after a layout edit, any leaf tile with the same geometry.
+    /**
+     * @param {KTile | null} root
+     * @param {CustomTileRef} saved
+     * @returns {KTile | null}
+     */
     function findCustomTile(root, saved) {
         if (!root) return null
+        /** @type {KTile | null | undefined} */
         var node = root
         for (var i = 0; i < saved.path.length && node; i++) node = (node.tiles || [])[saved.path[i]]
-        if (isTileAt(node, saved.rel)) return node
+        if (node && isTileAt(node, saved.rel)) return node
         var queue = [root]
         while (queue.length) {
-            var tile = queue.shift()
+            var tile = /** @type {KTile} */ (queue.shift()) // the queue isn't empty
             if (isTileAt(tile, saved.rel)) return tile
             var children = tile.tiles || []
             for (var j = 0; j < children.length; j++) queue.push(children[j])
@@ -1198,6 +1495,12 @@ Item {
 
     // Scripts cannot ask for the quick-tile root of a screen, but a window already
     // quick-tiled on the same screen and desktop leads to it.
+    /**
+     * @param {KWindow} w
+     * @param {KOutput} output
+     * @param {KVirtualDesktop} desktop
+     * @returns {KTile | null}
+     */
     function quickRootFor(w, output, desktop) {
         var windows = Workspace.stackingOrder || []
         for (var i = 0; i < windows.length; i++) {
@@ -1212,6 +1515,11 @@ Item {
 
     // { tile, rel? } to manage now, { quick, rel, output } to quick-tile once the window is active,
     // or null when the saved tile cannot be found.
+    /**
+     * @param {Entry} entry
+     * @param {Save} save
+     * @returns {Tiling | null}
+     */
     function planTile(entry, save) {
         try {
             var output = save.output ? resolveOutput(save.output) : entry.w.output
@@ -1219,12 +1527,14 @@ Item {
             // Tile layouts are per desktop; a window on all desktops is tiled on the one its monitor shows.
             var desktops = entry.w.desktops || []
             var desktop = desktops.length === 1 ? desktops[0] : currentDesktopOn(output)
-            if (save.tile.kind === 'quick') {
+            var saved = save.tile
+            if (!saved) return null
+            if (saved.kind === 'quick') {
                 var root = quickRootFor(entry.w, output, desktop)
-                var quick = root && root.tiles ? root.tiles[save.tile.index] : null
-                return quick ? { tile: quick, rel: save.tile.rel } : { quick: save.tile.index, rel: save.tile.rel, output: output }
+                var quick = root && root.tiles ? root.tiles[saved.index] : null
+                return quick ? { tile: quick, rel: saved.rel } : { quick: saved.index, rel: saved.rel, output: output }
             }
-            var tile = findCustomTile(rootTileFor(output, desktop), save.tile)
+            var tile = findCustomTile(rootTileFor(output, desktop), saved)
             if (!tile) log(entry.label + ': saved tile is not in the current layout, restoring plain geometry')
             return tile ? { tile: tile } : null
         } catch (e) {
@@ -1233,10 +1543,16 @@ Item {
         }
     }
 
+    /**
+     * @param {Entry} entry
+     * @param {Tiling} tiling
+     * @param {number} until
+     */
     function startTile(entry, tiling, until) {
         if (!tiling.tile) {
             cancelPendingTile(entry)
-            var pending = { index: tiling.quick, rel: tiling.rel, output: tiling.output, free: tiling.free, until: until, handler: null }
+            /** @type {PendingTile} */
+            var pending = { index: tiling.quick, rel: tiling.rel, output: tiling.output, free: tiling.free || null, until: until, handler: null }
             pending.handler = connectSignal(entry.w, 'activeChanged', function () { quickTileWhenActive(entry.id) })
             if (!pending.handler) return
             entry.pendingTile = pending
@@ -1262,6 +1578,9 @@ Item {
     // KWin's quick-tile action works on the active window, so it runs only once the window
     // is active by itself: focus stays native. Runs on activation and on every frame change,
     // because on Wayland a window only reaches its saved screen once its new frame arrives.
+    /**
+     * @param {string} id
+     */
     function quickTileWhenActive(id) {
         var entry = tracked[id]
         var pending = entry && entry.pendingTile
@@ -1291,6 +1610,10 @@ Item {
     // resized quick tile would come back at half size. The split is shared: windows in the
     // other quick tiles follow it, as when the user resized the tile. A tile that already
     // holds another window keeps its size: a tile has one size, and that window was there first.
+    /**
+     * @param {Entry} entry
+     * @param {Rel | null | undefined} rel
+     */
     function restoreQuickSplit(entry, rel) {
         var tile = entry.w.tile
         if (!rel || !tile || isTileAt(tile, rel)) return
@@ -1309,6 +1632,9 @@ Item {
         }
     }
 
+    /**
+     * @param {Entry} entry
+     */
     function cancelPendingTile(entry) {
         if (!entry.pendingTile) return
         disconnectSignal(entry.w, 'activeChanged', entry.pendingTile.handler)
@@ -1317,6 +1643,9 @@ Item {
 
     // ---- timer: retries, session deadlines, unconfirmed guesses -----------------------------
 
+    /**
+     * @param {number} now
+     */
     function sweepRetries(now) {
         for (var i = retries.length - 1; i >= 0; i--) {
             var retry = retries[i]
@@ -1339,6 +1668,9 @@ Item {
         }
     }
 
+    /**
+     * @param {number} now
+     */
     function sweepSessions(now) {
         for (var key in live) {
             var group = live[key]
@@ -1354,6 +1686,9 @@ Item {
 
     // A window taken for an app it opens as, but that KWin didn't name so in time: it is that
     // app after all, and the opening is forgotten.
+    /**
+     * @param {number} now
+     */
     function sweepPredictions(now) {
         for (var id in tracked) {
             var entry = tracked[id]
@@ -1371,6 +1706,9 @@ Item {
         }
     }
 
+    /**
+     * @returns {boolean}
+     */
     function isIdle() {
         if (retries.length > 0) return false
         for (var id in tracked) {
@@ -1396,6 +1734,9 @@ Item {
 
     // ---- KWin events -----------------------------------------------------------------------
 
+    /**
+     * @param {KWindow} w
+     */
     function handleAdded(w) {
         try {
             trackWindow(w, false)
@@ -1404,6 +1745,9 @@ Item {
         }
     }
 
+    /**
+     * @param {KWindow | null} w
+     */
     function handleRemoved(w) {
         try {
             var id = w ? String(w.internalId) : ''

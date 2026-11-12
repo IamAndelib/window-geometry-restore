@@ -53,6 +53,7 @@ var TICK_MS = 250
 var MAX_BUFFER = 64
 
 // Tiles. KWin creates the quick tiles in this order; the actions quick-tile the active window.
+/** @type {KQuickTileAction[]} */
 var QUICK_TILE_ACTIONS = [
     'slotWindowQuickTileLeft', 'slotWindowQuickTileRight', 'slotWindowQuickTileTop', 'slotWindowQuickTileBottom',
     'slotWindowQuickTileTopLeft', 'slotWindowQuickTileTopRight', 'slotWindowQuickTileBottomLeft', 'slotWindowQuickTileBottomRight'
@@ -60,16 +61,30 @@ var QUICK_TILE_ACTIONS = [
 var QUICK_TILES = QUICK_TILE_ACTIONS.length
 var TILE_TOLERANCE = 0.01
 
+/**
+ * @param {unknown} value
+ * @param {number} fallback
+ * @returns {number}
+ */
 function numberOr(value, fallback) {
-    var n = typeof value === 'number' ? value : parseFloat(value)
+    var n = typeof value === 'number' ? value : parseFloat(/** @type {string} */ (value))
     return isFinite(n) ? n : fallback
 }
 
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
 function isObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * @param {string} text
+ * @returns {ExclusionList}
+ */
 function parseList(text) {
+    /** @type {ExclusionList} */
     var parsed = { exact: [], patterns: [] }
     if (!text) return parsed
     var lines = String(text).split(/\r?\n/)
@@ -87,6 +102,11 @@ function parseList(text) {
 // Flatpak's id as their class on Wayland, so a browser's web apps are told apart only by the
 // desktop file name a KWin rule (or StartupWMClass) gives them. A difference in case alone
 // keeps the class, so existing saves stay where they are.
+/**
+ * @param {unknown} resourceClass
+ * @param {unknown} desktopFileName
+ * @returns {string}
+ */
 function appKeyFor(resourceClass, desktopFileName) {
     var cls = String(resourceClass || '').trim()
     var df = String(desktopFileName || '').trim()
@@ -96,11 +116,21 @@ function appKeyFor(resourceClass, desktopFileName) {
 // Whether `key` names an app inside `cls`, as a Flatpak browser's web apps do: Flatpak only
 // exports desktop files named after the Flatpak's id (com.google.Chrome.chrome-wah-...).
 // Such an app shared its class's saved layout with the browser.
+/**
+ * @param {string} key
+ * @param {string | null} cls
+ * @returns {boolean}
+ */
 function isSubApp(key, cls) {
     return !!cls && String(key).toLowerCase().indexOf(String(cls).toLowerCase() + '.') === 0
 }
 
 // Case-insensitive: Wayland app ids keep their case, XWayland window classes come lowercased.
+/**
+ * @param {string | null | undefined} name
+ * @param {ExclusionList} parsed
+ * @returns {boolean}
+ */
 function isListed(name, parsed) {
     if (!name) return false
     name = String(name).toLowerCase()
@@ -112,6 +142,11 @@ function isListed(name, parsed) {
 
 // `parts`: a pattern split at its wildcards. Linear in the name: an app id is app-controlled,
 // and a backtracking regular expression over a long one could stall KWin.
+/**
+ * @param {string} name
+ * @param {string[]} parts
+ * @returns {boolean}
+ */
 function matchesWildcard(name, parts) {
     var first = parts[0], last = parts[parts.length - 1]
     if (name.length < first.length + last.length) return false
@@ -126,6 +161,11 @@ function matchesWildcard(name, parts) {
     return true
 }
 
+/**
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
 function captionScore(a, b) {
     if (a === b) return 100
     if (!a || !b) return 0
@@ -148,6 +188,11 @@ function captionScore(a, b) {
 
 // Ranking shared by single-window matching and the deadline sweep:
 // lower tier first, then more matching dimensions, then higher caption score.
+/**
+ * @param {Match} a
+ * @param {Match} b
+ * @returns {boolean}
+ */
 function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
@@ -162,7 +207,15 @@ function isBetterMatch(a, b) {
 // Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
+/**
+ * @param {Save[]} saves
+ * @param {LiveWindow} live
+ * @param {boolean[]} taken
+ * @param {number[]} [scores]
+ * @returns {Match | null}
+ */
 function bestMatch(saves, live, taken, scores) {
+    /** @param {number} i */
     var score = function (i) {
         if (!scores) return captionScore(saves[i].caption, live.caption)
         if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
@@ -193,6 +246,12 @@ function bestMatch(saves, live, taken, scores) {
 }
 
 // A window less than half a save's width and height.
+/**
+ * @param {number} width
+ * @param {number} height
+ * @param {Save} save
+ * @returns {boolean}
+ */
 function isDialogSized(width, height, save) {
     return width < save.width / 2 && height < save.height / 2
 }
@@ -203,6 +262,12 @@ function isDialogSized(width, height, save) {
 // size) and under half the size of every save it could take. `win`: { width, height (the
 // frame, as saves are), clientWidth, minWidth (KWin's minSize is the client's: no borders) }.
 var DIALOG_MIN_WIDTH_SLACK = 32
+/**
+ * @param {DialogSize} win
+ * @param {Save[]} saves
+ * @param {boolean[]} taken
+ * @returns {boolean}
+ */
 function isDialog(win, saves, taken) {
     if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
     var free = 0
@@ -214,6 +279,10 @@ function isDialog(win, saves, taken) {
     return free > 0
 }
 
+/**
+ * @param {SaveFields} fields
+ * @returns {Save}
+ */
 function makeSave(fields) {
     return {
         caption: String(fields.caption || ''),
@@ -231,18 +300,33 @@ function makeSave(fields) {
 // Maps keyed by names apps choose (app ids, desktop ids) have no prototype: an app id like
 // "__proto__" or "constructor" must not reach Object.prototype, which every script in KWin's
 // QML engine shares.
+/**
+ * @template T
+ * @returns {Record<string, T>}
+ */
 function newMap() {
     return Object.create(null)
 }
 
+/**
+ * @returns {State}
+ */
 function newState() {
     return { apps: newMap() }
 }
 
+/**
+ * @param {SavedScreen | null} output
+ * @returns {EncodedOutput | null}
+ */
 function encodeOutput(output) {
     return output ? { x: output.x, y: output.y, s: output.serial, n: output.name } : null
 }
 
+/**
+ * @param {unknown} o
+ * @returns {SavedScreen | null}
+ */
 function decodeOutput(o) {
     if (!isObject(o)) return null
     return {
@@ -254,6 +338,10 @@ function decodeOutput(o) {
 }
 
 // A rect with a usable size, or null.
+/**
+ * @param {unknown} g
+ * @returns {Geometry | null}
+ */
 function decodeGeometry(g) {
     if (!isObject(g)) return null
     var width = numberOr(g.w, NaN)
@@ -262,10 +350,19 @@ function decodeGeometry(g) {
     return { x: numberOr(g.x, 0), y: numberOr(g.y, 0), width: width, height: height, output: decodeOutput(g.o) }
 }
 
+/**
+ * @param {unknown} value
+ * @param {number} limit
+ * @returns {value is number}
+ */
 function isIndex(value, limit) {
     return typeof value === 'number' && value >= 0 && value < limit && Math.floor(value) === value
 }
 
+/**
+ * @param {TileRef} tile
+ * @returns {EncodedTile}
+ */
 function encodeTile(tile) {
     var g = tile.rel ? { x: tile.rel.x, y: tile.rel.y, w: tile.rel.width, h: tile.rel.height } : undefined
     if (tile.kind === 'quick') return g ? { k: 'q', i: tile.index, g: g } : { k: 'q', i: tile.index }
@@ -273,11 +370,18 @@ function encodeTile(tile) {
 }
 
 // A tile's relativeGeometry: fractions of the screen, inside it.
+/**
+ * @param {unknown} g
+ * @returns {Rel | null}
+ */
 function decodeRel(g) {
     if (!isObject(g)) return null
     var rel = { x: g.x, y: g.y, width: g.w, height: g.h }
-    for (var key in rel) {
-        if (typeof rel[key] !== 'number' || !isFinite(rel[key])) return null
+    /** @type {Record<string, unknown>} */
+    var values = rel
+    for (var key in values) {
+        var value = values[key]
+        if (typeof value !== 'number' || !isFinite(value)) return null
     }
     var slack = 0.001
     if (rel.x < 0 || rel.y < 0 || !(rel.width > 0) || !(rel.height > 0) ||
@@ -287,6 +391,10 @@ function decodeRel(g) {
 
 // Anything unexpected is rejected: the save then restores as plain geometry. A quick tile
 // without a usable size (older saves) still restores into the tile, at KWin's current size.
+/**
+ * @param {unknown} t
+ * @returns {TileRef | null}
+ */
 function decodeTile(t) {
     if (!isObject(t)) return null
     if (t.k === 'q') return isIndex(t.i, QUICK_TILES) ? { kind: 'quick', index: t.i, rel: decodeRel(t.g) } : null
@@ -298,7 +406,12 @@ function decodeTile(t) {
     return rel ? { kind: 'custom', path: t.p.slice(), rel: rel } : null
 }
 
+/**
+ * @param {Save} s
+ * @returns {EncodedSave}
+ */
 function encodeSave(s) {
+    /** @type {EncodedSave} */
     var out = {
         c: s.caption,
         x: s.x,
@@ -313,18 +426,29 @@ function encodeSave(s) {
     return out
 }
 
+/**
+ * @param {any} s A save as JSON.parse read it: anything
+ * @returns {Save | null}
+ */
 function decodeSave(s) {
     var geometry = decodeGeometry(s)
     if (!geometry) return null
     var tile = decodeTile(s.t)
-    geometry.caption = typeof s.c === 'string' ? s.c.slice(0, MAX_CAPTION) : ''
-    geometry.tile = tile
-    geometry.free = tile ? decodeGeometry(s.f) : null
-    geometry.maximized = isIndex(s.max, 4) ? s.max : 0
-    return makeSave(geometry)
+    /** @type {SaveFields} */
+    var fields = geometry
+    fields.caption = typeof s.c === 'string' ? s.c.slice(0, MAX_CAPTION) : ''
+    fields.tile = tile
+    fields.free = tile ? decodeGeometry(s.f) : null
+    fields.maximized = isIndex(s.max, 4) ? s.max : 0
+    return makeSave(fields)
 }
 
+/**
+ * @param {unknown} list
+ * @returns {Save[]}
+ */
 function decodeSaves(list) {
+    /** @type {Save[]} */
     var saves = []
     if (!Array.isArray(list)) return saves
     for (var i = 0; i < list.length && saves.length < MAX_SAVES; i++) {
@@ -334,6 +458,11 @@ function decodeSaves(list) {
     return saves
 }
 
+/**
+ * @param {unknown} d
+ * @param {number} fallbackTime
+ * @returns {Record<string, Layout>}
+ */
 function decodeDesktops(d, fallbackTime) {
     var desktops = newMap()
     if (!isObject(d)) return desktops
@@ -345,17 +474,29 @@ function decodeDesktops(d, fallbackTime) {
     return desktops
 }
 
+/**
+ * @param {App | null | undefined} app
+ * @returns {boolean}
+ */
 function hasLayouts(app) {
     return !!app && ((Array.isArray(app.saves) && app.saves.length > 0) ||
                      (isObject(app.desktops) && Object.keys(app.desktops).length > 0))
 }
 
 // Worth keeping: a layout, or how the app's windows open (learned before its first close).
+/**
+ * @param {App | null | undefined} app
+ * @returns {boolean}
+ */
 function hasData(app) {
     return hasLayouts(app) || (!!app && Array.isArray(app.opens) && app.opens.length > 0)
 }
 
 // Never throws. Returns { state, error, version } - error is null when the blob was usable.
+/**
+ * @param {string} text
+ * @returns {DecodeResult}
+ */
 function decodeState(text) {
     var state = newState()
     if (!text || !String(text).trim()) return { state: state, error: null, version: 0 }
@@ -380,18 +521,28 @@ function decodeState(text) {
     return { state: state, error: null, version: version }
 }
 
+/**
+ * @param {Save[]} saves
+ * @returns {EncodedSave[]}
+ */
 function encodeSaves(saves) {
     var out = []
     for (var i = 0; i < saves.length; i++) out.push(encodeSave(saves[i]))
     return out
 }
 
+/**
+ * @param {State} state
+ * @returns {string}
+ */
 function encodeState(state) {
+    /** @type {EncodedState} */
     var out = { version: SCHEMA_VERSION, apps: newMap() }
     if (!state || !state.apps) return JSON.stringify(out)
     for (var cls in state.apps) {
         var app = state.apps[cls]
         if (!hasData(app)) continue
+        /** @type {EncodedApp} */
         var encoded = { t: numberOr(app.lastAccess, 0) }
         if (Array.isArray(app.saves) && app.saves.length) encoded.w = encodeSaves(app.saves)
         if (Array.isArray(app.opens) && app.opens.length) {
@@ -411,7 +562,12 @@ function encodeState(state) {
     return JSON.stringify(out)
 }
 
+/**
+ * @param {unknown} list
+ * @returns {Opening[]}
+ */
 function decodeOpenings(list) {
+    /** @type {Opening[]} */
     var opens = []
     if (!Array.isArray(list)) return opens
     for (var i = 0; i < list.length && opens.length < MAX_OPENINGS; i++) {
@@ -422,12 +578,24 @@ function decodeOpenings(list) {
     return opens
 }
 
-// Remembers that a window of app `cls` titled `caption` at open turned into app `key`.
 // A title as openings keep it.
+/**
+ * @param {unknown} caption
+ * @returns {string}
+ */
 function openingTitle(caption) {
     return String(caption || '').slice(0, MAX_CAPTION)
 }
 
+// Remembers that a window of app `cls` titled `caption` at open turned into app `key`.
+/**
+ * @param {State} state
+ * @param {string} key
+ * @param {string} cls
+ * @param {string} caption
+ * @param {number} now
+ * @returns {boolean}
+ */
 function learnOpening(state, key, cls, caption, now) {
     caption = openingTitle(caption)
     if (!caption || !key || !cls || key === cls) return false
@@ -441,6 +609,12 @@ function learnOpening(state, key, cls, caption, now) {
 
 // Whether a window of app `cls` was saved with this title: then it is that app's own title,
 // not a sign of another app.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} caption
+ * @returns {boolean}
+ */
 function captionSavedFor(state, cls, caption) {
     var app = state.apps[cls]
     if (!app) return false
@@ -450,6 +624,13 @@ function captionSavedFor(state, cls, caption) {
 }
 
 // Returns whether there was such an opening.
+/**
+ * @param {State} state
+ * @param {string} key
+ * @param {string} cls
+ * @param {string} caption
+ * @returns {boolean}
+ */
 function forgetOpening(state, key, cls, caption) {
     var app = state.apps[key]
     if (!app || !app.opens) return false
@@ -461,6 +642,12 @@ function forgetOpening(state, key, cls, caption) {
 // The app a new window of app `cls` titled `caption` will turn into, as learned, or null. Null
 // too when several apps opened that way (web apps sharing a placeholder title): a guess would be
 // wrong every other time.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} caption
+ * @returns {string | null}
+ */
 function predictedKey(state, cls, caption) {
     if (!caption) return null
     var found = null
@@ -478,11 +665,24 @@ function predictedKey(state, cls, caption) {
 }
 
 // The layout an app left on one desktop: { lastAccess, saves } or null.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @returns {Layout | null}
+ */
 function layoutFor(state, cls, key) {
     var app = state.apps[cls]
     return app && isObject(app.desktops) && app.desktops[key] ? app.desktops[key] : null
 }
 
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @param {Save[]} saves
+ * @param {number} now
+ */
 function recordLayout(state, cls, key, saves, now) {
     var app = state.apps[cls]
     if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: newMap() }
@@ -493,6 +693,11 @@ function recordLayout(state, cls, key, saves, now) {
     app.lastAccess = now
 }
 
+/**
+ * @param {State} state
+ * @param {number} now
+ * @returns {number}
+ */
 function pruneExpired(state, now) {
     var removed = 0
     var cutoff = now - EXPIRY_MS
@@ -515,7 +720,7 @@ function pruneExpired(state, now) {
         // Apps with only a learned opening go before apps with layouts, then the least used.
         remaining.sort(function (a, b) {
             var x = state.apps[a], y = state.apps[b]
-            return (hasLayouts(x) - hasLayouts(y)) || (x.lastAccess - y.lastAccess)
+            return (Number(hasLayouts(x)) - Number(hasLayouts(y))) || (x.lastAccess - y.lastAccess)
         })
         for (var j = 0; j < remaining.length - MAX_APPS; j++) {
             delete state.apps[remaining[j]]
@@ -528,6 +733,11 @@ function pruneExpired(state, now) {
 // Re-adopt apps and desktop layouts that exist on disk but are missing from the in-memory
 // state (written by another KWin instance, e.g. across a login). Memory wins for every app
 // and desktop it already knows. Callers prune afterwards, so expired disk layouts still go.
+/**
+ * @param {State} state
+ * @param {State} diskState
+ * @returns {number}
+ */
 function mergeDiskApps(state, diskState) {
     var adopted = 0
     if (!diskState || !diskState.apps) return adopted
@@ -563,12 +773,20 @@ var NORMAL_WINDOW_TYPE = 1
 
 // QSettings returns a comma-separated value as a list: a JS array, or, through QML, a sequence
 // object (indexable, with a length) that is no Array.
+/**
+ * @param {unknown} value
+ * @returns {value is ArrayLike<string> & object}
+ */
 function isList(value) {
-    return !!value && typeof value === 'object' && typeof value.length === 'number'
+    return !!value && typeof value === 'object' && typeof /** @type {{ length?: unknown }} */ (value).length === 'number'
 }
 
 // The longest run of literal text in a pattern: escaped characters count as text, other
 // regular-expression syntax and character classes (\\d, \\w...) end a run.
+/**
+ * @param {string} pattern
+ * @returns {string}
+ */
 function literalOf(pattern) {
     var best = ''
     var run = ''
@@ -592,12 +810,17 @@ function literalOf(pattern) {
 // A rule condition as a matcher. Regular expressions run case-insensitive (KWin's PCRE allows
 // inline flags such as (?i), stripped here). One JS can't read falls back to a substring test
 // of its literal text: erring towards KWin, without one odd rule covering every window.
+/**
+ * @param {string} pattern
+ * @param {string} mode
+ * @returns {RuleCondition}
+ */
 function ruleCondition(pattern, mode) {
-    mode = parseInt(mode, 10) || 0
-    if (mode === 0) return { test: function () { return true } }
+    var kind = parseInt(mode, 10) || 0
+    if (kind === 0) return { test: function () { return true } }
     var lower = pattern.toLowerCase()
-    if (mode === 1) return { test: function (v) { return v === lower } }
-    if (mode === 2) return { test: function (v) { return v.indexOf(lower) !== -1 } }
+    if (kind === 1) return { test: function (v) { return v === lower } }
+    if (kind === 2) return { test: function (v) { return v.indexOf(lower) !== -1 } }
     // Not lowercased: that would turn \S, \D, \W, \B into \s, \d, \w, \b. The i flag is enough.
     try {
         var re = new RegExp(pattern.replace(/^\(\?[a-z]+\)/, ''), 'i')
@@ -611,14 +834,19 @@ function ruleCondition(pattern, mode) {
 // `read(key)` returns a value from the rules file as QSettings reads it: [General] keys at
 // the top level, rule groups as "group/key". Rule ids come from General/Order (KWin 6.8, which
 // moves General/rules there), General/rules, or, in older files, the groups 1..count.
+/**
+ * @param {(key: string) => RuleValue} read
+ * @returns {Rule[]}
+ */
 function parseRules(read) {
     var ids = ruleIds(read('Order'))
     if (!ids.length) ids = ruleIds(read('rules'))
     if (!ids.length) {
         ids = []
-        var count = parseInt(read('count'), 10) || 0
+        var count = parseInt(String(read('count')), 10) || 0
         for (var n = 1; n <= count; n++) ids.push(String(n))
     }
+    /** @type {Rule[]} */
     var rules = []
     for (var i = 0; i < ids.length; i++) {
         var id = String(ids[i]).trim()
@@ -626,9 +854,10 @@ function parseRules(read) {
         if (String(read(id + '/Enabled')) === 'false') continue
         var geometry = []
         for (var j = 0; j < RULE_GEOMETRY.length; j++) {
-            if (RULE_KINDS.indexOf(parseInt(read(id + '/' + RULE_GEOMETRY[j] + 'rule'), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
+            if (RULE_KINDS.indexOf(parseInt(String(read(id + '/' + RULE_GEOMETRY[j] + 'rule')), 10)) !== -1) geometry.push(RULE_GEOMETRY[j])
         }
         if (!geometry.length) continue
+        /** @param {string} key */
         var text = function (key) {
             var v = read(id + '/' + key)
             if (isList(v)) return Array.prototype.slice.call(v).join(',')
@@ -645,12 +874,20 @@ function parseRules(read) {
     return rules
 }
 
+/**
+ * @param {RuleValue} value
+ * @returns {string[]}
+ */
 function ruleIds(value) {
     if (isList(value)) return Array.prototype.slice.call(value)
     return typeof value === 'string' && value.length ? value.split(',') : []
 }
 
 // QSettings trims the items of a value it split at commas, so spaces after commas don't count.
+/**
+ * @param {unknown} text
+ * @returns {string}
+ */
 function normalizeRuleText(text) {
     return String(text).replace(/\s*,\s*/g, ',')
 }
@@ -658,6 +895,11 @@ function normalizeRuleText(text) {
 // The first rule that places or sizes this window, or null. `win`: { resourceClass,
 // resourceName, caption }. Conditions the script can't check (window role, machine) are
 // treated as met.
+/**
+ * @param {Rule[]} rules
+ * @param {RuleWindow} win
+ * @returns {Rule | null}
+ */
 function geometryRuleFor(rules, win) {
     for (var i = 0; i < rules.length; i++) {
         var r = rules[i]
