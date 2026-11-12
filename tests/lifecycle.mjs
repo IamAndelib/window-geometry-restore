@@ -45,9 +45,9 @@ const REQUIRED_FUNCTIONS = [
     'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
-    'resolveOutput', 'monitorOf', 'sameMonitor', 'hasAppWindow', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
+    'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
-    'onUserMoveResize', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
+    'onUserMoveResize', 'dialogSizeOf', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
     'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
@@ -3550,7 +3550,7 @@ test('a window first taken for a dialog that grows into a match is the app\'s wi
     w.caption = 'Inbox - Mail'
     w.emitCaptionChanged()
     assert.deepEqual([w.x, w.y], [100, 40], 'restored')
-    assert.equal(rt.trackedRef()[w.internalId].dialog, false)
+    assert.equal(rt.trackedRef()[w.internalId].dialog, null)
 })
 
 test('a dialog-sized window isn\'t saved over a layout of several windows either', () => {
@@ -3605,4 +3605,29 @@ test('a dialog on a monitor doesn\'t keep the app\'s window opened there from it
     assert.equal(running.x, 2100, 'precondition')
     assert.deepEqual([again.x, again.y], [100, 100], 'DP-1\'s part restored beside the dialog')
     assert.equal(dialog._geometryWrites, 0)
+})
+
+test('a window wrongly taken for a dialog that the user makes bigger is saved', () => {
+    const rt = buildRuntime(savedLayouts({ mail: [{ c: 'Inbox - Mail', x: 100, y: 40, w: 1000, h: 650, o: null }] }))
+    const w = prompt(rt, { caption: 'Notes' })
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick() // its restore ran out: nothing else will look at it again
+    assert.ok(rt.trackedRef()[w.internalId].dialog, 'precondition')
+    w._emit('interactiveMoveResizeStarted')
+    w._setFrame({ x: 50, y: 50, width: 900, height: 600 })
+    assert.equal(rt.trackedRef()[w.internalId].dialog, null, 'the app\'s window after all')
+    w.emitClosed()
+    assert.ok(savedApp(rt, 'mail').d['desk-uuid-1'].w.some((s) => s.c === 'Notes' && s.w === 900))
+})
+
+test('a web app\'s prompt is judged only against the saves its fallback could give it', () => {
+    // The browser's layout holds a small browser window and the web app's maximized one.
+    const rt = buildRuntime(savedLayouts({ [CHROME]: [
+        { c: 'Tiny - Google Chrome', x: 0, y: 0, w: 600, h: 300, o: null },
+        { c: 'WhatsApp', x: 40, y: 40, w: 1600, h: 1000, o: null, max: 3 }] }))
+    const w = makeWindow({ cls: CHROME, df: WHATSAPP, caption: 'WhatsApp', x: 700, y: 400, width: 426, height: 183 })
+    w.minSize = { width: 425, height: 150 }
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 0, 'not given the web app\'s maximized save')
+    assert.ok(rt.trackedRef()[w.internalId].dialog)
 })

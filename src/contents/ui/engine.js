@@ -200,10 +200,11 @@ function isDialogSized(width, height, save) {
 // A dialog the app shows without a parent (a password prompt or profile chooser at startup):
 // on Wayland KWin can't tell it from the app's window (issue #3). Taken for one: a window at its
 // minimum width (sized to its content, as dialogs open; an app's window opens at its default
-// size) and under half the size of every save it could take. `win`: { width, height, minWidth }.
+// size) and under half the size of every save it could take. `win`: { width, height (the
+// frame, as saves are), clientWidth, minWidth (KWin's minSize is the client's: no borders) }.
 var DIALOG_MIN_WIDTH_SLACK = 32
 function isDialog(win, saves, taken) {
-    if (!(win.minWidth > 0) || win.width > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
+    if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
     var free = 0
     for (var i = 0; i < saves.length; i++) {
         if (taken[i]) continue
