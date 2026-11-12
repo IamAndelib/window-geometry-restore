@@ -4,7 +4,11 @@
 Option 2: independent while the app runs, back to their own monitors on a fresh start.
 - **Saving:** when an app's last window on a monitor closes, that monitor's part of the app's
   layout (per desktop) is replaced. The other monitors' parts stay, except the saves the closing
-  windows were restored from (issue #8).
+  windows were placed from (issue #8, 1.4.3). Only a save the script put the window at counts
+  (`entry.placedFrom`: not a provisional placement on another screen while the save's monitor is
+  missing), only for closes kept in the burst, and not on a monitor the app still has windows on.
+  Known gaps: a window moved before its restore, open across a script reload, or moved to another
+  desktop as well, keeps its old save.
 - **Fresh start** (the app is not running on this desktop): the whole layout is restored, every
   window back on its own monitor. That includes monitors whose windows closed at different times.
 - **App already running:** a new window opened on a monitor where the app has no window gets that

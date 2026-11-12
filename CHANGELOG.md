@@ -2,10 +2,17 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
-## [1.4.3] - 2026-11-11
+## [1.4.3] - 2026-11-12
 
 **Fixes**
-- **A window moved to another monitor reopens where it was closed** ([#8](https://github.com/IamAndelib/window-geometry-restore/issues/8)). Its save on the monitor it left was kept next to the new one, and when both had the same size, the old one won. A closing window now replaces the save it was restored from, on whatever monitor that save is. Monitors the app didn't open a window on this time still keep their part of the layout.
+- **A window moved to another monitor reopens where it was closed** ([#8](https://github.com/IamAndelib/window-geometry-restore/issues/8), fix by @stasadev). Its save on the monitor it left was kept next to the new one, and when both had the same size, the old one won. A closing window now replaces the save it was placed from, on whatever monitor that save is. Monitors the app didn't open a window on this time still keep their part of the layout.
+  - Only a save the window was actually put at counts: a window that opened on the laptop screen because the external monitor was unplugged (or docked too late) never left that monitor, and using it while undocked keeps the docked layout.
+  - A monitor the app still has windows on keeps the old save until their own close rewrites it, so a crash in between loses nothing.
+  - One window per monitor, set up by moving one window around, no longer builds a layout for both monitors: moving the window takes its save along. Open a window on each monitor to keep one there.
+- **Maximized and tiled windows keep their state while their monitor is unplugged.** A window closed while its monitor was missing (undocked, then shut down) was saved as a plain screen-sized window, so it came back unmaximized, or untiled, with no size to return to. It is now saved maximized, with its normal size, or in its tile, with its pre-tile size. Also for a window restored onto another screen while its monitor is missing.
+
+**Under the hood**
+- New real-KWin scenarios: a window moved to the other monitor (fails with 1.4.2), used while undocked, maximized on a monitor that is unplugged. Pre-release review by a code review and a whole-codebase review; their findings are fixed and covered by tests.
 
 ## [1.4.2] - 2026-11-10
 

@@ -54,8 +54,10 @@ on, and how to test a change before it reaches anyone's desktop.
   - When the app has no window left on that monitor, the closes there that came together
     (each within 1.5 s of the next) become that monitor's part of the app's layout on that
     desktop.
-  - The saves those windows were restored from are dropped, on any monitor: a window moved
-    to another monitor leaves no save behind where it was.
+  - The saves those windows were placed from are dropped, on any monitor: a window moved
+    to another monitor leaves no save behind where it was. Not a save the window was only
+    matched to, or placed near while its monitor was missing, and not on a monitor the app
+    still has windows on.
   - The layout is written to disk at once.
 - **Opening.**
   - A window that starts a group (a fresh start) begins a restore session with the desktop's

@@ -2066,9 +2066,12 @@ test('a window moved to another monitor is saved in that monitor\'s layout', () 
     mover._setFrame({ x: 2200, y: 200, width: 700, height: 500 })
     mover.emitClosed()
     const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
-    // Older's save went along with the window restored from it.
-    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
-    assert.ok(w, 'precondition')
+    // Older's save stays while the app still has a window on DP-1 (crash-safe)...
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Older', 'DP-1'], ['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
+    // ...and goes when that window's close rewrites DP-1's part.
+    w.emitClosed()
+    const after = savedApp(rt, 'konsole').d['desk-uuid-1'].w
+    assert.deepEqual(after.map((s) => [s.c, s.o.n]).sort(), [['Stays', 'DP-1'], ['Mover', 'HDMI-A-1']].sort())
 })
 
 test('a window moved to another monitor reopens there, not on the monitor it left', () => {
@@ -2114,11 +2117,57 @@ test('one of two windows moved to another monitor takes only its own save along'
     a._moveToOutput(outputs[0], { x: 500, y: 200, width: 900, height: 600 })
     a.emitClosed()
     const saved = savedApp(rt, 'konsole').d['desk-uuid-1'].w
-    assert.deepEqual(saved.map((s) => [s.w, s.o.n]).sort(), [[700, 'HDMI-A-1'], [900, 'DP-1']],
-        'the window still open on HDMI-A-1 keeps its save there')
+    assert.deepEqual(saved.map((s) => [s.w, s.o.n]).sort(), [[700, 'HDMI-A-1'], [900, 'DP-1'], [900, 'HDMI-A-1']],
+        'HDMI-A-1 keeps its part while the app still has a window there')
     b.emitClosed()
     const after = savedApp(rt, 'konsole').d['desk-uuid-1'].w
     assert.deepEqual(after.map((s) => [s.w, s.o.n]).sort(), [[700, 'HDMI-A-1'], [900, 'DP-1']])
+})
+
+test('a window placed on another screen because its monitor is missing keeps that monitor\'s save (undocked laptop)', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'doc', 1, { x: 2100, y: 150, width: 900, height: 600 }).emitClosed()
+    fakeWorkspace.screens = [outputs[0]] // undocked
+    try {
+        const w = onMonitor(rt, 'doc', 0, { x: 50, y: 50, width: 900, height: 600 })
+        assert.ok(rt.trackedRef()[w.internalId].provisional, 'precondition: placed provisionally, HDMI-A-1 missing')
+        w._emit('interactiveMoveResizeStarted') // the user works with it on the laptop screen
+        w._setFrame({ x: 200, y: 100, width: 880, height: 600 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const saved = savedApp(rt, 'doc').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => s.o.n).sort(), ['DP-1', 'HDMI-A-1'], 'the external monitor\'s save is kept for docking again')
+})
+
+test('a window restored from a save it was never put at does not drop that save', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'doc', 1, { x: 2100, y: 150, width: 900, height: 600 }).emitClosed()
+    // Opens screen-sized on DP-1: matched to the save, but the script never moves such a window.
+    const w = onMonitor(rt, 'doc', 0, { x: 0, y: 0, width: 1920, height: 1080 })
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    assert.deepEqual([w.x, w.width], [0, 1920], 'precondition: left as is')
+    w.emitClosed()
+    const saved = savedApp(rt, 'doc').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => s.o.n).sort(), ['DP-1', 'HDMI-A-1'])
+})
+
+test('a window closed long before its monitor\'s last close keeps its old save (its own is not kept either)', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'doc', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'A')
+    const b = onMonitor(rt, 'doc', 0, { x: 100, y: 100, width: 800, height: 500 }, 'B')
+    closeAll(a, b)
+    const a2 = onMonitor(rt, 'doc', 1, { x: 2000, y: 0, width: 900, height: 600 }, 'A')
+    const b2 = onMonitor(rt, 'doc', 0, { x: 0, y: 0, width: 800, height: 500 }, 'B')
+    assert.deepEqual([a2.x, b2.x], [2100, 100], 'precondition: both restored')
+    a2._moveToOutput(outputs[0], { x: 900, y: 300, width: 900, height: 600 })
+    a2.emitClosed() // DP-1 still has B: nothing is saved yet
+    advanceClock(rt, 30000)
+    b2.emitClosed() // only B's close is DP-1's last burst
+    const saved = savedApp(rt, 'doc').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['A', 'HDMI-A-1'], ['B', 'DP-1']], 'A is not lost')
 })
 
 test('a window whose monitor is unplugged is saved in that monitor\'s layout', () => {
@@ -3305,3 +3354,86 @@ test('an app id with control characters cannot fake a log line', () => {
     w.emitClosed()
     assert.ok(rt.getLogs().length > 0 && rt.getLogs().every((l) => !/[\x00-\x1f]/.test(l)))
 })
+
+// --- Monitors that are missing: the place, maximized state and tile kept for them ---
+
+test('a maximized window whose monitor is unplugged is saved maximized there', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(w)
+    w.setMaximize(true, true)
+    assert.deepEqual([w.x, w.width, w.maximizeMode], [2000, 1280, 3], 'precondition: maximized on HDMI-A-1')
+    try {
+        // KWin keeps it maximized on the remaining monitor (checkWorkspacePosition).
+        unplug(w, outputs[0], { x: 0, y: 0, width: 1920, height: 1080 })
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').w
+    assert.equal(s.o.n, 'HDMI-A-1', 'precondition: saved on its own monitor')
+    assert.deepEqual([s.max, s.w, s.h], [3, 900, 600], 'maximized, with its normal size to return to')
+})
+
+test('a maximized save restored on a fallback screen and closed there stays maximized', () => {
+    const rt = buildRuntime()
+    const first = makeWindow({ cls: 'app', caption: 'Doc', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(first)
+    first.setMaximize(true, true)
+    first.emitClosed()
+    assert.equal(savedApp(rt, 'app').w[0].max, 3, 'precondition: saved maximized')
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+        assert.equal(w.maximizeMode, 3, 'precondition: maximized on the fallback screen')
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').d['desk-uuid-1'].w
+    assert.equal(s.o.n, 'HDMI-A-1', 'precondition: kept on its own monitor')
+    assert.equal(s.max, 3, 'still maximized')
+})
+
+test('a tiled save restored on a fallback screen and closed there keeps its tile', () => {
+    const rt = buildRuntime()
+    const first = makeWindow({ cls: 'app', caption: 'Doc', x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    rt.trackWindow(first)
+    quickRootOf(outputs[1]).tiles[0].manage(first)
+    first.emitClosed()
+    assert.equal(savedApp(rt, 'app').w[0].t.k, 'q', 'precondition: saved quick-tiled')
+    fakeWorkspace.screens = [outputs[0]]
+    try {
+        const w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+        w.emitClosed()
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    const [s] = savedApp(rt, 'app').d['desk-uuid-1'].w
+    assert.equal(s.o.n, 'HDMI-A-1', 'precondition: kept on its own monitor')
+    assert.ok(s.t && s.t.k === 'q' && s.f, 'still in its quick tile, with its pre-tile size: ' + JSON.stringify(s))
+})
+
+test('a window restored onto a fallback screen, left there after re-docking, keeps the docked save', () => {
+    const rt = buildRuntime()
+    saveOn(rt, 'app', 1, { x: 2100, y: 150, width: 900, height: 600, outputIndex: 1 })
+    fakeWorkspace.screens = [outputs[0]]
+    let w
+    try {
+        w = makeWindow({ cls: 'app', caption: 'Doc', x: 0, y: 0, width: 640, height: 480 })
+        rt.trackWindow(w)
+    } finally {
+        fakeWorkspace.screens = [outputs[0], outputs[1]]
+    }
+    // Docked again after the restore window: nothing moves the window to HDMI-A-1.
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.reapplyProvisional()
+    assert.equal(w.output.name, 'DP-1', 'precondition: still on the laptop screen')
+    w._setFrame({ x: 120, y: 160, width: 900, height: 600 })
+    w.emitClosed()
+    const saves = savedApp(rt, 'app').d['desk-uuid-1'].w
+    assert.ok(saves.some((s) => s.o.n === 'HDMI-A-1'), 'the monitor it never reached keeps its save: ' + JSON.stringify(saves.map((s) => s.o.n)))
+})
+
