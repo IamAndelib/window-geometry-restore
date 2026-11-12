@@ -20,6 +20,13 @@ needs on top.
   - check the change with a mutation: break it in a copy and confirm a test fails.
 - **When you add or remove a function in `main.qml`,** update `REQUIRED_FUNCTIONS` in
   `tests/lifecycle.mjs`. It lists them in file order.
+- **Types are a guardrail, keep them green** (`make test` type-checks first; `npm ci` once):
+  - give every new function JSDoc `@param`/`@returns`, and every new field its type in
+    `types/state.d.ts`;
+  - use a KWin member only if `types/kwin.d.ts` has it; to add one, check it in KWin's source
+    first;
+  - never silence an error with `any` or a cast to make it pass: fix the code, or cast only
+    what the code can't show, with a comment saying why.
 - **KWin behaviour:** check it in KWin's source for the version in the container (`dnf download
   --source kwin` there), not from memory. Record new facts in CONTRIBUTING.md.
 

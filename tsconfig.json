@@ -1,0 +1,23 @@
+{
+  // Type-checks the shipped JavaScript as it is (src/ stays plain JS/QML, nothing is emitted).
+  // tests/typecheck.mjs writes the checkable copy into build/typecheck/ and runs tsc on it.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "target": "es2017",
+    "lib": ["es2017"],
+    "module": "es2015",
+    "moduleResolution": "node",
+    "types": [],
+    "skipLibCheck": false
+  },
+  "files": [
+    "types/kwin.d.ts",
+    "types/state.d.ts",
+    "types/qml.d.ts",
+    "build/typecheck/engine.js",
+    "build/typecheck/main.js"
+  ]
+}

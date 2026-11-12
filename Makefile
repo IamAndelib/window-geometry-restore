@@ -11,8 +11,9 @@ $(PKGFILE): $(shell find $(SRC_DIR) -type f)
 	@rm -f $@
 	@zip -rq $@ $(SRC_DIR)
 
+# Type check first (tests/typecheck.mjs; needs `npm ci` once), then the unit tests.
 test:
-	node tests/engine.mjs && node tests/lifecycle.mjs
+	node tests/typecheck.mjs && node tests/engine.mjs && node tests/lifecycle.mjs
 
 # Scenarios against a real, headless KWin with virtual monitors (dev container only:
 # needs kwin, pywayland, gcc, wayland-devel, plasma-wayland-protocols-devel, qt6-qtbase-devel).
