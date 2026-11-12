@@ -116,7 +116,7 @@ New tests cover:
 - **When the tile is read.** The tile and the floating geometry are recorded while the window is open (`noteTile`/`noteGeometry`), not read at close.
 - **Quick-tile sizes are saved.** A quick tile saves its size too (`t.g`). Resizing a quick-tiled window moves the split that all quick tiles on that screen share. On close, KWin resets that split to 0.5 before scripts hear about the close, so the size is taken from what was recorded while the window was open. On restore, the split is written back through `tile.relativeGeometry`, and windows in the other quick tiles follow it.
 - **Quick tiles reuse a neighbour's layout first.** They go through the quick root of another window that is already quick-tiled on the same screen and desktop. Only without one does the script wait for activation and use KWin's quick-tile action. Both work without focusing the window.
-- **No focus within 10 s:** the window stays at its pre-tile size, not the tile rect.
+- **No focus within 10 s:** the window stays untiled at the tile rect (from 1.4.2; before, at its pre-tile size). Its pre-tile size is kept for the save.
 - **Wayland timing.** The pre-tile geometry is recorded when the script writes it, because its frame arrives after the window is tiled. A quick tile also waits for the window to reach its screen.
 
 **Confirmed in KWin 6.7.5's source (`src/tiles`, `window.cpp`):**

@@ -36,8 +36,8 @@ Item {
     // instance wrote in between, and saving skips reading it back.
     property string lastWritten: ''
     // Persisted: { apps: { cls: { lastAccess, saves, desktops: { desktopKey: { lastAccess, saves } } } } }.
-    // A desktop's layout keeps each monitor's part until the app's next close on that monitor,
-    // so a crash or power loss still restores the last layout.
+    // A desktop's layout keeps each monitor's part until the app's next close on that monitor
+    // (or of a window restored from it), so a crash or power loss still restores the last layout.
     property var store: Engine.newState()
     // Runtime, per group (an app on one desktop key, see desktopKeyOf) with open windows:
     // { key, cls, desktopKey, label, open: [ids], buffer: [closes], session, settled }
@@ -235,7 +235,7 @@ Item {
         var cls = predicted || named
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
-            assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, unmaximizedUntil: 0,
+            assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, placedFrom: null, unmaximizedUntil: 0,
             openedKey: named, openingCaption: caption, learnedAs: null, learnings: 0, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
@@ -383,6 +383,7 @@ Item {
         entry.cls = cls
         entry.resourceClass = resourceClass
         entry.restoredFrom = null
+        entry.placedFrom = null
         if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
             untrack(entry)
             dbg('window of ' + label + ' is now ' + cls + ', an excluded app: no longer tracked')
@@ -596,7 +597,16 @@ Item {
             var away = isAway(entry)
             var fields
             if (away) {
-                fields = copyGeometry(entry.home)
+                // KWin keeps a maximized window maximized on the screen it moves it to: its
+                // normal geometry at home is the one to save, as for any maximized window.
+                if (isMaximized(w) && !w.tile && entry.free && sameMonitor(entry.free.output, entry.home.output)) {
+                    fields = copyGeometry(entry.free)
+                    fields.maximized = w.maximizeMode
+                } else {
+                    fields = copyGeometry(entry.home)
+                    // A provisional placement: the save it came from, maximized or tiled.
+                    fields.maximized = entry.home.maximized || 0
+                }
                 dbg(entry.label + ': closed while its screen ' + entry.home.output.name + ' is missing, saved its place there')
             } else if (isMaximized(w) && !w.tile) {
                 // Saved as its normal geometry, to maximize it with again (see applyMaximized).
@@ -614,8 +624,8 @@ Item {
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
             if (w.tile && !current && !away) dbg(entry.label + ': closed in a tile that could not be identified')
-            fields.tile = entry.tile || current || waitingQuickTile(entry)
-            fields.free = fields.tile ? (away ? entry.free : onCurrentMonitor(entry.free, w)) : null
+            fields.tile = entry.tile || current || waitingQuickTile(entry) || (away && entry.home.tile) || null
+            fields.free = fields.tile ? (away ? (entry.home.tile ? entry.home.free : entry.free) : onCurrentMonitor(entry.free, w)) : null
             if (fields.tile) {
                 dbg(entry.label + ': closed in ' + fields.tile.kind + ' tile ' +
                     (fields.tile.kind === 'quick' ? fields.tile.index : '[' + fields.tile.path.join(',') + ']') +
@@ -648,7 +658,7 @@ Item {
             untrack(entry)
         }
         if (snap) {
-            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output })
+            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output, from: entry.placedFrom })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
         }
         var saved = finalizeLeftMonitors(group)
@@ -671,7 +681,8 @@ Item {
     }
 
     // The windows that closed together on one monitor (each within BURST_MS of the next) become
-    // that monitor's part of the app's layout on this desktop. Other monitors keep theirs.
+    // that monitor's part of the app's layout on this desktop. Other monitors keep theirs, except
+    // the saves these windows were restored from: a window moved here keeps no save where it left.
     function finalizeMonitor(group, monitor) {
         var closed = []
         var others = []
@@ -681,15 +692,28 @@ Item {
         group.buffer = others
         if (!closed.length) return false
         var saves = []
+        // The saves these windows were placed from: each is replaced by the window's new save.
+        // Only for closes kept here, or a window would lose its old save and its new one.
+        var replaced = []
         var last = closed[closed.length - 1].closeTime
         for (var j = closed.length - 1; j >= 0 && last - closed[j].closeTime <= Engine.BURST_MS; j--) {
             saves.unshift(closed[j].snap)
+            if (closed[j].from) replaced.push(closed[j].from)
             last = closed[j].closeTime
         }
         var layout = Engine.layoutFor(store, group.cls, group.desktopKey)
         var kept = []
         for (var k = 0; layout && k < layout.saves.length; k++) {
-            if (!sameMonitor(layout.saves[k].output, monitor)) kept.push(layout.saves[k])
+            var save = layout.saves[k]
+            if (sameMonitor(save.output, monitor)) continue
+            // By identity: the store keeps a layout's save objects while the script runs (recordLayout
+            // and the sessions reuse them). A monitor the app still has windows on keeps them until
+            // its own closes rewrite it, so a crash meanwhile loses nothing.
+            if (replaced.indexOf(save) !== -1 && !hasWindowOn(group, save.output)) {
+                dbg(group.label + ': dropped the save on ' + (save.output ? save.output.name : 'no screen') + ' of a window moved away from it')
+                continue
+            }
+            kept.push(save)
         }
         Engine.recordLayout(store, group.cls, group.desktopKey, kept.concat(saves), Date.now())
         log(group.label + ' closed' + (monitor ? ' on ' + monitor.name : '') + ', saved ' + saves.length + ' window(s)')
@@ -1030,7 +1054,10 @@ Item {
         var target = free && tiling.tile ? free : targetFor(w, save)
         if (!target) return false
         entry.provisional = target.provisional ? { save: save, until: until } : null
-        if (target.provisional) entry.home = copyGeometry(save)
+        if (target.provisional) entry.home = save // the whole save: maximized and tile included
+        // Placed on the save's own monitor: a close elsewhere takes this save along (issue #8).
+        // Not when its monitor is missing: the window didn't leave it, the script couldn't get there.
+        entry.placedFrom = target.provisional ? null : save
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)
@@ -1061,7 +1088,10 @@ Item {
         var target = targetFor(w, save)
         if (!target) return false
         entry.provisional = target.provisional ? { save: save, until: until } : null
-        if (target.provisional) entry.home = copyGeometry(save)
+        if (target.provisional) entry.home = save // the whole save: maximized and tile included
+        // Placed on the save's own monitor: a close elsewhere takes this save along (issue #8).
+        // Not when its monitor is missing: the window didn't leave it, the script couldn't get there.
+        entry.placedFrom = target.provisional ? null : save
         var r = target.rect
         if (w.maximizeMode) w.setMaximize(false, false)
         setGeometry(w, r) // onto its monitor: KWin maximizes the window where it is
