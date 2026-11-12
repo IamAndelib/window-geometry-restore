@@ -650,12 +650,12 @@ Item {
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
         // Nor a window taken for an app KWin hasn't confirmed: it may belong to another.
         // Nor a dialog without a parent (see matchFor): its place isn't the app's layout.
-        var awaitingRestore = !!entry.prediction || entry.dialog || (!!group.session && group.session.pending.indexOf(id) !== -1)
+        var skipSave = !!entry.prediction || entry.dialog || (!!group.session && group.session.pending.indexOf(id) !== -1)
         if (group.session) removeFromArray(group.session.pending, id)
         // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
         var snap = null
         try {
-            snap = awaitingRestore ? null : snapshotWindow(entry)
+            snap = skipSave ? null : snapshotWindow(entry)
         } finally {
             untrack(entry)
         }
@@ -759,6 +759,14 @@ Item {
         return a.name === b.name && a.serial === b.serial
     }
 
+    function hasAppWindow(group, exceptId) {
+        for (var i = 0; i < group.open.length; i++) {
+            var other = tracked[group.open[i]]
+            if (group.open[i] !== exceptId && other && !other.dialog) return true
+        }
+        return false
+    }
+
     // A dialog without a parent (see matchFor) doesn't count: the app's window still gets restored.
     function hasWindowOn(group, monitor, exceptId) {
         for (var i = 0; i < group.open.length; i++) {
@@ -810,9 +818,10 @@ Item {
     // A fresh start restores the app's whole layout on this desktop, each window back on its own
     // monitor. An app already running here restores a new window only from the layout of the
     // monitor KWin opened it on, and only if the app has no other window there.
+    // An app with only dialogs open (see matchFor) hasn't started yet: a fresh start.
     function startSessionFor(entry) {
         var group = live[entry.groupKey]
-        if (!group.settled) return startSession(group, null)
+        if (!group.settled || !hasAppWindow(group, entry.id)) return startSession(group, null)
         var monitor = monitorOf(entry)
         return !hasWindowOn(group, monitor, entry.id) && startSession(group, monitor)
     }
@@ -907,16 +916,19 @@ Item {
                 else candidates++
             }
         }
-        var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken, scores)
-        // Only the save left, with neither its title nor its size: not for a dialog-sized window.
-        // Gecko's primary-password prompt opens without a parent before the main window, and
-        // got the main window's maximized or tiled state, then saved it as the app's layout.
-        if (match && match.tier === 4 && Engine.isDialogSized(w.width, w.height, session.saves[match.index])) {
-            if (!entry.dialog) log(entry.label + ': "' + caption + '" is much smaller than the app\'s saved window, ' +
-                'taken for a dialog: left as it is, not saved')
+        // Not the app's window but a dialog shown without a parent (Engine.isDialog): Gecko's
+        // primary-password prompt opens that way before the main window, and took the main
+        // window's maximized or tiled state, then saved it as the app's layout.
+        var size = { width: Math.round(w.width), height: Math.round(w.height), minWidth: w.minSize ? Math.round(w.minSize.width) : 0 }
+        if (Engine.isDialog(size, session.saves, session.taken)) {
+            if (!entry.dialog) log(entry.label + ': "' + caption + '" is a dialog-sized window (much smaller than the ' +
+                'app\'s saved windows, at its minimum width): left as it is, not saved')
             entry.dialog = true
             return null
         }
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height }, taken, scores)
+        // A save after all (its title or size changed): the app's window.
+        if (match) entry.dialog = false
         // The other app's saves never arrive: one save left for this caption is a clear match.
         if (match) match.only = candidates === 1
         return match

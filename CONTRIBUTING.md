@@ -71,10 +71,10 @@ on, and how to test a change before it reaches anyone's desktop.
     opening two apps share is not guessed.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
     rest wait up to 10 s for the set to arrive.
-  - The last save left goes to the window even without its caption or size, except to a window
-    under half its width and height: that is a dialog shown without a parent (a startup
-    password prompt), which isn't restored, isn't saved, and doesn't count as the app being open
-    on its monitor (issue #3).
+  - A window at its minimum width (sized to its content) and under half the width and height of
+    every save it could take is a dialog shown without a parent (a startup password prompt,
+    `Engine.isDialog`): it isn't restored, isn't saved, and doesn't count as the app being
+    open (on its monitor, or at all for a fresh start) (issue #3).
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     geometry for a drag out of the tile. A quick tile that waits for the window to become
     active waits at the tile's rect instead; the pre-tile geometry is written just before the

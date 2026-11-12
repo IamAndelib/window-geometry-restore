@@ -192,11 +192,25 @@ function bestMatch(saves, live, taken, scores) {
     return best
 }
 
-// A window less than half a save's width and height: a dialog the app shows without a parent
-// (a password prompt or profile chooser at startup), which KWin can't tell from the app's
-// window on Wayland, not the window that save belongs to (issue #3).
+// A window less than half a save's width and height.
 function isDialogSized(width, height, save) {
     return width < save.width / 2 && height < save.height / 2
+}
+
+// A dialog the app shows without a parent (a password prompt or profile chooser at startup):
+// on Wayland KWin can't tell it from the app's window (issue #3). Taken for one: a window at its
+// minimum width (sized to its content, as dialogs open; an app's window opens at its default
+// size) and under half the size of every save it could take. `win`: { width, height, minWidth }.
+var DIALOG_MIN_WIDTH_SLACK = 32
+function isDialog(win, saves, taken) {
+    if (!(win.minWidth > 0) || win.width > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
+    var free = 0
+    for (var i = 0; i < saves.length; i++) {
+        if (taken[i]) continue
+        if (!isDialogSized(win.width, win.height, saves[i])) return false
+        free++
+    }
+    return free > 0
 }
 
 function makeSave(fields) {

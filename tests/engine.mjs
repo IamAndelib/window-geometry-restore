@@ -119,6 +119,17 @@ test('isDialogSized: under half the save in both directions', () => {
     assert.equal(engine.isDialogSized(500, 325, save), false)
 })
 
+test('isDialog: at its minimum width and under half of every save it could take', () => {
+    const saves = [{ width: 1000, height: 650 }, { width: 1200, height: 800 }]
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 425 }, saves, []), true, 'Thunderbird\'s password prompt')
+    assert.equal(engine.isDialog({ width: 440, height: 300, minWidth: 440 }, saves, []), true, 'its profile chooser')
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 200 }, saves, []), false, 'above its minimum: an app\'s window')
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 0 }, saves, []), false, 'no minimum known')
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 425 }, [{ width: 600, height: 300 }], []), false, 'a small save')
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 425 }, [{ width: 600, height: 300 }, saves[0]], [true]), true, 'only free saves count')
+    assert.equal(engine.isDialog({ width: 426, height: 183, minWidth: 425 }, saves, [true, true]), false, 'none free')
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)

@@ -5,7 +5,7 @@ Notable changes to Window Geometry Restore. Each release's GitHub notes are publ
 ## [Unreleased]
 
 **Fixes**
-- **A password prompt no longer opens fullscreen or half-screen** ([#3](https://github.com/IamAndelib/window-geometry-restore/issues/3)). Thunderbird and Betterbird ask for the primary password at startup in a window without a parent, before their main window, and on Wayland KWin can't tell such a dialog from the main window. It got the main window's saved state, maximized or tiled, and its close then replaced the main window's layout. A window under half the size of the app's saved window in both directions, matching it by neither title nor size, is now taken for a dialog: left as it is, not saved, and the main window still comes back as saved. The same holds for other dialogs shown without a parent before the main window, such as Thunderbird's profile chooser.
+- **A password prompt no longer opens fullscreen or half-screen** ([#3](https://github.com/IamAndelib/window-geometry-restore/issues/3)). Thunderbird and Betterbird ask for the primary password at startup in a window without a parent, before their main window, and on Wayland KWin can't tell such a dialog from the main window. It got the main window's saved state, maximized or tiled, and its close then replaced the main window's layout. A window at its minimum width (sized to its content, as dialogs are) and under half the size of the app's saved windows in both directions is now taken for a dialog: left as it is, not saved, and the main window still comes back as saved, beside it or after it. The same holds for Thunderbird's profile chooser and other dialogs shown without a parent before the main window.
 
 ## [1.4.3] - 2026-11-12
 
