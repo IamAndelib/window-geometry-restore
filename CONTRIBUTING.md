@@ -71,6 +71,11 @@ on, and how to test a change before it reaches anyone's desktop.
     opening two apps share is not guessed.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
     rest wait up to 10 s for the set to arrive.
+  - A window at its minimum width (sized to its content) and under half the width and height of
+    every save it could take is a dialog shown without a parent (a startup password prompt,
+    `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
+    isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
+    start), until it grows out of it (noteGeometry) (issue #3).
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     geometry for a drag out of the tile. A quick tile that waits for the window to become
     active waits at the tile's rect instead; the pre-tile geometry is written just before the
@@ -114,6 +119,12 @@ on, and how to test a change before it reaches anyone's desktop.
     later, so its desktop file name arrives after `windowAdded`: the script follows
     `desktopFileNameChanged`. On X11 the name comes from
   `_KDE_NET_WM_DESKTOP_FILE`, `_GTK_APPLICATION_ID`, or a desktop file's `StartupWMClass`.
+- **Dialogs without a parent are ordinary windows** (6.8.2): an xdg toplevel is
+  `WindowType::Normal` unless a Plasma shell role says otherwise (`xdgshellwindow.h`),
+  `transient` only with a parent (`handleTransientForChanged`), and `modal` only through
+  xdg-dialog-v1, which GTK3 (Firefox, Thunderbird, Betterbird) doesn't use. Thunderbird's
+  primary-password prompt at startup and its profile chooser open that way, before the main
+  window; the same prompt shown later has the main window as its parent.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences
   it doesn't know.

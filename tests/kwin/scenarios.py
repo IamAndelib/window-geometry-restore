@@ -770,6 +770,49 @@ def s_slow_rename_confirmed():
         check(seen[-1] == ((1000, 300, 700, 500), 0) and all(m == 0 for _, m in seen), "placed once, never moved again: %s" % seen)
 
 
+# ---- dialogs without a parent ----------------------------------------------------
+
+# Thunderbird/Betterbird ask for the primary password at startup in a window with no parent
+# and no xdg-dialog: to KWin and scripts an ordinary window, opened before the main window.
+# Measured with Thunderbird 158: 426x183 (issue #3).
+MAIL = "org.example.mail"
+
+
+def s_dialog_before_maximized_main_window():
+    """The main window saved maximized; a password prompt opens first: it stays a small
+    dialog, its close saves nothing, and the main window comes back maximized."""
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app(MAIL, "Inbox", size=(1000, 650))
+        sb.probe("win('Inbox').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        check(sb.window("Inbox")["maximized"] == 3, "precondition: maximized")
+        a.close()
+        d = sb.open_app(MAIL, "Password Required", size=(426, 150), dialog=True)
+        w = sb.window("Password Required")
+        check(w["maximized"] == 0 and rect(w)[2] < 500, "the prompt stays a dialog: %s" % w)
+        check(logged(sb.script_log(), "is a dialog-sized window"), "logged")
+        d.close()
+        sb.open_app(MAIL, "Inbox", size=(800, 500))
+        check(sb.window("Inbox")["maximized"] == 3, "the main window maximized again: %s" % sb.window("Inbox"))
+
+
+def s_dialog_before_tiled_main_window():
+    """The main window saved in the left quick tile; the prompt opens first and gets focus:
+    not tiled. The main window, opened while the prompt is still up, gets its tile."""
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app(MAIL, "Inbox", size=(1000, 650))
+        tile_left_at(sb, "Inbox", 0.5)
+        a.close()
+        sb.open_app(MAIL, "Password Required", size=(426, 150), dialog=True)
+        sb.settle(0.5)
+        w = sb.window("Password Required")
+        check(w["tile"] is None and rect(w)[2] < 500, "the prompt is not tiled: %s" % w)
+        sb.open_app(MAIL, "Inbox", size=(800, 500))
+        sb.activate("Inbox")
+        sb.wait(lambda: sb.window("Inbox")["tile"] is not None, 5, "the main window tiled")
+        check(sb.window("Inbox")["tile"]["quick"], "in its quick tile: %s" % sb.window("Inbox"))
+
+
 # ---- monitors ----------------------------------------------------------------------
 
 def s_late_monitor():
@@ -1108,6 +1151,8 @@ SCENARIOS = [
     s_wrong_guess_left_alone,
     s_two_web_apps_same_opening,
     s_slow_rename_confirmed,
+    s_dialog_before_maximized_main_window,
+    s_dialog_before_tiled_main_window,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

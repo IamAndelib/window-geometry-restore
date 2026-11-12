@@ -110,6 +110,28 @@ test('learned-only and empty apps are pruned before apps with layouts', () => {
     assert.equal(Object.keys(state.apps).length, engine.MAX_APPS)
 })
 
+test('isDialogSized: under half the save in both directions', () => {
+    const save = { width: 1000, height: 650 }
+    assert.equal(engine.isDialogSized(426, 183, save), true, 'Thunderbird\'s password prompt')
+    assert.equal(engine.isDialogSized(600, 400, save), false)
+    assert.equal(engine.isDialogSized(426, 400, save), false, 'one direction is not enough')
+    assert.equal(engine.isDialogSized(499, 324, save), true)
+    assert.equal(engine.isDialogSized(500, 325, save), false)
+})
+
+test('isDialog: at its minimum width and under half of every save it could take', () => {
+    const saves = [{ width: 1000, height: 650 }, { width: 1200, height: 800 }]
+    const win = (width, height, minWidth, clientWidth = width) => ({ width, height, clientWidth, minWidth })
+    assert.equal(engine.isDialog(win(426, 183, 425), saves, []), true, 'Thunderbird\'s password prompt')
+    assert.equal(engine.isDialog(win(440, 300, 440), saves, []), true, 'its profile chooser')
+    assert.equal(engine.isDialog(win(486, 220, 425, 426), saves, []), true, 'with wide decoration borders: the client width counts')
+    assert.equal(engine.isDialog(win(426, 183, 200), saves, []), false, 'above its minimum: an app\'s window')
+    assert.equal(engine.isDialog(win(426, 183, 0), saves, []), false, 'no minimum known')
+    assert.equal(engine.isDialog(win(426, 183, 425), [{ width: 600, height: 300 }], []), false, 'a small save')
+    assert.equal(engine.isDialog(win(426, 183, 425), [{ width: 600, height: 300 }, saves[0]], [true]), true, 'only free saves count')
+    assert.equal(engine.isDialog(win(426, 183, 425), saves, [true, true]), false, 'none free')
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)

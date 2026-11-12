@@ -417,11 +417,11 @@ class Sandbox:
 
     # ---- apps -------------------------------------------------------------
 
-    def open_app(self, app_id, title, size=(800, 500), fixed=False, maximized=False, settle=0.8, first_title=None, retitle_ms=None):
+    def open_app(self, app_id, title, size=(800, 500), fixed=False, maximized=False, settle=0.8, first_title=None, retitle_ms=None, dialog=False):
         """Start an app; KWin places its window, and the script may restore it. With
         `first_title`, the window is shown with that title and renamed to `title` after it
         (after `retitle_ms`, 300 ms by default)."""
-        args = [str(self.testwindow), app_id, first_title or title, "%dx%d" % size] + (["fixed"] if fixed else []) + (["maximized"] if maximized else [])
+        args = [str(self.testwindow), app_id, first_title or title, "%dx%d" % size] + (["fixed"] if fixed else []) + (["dialog"] if dialog else []) + (["maximized"] if maximized else [])
         if first_title:
             args.append("retitle=" + title)
         if retitle_ms:

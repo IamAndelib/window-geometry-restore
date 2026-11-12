@@ -80,6 +80,8 @@ Three settings (⚙ next to the script in KWin Scripts):
 
 ## Troubleshooting
 
+**A dialog opened before the app's window.** On Wayland, a dialog an app shows without a parent (Thunderbird's password prompt at startup) looks to KWin like an app window. The script leaves a window alone, and doesn't save it, if it opens at its minimum width and is under half the size of the app's saved windows both ways. A dialog that is bigger than that, compared with a small saved window, can still be given the window's layout. With nothing saved yet (the app's first launch, or its first on a virtual desktop), there is nothing to compare with: the prompt's place can be saved, and the main window opens there once; its next close puts things right.
+
 ```
 journalctl --user -f | grep -i windowgeometryrestore
 ```
