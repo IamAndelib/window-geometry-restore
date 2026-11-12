@@ -3437,3 +3437,93 @@ test('a window restored onto a fallback screen, left there after re-docking, kee
     assert.ok(saves.some((s) => s.o.n === 'HDMI-A-1'), 'the monitor it never reached keeps its save: ' + JSON.stringify(saves.map((s) => s.o.n)))
 })
 
+
+// --- A dialog the app shows without a parent before its main window (issue #3) ---
+// Measured with Thunderbird 158 on KWin 6.8.2: its primary-password prompt opens as an ordinary
+// window (no parent, not modal) of 426x183, before the main window.
+
+const prompt = (rt, fields = {}) => {
+    const w = makeWindow({ cls: 'mail', caption: 'Password Required - Mail', x: 747, y: 448, width: 426, height: 183, ...fields })
+    rt.trackWindow(w)
+    return w
+}
+const mainWindow = (rt) => {
+    const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 100, y: 100, width: 900, height: 600 })
+    rt.trackWindow(w)
+    return w
+}
+
+test('a dialog-sized window opening first doesn\'t get the main window\'s maximized state, nor overwrite it', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'mail')
+    const dialog = prompt(rt)
+    assert.deepEqual([dialog.x, dialog.y, dialog.width, dialog.height, dialog.maximizeMode], [747, 448, 426, 183, 0], 'left as KWin opened it')
+    assert.equal(dialog._geometryWrites + dialog._maximizeCalls, 0)
+    assert.ok(rt.getLogs().some((l) => l.includes('taken for a dialog')))
+    dialog._emit('interactiveMoveResizeStarted') // even moved by the user
+    dialog._setFrame({ x: 10, y: 10, width: 426, height: 183 })
+    dialog.emitClosed()
+    const save = savedApp(rt, 'mail').d['desk-uuid-1'].w[0]
+    assert.deepEqual([save.c, save.max, save.w], ['Doc', 3, 1000], 'the main window\'s layout is intact')
+    const main = mainWindow(rt)
+    assert.equal(main.maximizeMode, 3, 'the main window comes back maximized')
+})
+
+test('a dialog-sized window doesn\'t take the main window\'s quick tile', () => {
+    const rt = buildRuntime()
+    saveTiled(rt, 'mail', makeQuickRoot(outputs[0]).tiles[0])
+    const dialog = prompt(rt)
+    dialog._activate()
+    assert.equal(dialog.tile, null)
+    assert.deepEqual([dialog.width, dialog.height], [426, 183])
+    dialog.emitClosed()
+    const main = mainWindow(rt)
+    main._activate()
+    assert.equal(main.tile, quickRootOf(outputs[0]).tiles[0], 'the main window gets its tile')
+})
+
+test('the main window is restored while the dialog is still open, or after its restore window ran out', () => {
+    for (const late of [false, true]) {
+        const rt = buildRuntime()
+        saveMaximized(rt, 'mail')
+        const dialog = prompt(rt)
+        if (late) {
+            advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+            rt.tick()
+        }
+        const main = mainWindow(rt)
+        assert.equal(main.maximizeMode, 3, late ? 'after the restore window: the dialog doesn\'t count as the app being open' : 'beside the dialog')
+        assert.equal(dialog.maximizeMode, 0)
+    }
+})
+
+test('a main window opening smaller than saved, with another title, is still restored', () => {
+    const rt = buildRuntime()
+    saveMaximized(rt, 'mail')
+    const w = makeWindow({ cls: 'mail', caption: 'Something else', x: 100, y: 100, width: 600, height: 400 })
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 3, '600x400 against 1000x650 is not dialog-sized')
+})
+
+test('a small window whose size matches its save is restored as usual', () => {
+    const rt = buildRuntime()
+    const first = makeWindow({ cls: 'calc', caption: 'Calculator', x: 900, y: 300, width: 400, height: 300 })
+    rt.trackWindow(first)
+    first.emitClosed()
+    const w = makeWindow({ cls: 'calc', caption: 'Calculator - 12', x: 0, y: 0, width: 400, height: 300 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [900, 300])
+})
+
+test('a window taken for a dialog that KWin names as another app is that app\'s window again', () => {
+    const rt = buildRuntime(savedLayouts({ 'mail.other': [{ c: 'Other', x: 50, y: 60, w: 426, h: 183, o: null }] }))
+    saveMaximized(rt, 'mail')
+    const w = prompt(rt)
+    assert.ok(rt.trackedRef()[w.internalId].dialog, 'precondition: taken for a dialog')
+    renameTo(w, 'mail.other', 'Other')
+    assert.deepEqual([w.x, w.y], [50, 60], 'restored as its new app')
+    w._emit('interactiveMoveResizeStarted')
+    w._setFrame({ x: 70, y: 80, width: 426, height: 183 })
+    w.emitClosed()
+    assert.ok(savedApp(rt, 'mail.other').d['desk-uuid-1'].w.some((s) => s.x === 70 && s.y === 80), 'and its close saved')
+})

@@ -110,6 +110,15 @@ test('learned-only and empty apps are pruned before apps with layouts', () => {
     assert.equal(Object.keys(state.apps).length, engine.MAX_APPS)
 })
 
+test('isDialogSized: under half the save in both directions', () => {
+    const save = { width: 1000, height: 650 }
+    assert.equal(engine.isDialogSized(426, 183, save), true, 'Thunderbird\'s password prompt')
+    assert.equal(engine.isDialogSized(600, 400, save), false)
+    assert.equal(engine.isDialogSized(426, 400, save), false, 'one direction is not enough')
+    assert.equal(engine.isDialogSized(499, 324, save), true)
+    assert.equal(engine.isDialogSized(500, 325, save), false)
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)

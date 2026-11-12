@@ -235,7 +235,7 @@ Item {
         var cls = predicted || named
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
-            assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, placedFrom: null, unmaximizedUntil: 0,
+            assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(), restoredFrom: null, placedFrom: null, dialog: false, unmaximizedUntil: 0,
             openedKey: named, openingCaption: caption, learnedAs: null, learnings: 0, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
@@ -384,6 +384,7 @@ Item {
         entry.resourceClass = resourceClass
         entry.restoredFrom = null
         entry.placedFrom = null
+        entry.dialog = false
         if (Engine.isListed(cls, excluded) || Engine.isListed(resourceClass, excluded)) {
             untrack(entry)
             dbg('window of ' + label + ' is now ' + cls + ', an excluded app: no longer tracked')
@@ -648,7 +649,8 @@ Item {
         removeFromArray(group.open, id)
         // A window still awaiting its restore shows the app's default placement, not the user's layout.
         // Nor a window taken for an app KWin hasn't confirmed: it may belong to another.
-        var awaitingRestore = !!entry.prediction || (!!group.session && group.session.pending.indexOf(id) !== -1)
+        // Nor a dialog without a parent (see matchFor): its place isn't the app's layout.
+        var awaitingRestore = !!entry.prediction || entry.dialog || (!!group.session && group.session.pending.indexOf(id) !== -1)
         if (group.session) removeFromArray(group.session.pending, id)
         // Snapshot first: untrack() drops what the window was still waiting for (its quick tile).
         var snap = null
@@ -757,10 +759,11 @@ Item {
         return a.name === b.name && a.serial === b.serial
     }
 
+    // A dialog without a parent (see matchFor) doesn't count: the app's window still gets restored.
     function hasWindowOn(group, monitor, exceptId) {
         for (var i = 0; i < group.open.length; i++) {
             var other = tracked[group.open[i]]
-            if (group.open[i] !== exceptId && other && sameMonitor(monitorOf(other), monitor)) return true
+            if (group.open[i] !== exceptId && other && !other.dialog && sameMonitor(monitorOf(other), monitor)) return true
         }
         return false
     }
@@ -905,6 +908,15 @@ Item {
             }
         }
         var match = Engine.bestMatch(session.saves, { caption: caption, width: Math.round(w.width), height: Math.round(w.height) }, taken, scores)
+        // Only the save left, with neither its title nor its size: not for a dialog-sized window.
+        // Gecko's primary-password prompt opens without a parent before the main window, and
+        // got the main window's maximized or tiled state, then saved it as the app's layout.
+        if (match && match.tier === 4 && Engine.isDialogSized(w.width, w.height, session.saves[match.index])) {
+            if (!entry.dialog) log(entry.label + ': "' + caption + '" is much smaller than the app\'s saved window, ' +
+                'taken for a dialog: left as it is, not saved')
+            entry.dialog = true
+            return null
+        }
         // The other app's saves never arrive: one save left for this caption is a clear match.
         if (match) match.only = candidates === 1
         return match
