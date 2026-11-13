@@ -204,6 +204,7 @@ function isBetterMatch(a, b) {
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
+// Equal matches go to the save closed last (saves are in close order).
 // Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
@@ -224,7 +225,7 @@ function bestMatch(saves, live, taken, scores) {
     var best = null
     var free = -1
     var freeCount = 0
-    for (var i = 0; i < saves.length; i++) {
+    for (var i = saves.length - 1; i >= 0; i--) {
         if (taken[i]) continue
         free = i
         freeCount++

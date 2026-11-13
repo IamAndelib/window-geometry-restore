@@ -70,7 +70,7 @@ on, and how to test a change before it reaches anyone's desktop.
     guess; without it within 10 s the window becomes its old app's again, where it is. An
     opening two apps share is not guessed.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
-    rest wait up to 10 s for the set to arrive.
+    rest wait up to 10 s for the set to arrive. Equal matches go to the save closed last.
   - A window at its minimum width (sized to its content) and under half the width and height of
     every save it could take is a dialog shown without a parent (a startup password prompt,
     `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,

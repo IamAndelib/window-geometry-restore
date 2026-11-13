@@ -178,6 +178,12 @@ test('bestMatch: prefers higher tier, then dims, then score', () => {
     assert.equal(m.tier, 2)
 })
 
+test('bestMatch: equal matches go to the save closed last, the end of the list', () => {
+    const saves = [save(), save(), save({ caption: 'Other', width: 1, height: 1 })]
+    assert.equal(engine.bestMatch(saves, live(), []).index, 1)
+    assert.equal(engine.bestMatch(saves, live(), [false, true]).index, 0, 'then the one closed before')
+})
+
 test('isBetterMatch: tier, then dims, then score', () => {
     assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0 }, { tier: 2, dims: 2, score: 100 }), true)
     assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 0, score: 99 }), true)
