@@ -2106,6 +2106,25 @@ test('a monitor the app opened no window on this time keeps its part of the layo
     assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Left', 'DP-1'], ['Right', 'HDMI-A-1']])
 })
 
+test('one window of an app saved alike on two monitors reopens where it was closed last, every time', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'dolphin', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Home')
+    const right = onMonitor(rt, 'dolphin', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'Home')
+    left.emitClosed()
+    advanceClock(rt, 5000)
+    right.emitClosed()
+    for (let i = 0; i < 3; i++) {
+        advanceClock(rt, 5000)
+        const w = onMonitor(rt, 'dolphin', 0, { x: 400, y: 300, width: 960, height: 635 }, 'Home')
+        assert.deepEqual([w.x, w.y], [2100, 150], `opening ${i + 1}: back on HDMI-A-1, where it was closed`)
+        w._output = outputs[1] // KWin follows the move
+        advanceClock(rt, 2000)
+        w.emitClosed()
+    }
+    const saved = savedApp(rt, 'dolphin').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => s.o.n).sort(), ['DP-1', 'HDMI-A-1'], 'a second window still has DP-1 to go to')
+})
+
 test('one of two windows moved to another monitor takes only its own save along', () => {
     const rt = buildRuntime()
     const one = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Doc')
