@@ -997,8 +997,8 @@ def s_single_window_reopens_where_closed_last():
                   "opening %d: back on monitor 2, where it was closed: %s on %s" % (i + 1, rect(w), w["output"]))
             c.close()
         saved = sb.saved()["apps"]["org.example.files"]
-        outputs = sorted(s["o"]["n"] for layout in saved["d"].values() for s in layout["w"])
-        check(outputs == ["Virtual-0", "Virtual-1"], "monitor 1 keeps its save: %s" % outputs)
+        saves = sorted((s["o"]["n"], s["x"], s["y"]) for layout in saved["d"].values() for s in layout["w"])
+        check(saves == [("Virtual-0", 200, 150), ("Virtual-1", 2300, 250)], "monitor 1 keeps its own save: %s" % saves)
 
 
 def s_undock_two_of_three_monitors():
@@ -1077,6 +1077,9 @@ def s_rapid_open_close():
     with sandbox(outputs=2) as sb:
         for i in range(20):
             a = sb.open_app("org.example.rapid", "Rapid", settle=0.15)
+            if i:  # restored to the last place: wait for it, so the drag starts on the title bar
+                last = (100 + 37 * (i - 1), 80 + 23 * (i - 1))
+                sb.wait(lambda: rect(sb.window("Rapid"))[:2] == last, 3, "the restore to %s" % (last,))
             w = sb.window("Rapid")
             x, y = titlebar(w)
             target = (100 + 37 * i, 80 + 23 * i)

@@ -2122,7 +2122,33 @@ test('one window of an app saved alike on two monitors reopens where it was clos
         w.emitClosed()
     }
     const saved = savedApp(rt, 'dolphin').d['desk-uuid-1'].w
-    assert.deepEqual(saved.map((s) => s.o.n).sort(), ['DP-1', 'HDMI-A-1'], 'a second window still has DP-1 to go to')
+    assert.deepEqual(saved.map((s) => [s.o.n, s.x, s.y]).sort(), [['DP-1', 100, 100], ['HDMI-A-1', 2100, 150]],
+        'a second window still has DP-1\'s own save to go to')
+    assert.equal(saved[saved.length - 1].o.n, 'HDMI-A-1', 'the save closed last is last in the layout')
+})
+
+// The order bestMatch's tie-break relies on: a layout lists its saves in close order, the save
+// closed last at the end (finalizeMonitor appends the closing monitor's part after the others').
+test('a layout keeps its saves in close order, across monitors and closes', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'A')
+    const b = onMonitor(rt, 'files', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'B')
+    const c = onMonitor(rt, 'files', 0, { x: 300, y: 200, width: 960, height: 635 }, 'C')
+    closeAll(a, c) // DP-1's part: A then C, one burst
+    advanceClock(rt, 5000)
+    b.emitClosed() // then HDMI-A-1's
+    const order = () => savedApp(rt, 'files').d['desk-uuid-1'].w.map((s) => s.c)
+    assert.deepEqual(order(), ['A', 'C', 'B'])
+    const again = onMonitor(rt, 'files', 0, { x: 0, y: 0, width: 500, height: 400 }, 'D')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    again._output = outputs[0]
+    again._setFrame({ x: 50, y: 60, width: 500, height: 400 })
+    again.emitClosed() // DP-1's part rewritten: it moves to the end, after HDMI-A-1's
+    assert.deepEqual(order(), ['B', 'D'])
+    const reloaded = buildRuntime(rt.blobRef())
+    reloaded.persist()
+    assert.deepEqual(JSON.parse(reloaded.blobRef()).apps.files.d['desk-uuid-1'].w.map((s) => s.c), ['B', 'D'], 'kept through saving and loading')
 })
 
 test('one of two windows moved to another monitor takes only its own save along', () => {

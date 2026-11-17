@@ -33,7 +33,9 @@ interface Save extends Geometry {
 /** What Engine.makeSave is built from. */
 type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number }
 
-/** An app's windows on one desktop. */
+/** An app's windows on one desktop. `saves` are in close order, the save closed last at the end:
+ *  finalizeMonitor appends the closing monitor's part after the others' (kept in their order).
+ *  Engine.bestMatch gives ties to the save closed last, so keep that order. */
 interface Layout { lastAccess: number; saves: Save[] }
 
 /** How an app's windows open before KWin names them: as app `cls`, titled `caption`. */

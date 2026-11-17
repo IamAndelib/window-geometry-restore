@@ -204,7 +204,10 @@ function isBetterMatch(a, b) {
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
-// Equal matches go to the save closed last (saves are in close order).
+// Equal matches go to the save closed last: a layout lists its saves in close order (see Layout
+// in types/state.d.ts). Alike windows (same title once digits are dropped, same size) can't be
+// told apart, so which takes which save among them is a guess either way; this one keeps a
+// single window on the monitor it was closed on.
 // Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
