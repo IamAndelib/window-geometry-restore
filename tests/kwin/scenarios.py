@@ -975,6 +975,32 @@ def s_used_undocked_keeps_docked_layout():
         check(outputs == ["Virtual-0", "Virtual-1"], "both monitors' saves kept: %s" % outputs)
 
 
+def s_single_window_reopens_where_closed_last():
+    """Two alike windows (same title once digits are ignored, same size), one on each monitor,
+    closed one after the other. One window opened again, three times: it comes back on the
+    monitor where it was closed last each time, instead of alternating (PR #14). The other
+    monitor keeps its save, for a second window."""
+    with sandbox(outputs=2) as sb:
+        a = sb.open_app("org.example.files", "Home 1")
+        move_to(sb, "Home 1", 200, 150)
+        b = sb.open_app("org.example.files", "Home 2")
+        move_to(sb, "Home 2", 2300, 250)
+        check(sb.window("Home 2")["output"] == "Virtual-1", "precondition: one on each monitor")
+        a.close()
+        sb.settle(2.0)  # longer than BURST_MS: two separate closes
+        b.close()
+        for i in range(3):
+            sb.pointer.move(400, 400)  # KWin opens it on monitor 1
+            c = sb.open_app("org.example.files", "Home 1")
+            w = sb.window("Home 1")
+            check(w["output"] == "Virtual-1" and rect(w)[:2] == (2300, 250),
+                  "opening %d: back on monitor 2, where it was closed: %s on %s" % (i + 1, rect(w), w["output"]))
+            c.close()
+        saved = sb.saved()["apps"]["org.example.files"]
+        outputs = sorted(s["o"]["n"] for layout in saved["d"].values() for s in layout["w"])
+        check(outputs == ["Virtual-0", "Virtual-1"], "monitor 1 keeps its save: %s" % outputs)
+
+
 def s_undock_two_of_three_monitors():
     """Three monitors, the app open on each; monitors 2 and 3 go at once (undocking), the
     parked windows close at different times; docked again, each window returns to its monitor."""
@@ -1045,11 +1071,17 @@ def s_logout_two_monitors_two_desktops():
 
 
 def s_rapid_open_close():
-    """Twenty quick open/move/close cycles: the last place wins, nothing breaks."""
+    """Twenty quick open/move/close cycles: the last place wins, nothing breaks. The user drags
+    the window: a script write right after the restore would be undone by the restore's own
+    retries, which only a user's move cancels."""
     with sandbox(outputs=2) as sb:
         for i in range(20):
             a = sb.open_app("org.example.rapid", "Rapid", settle=0.15)
-            move_to(sb, "Rapid", 100 + 37 * i, 80 + 23 * i)
+            w = sb.window("Rapid")
+            x, y = titlebar(w)
+            target = (100 + 37 * i, 80 + 23 * i)
+            sb.drag((x, y), (x + target[0] - rect(w)[0], y + target[1] - rect(w)[1]))
+            sb.wait(lambda: rect(sb.window("Rapid"))[:2] == target, 3, "the drag to %s" % (target,))
             a.close()
         sb.open_app("org.example.rapid", "Rapid")
         check(rect(sb.window("Rapid"))[:2] == (100 + 37 * 19, 80 + 23 * 19), "the last place: %s" % (rect(sb.window("Rapid")),))
@@ -1073,13 +1105,15 @@ def s_desktops_times_monitors():
     """One app with its own layout on each desktop and monitor: each combination comes back."""
     with sandbox(outputs=2, desktops=2) as sb:
         spots = {(0, 0): (200, 150), (0, 1): (2300, 250), (1, 0): (600, 350), (1, 1): (2700, 450)}
+        # Titles that differ in more than digits: digits don't count in matching ("(3) Inbox").
+        name = lambda desk, mon: "Grid %s %s" % ("AB"[desk], "LR"[mon])
         # Both windows of a desktop are open at once: a window restored from one monitor's save
         # and moved to the other would take that save along.
         for desk in (0, 1):
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
             apps = []
             for mon in (0, 1):
-                title = "D%d M%d" % (desk, mon)
+                title = name(desk, mon)
                 apps.append(sb.open_app("org.example.grid", title))
                 move_to(sb, title, *spots[(desk, mon)])
             for a in apps:
@@ -1087,7 +1121,7 @@ def s_desktops_times_monitors():
         for (desk, mon), spot in spots.items():
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
             sb.pointer.move(400 + 1920 * mon, 400)
-            title = "D%d M%d" % (desk, mon)
+            title = name(desk, mon)
             a = sb.open_app("org.example.grid", title)
             w = sb.window(title)
             check(rect(w)[:2] == spot and w["desktops"] == [desk + 1], "%s: %s on %s" % (title, rect(w), w["desktops"]))
@@ -1159,6 +1193,7 @@ SCENARIOS = [
     s_new_window_beside_open_one_left_alone,
     s_fresh_start_both_monitors,
     s_moved_to_other_monitor,
+    s_single_window_reopens_where_closed_last,
     s_used_undocked_keeps_docked_layout,
     s_maximized_on_unplugged_monitor,
     s_undock_two_of_three_monitors,

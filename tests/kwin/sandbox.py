@@ -433,9 +433,17 @@ class Sandbox:
         return App(self, title, p)
 
     def set_geometry(self, title, x, y, w, h):
-        """Put a window somewhere, as the user would by moving and resizing it."""
+        """Put a window somewhere, as the user would by moving and resizing it. On Wayland the
+        frame moves only once the app acknowledges, so this waits for it (up to 2 s; a window
+        rule or the app may refuse, which some scenarios check)."""
         self.probe("win(%s).frameGeometry = {x:%d,y:%d,width:%d,height:%d}; return 1"
                    % (json.dumps(title), x, y, w, h))
+        end = time.time() + 2
+        while time.time() < end:
+            win = self.window(title)
+            if win and (win["geo"]["x"], win["geo"]["y"], win["geo"]["w"], win["geo"]["h"]) == (x, y, w, h):
+                break
+            time.sleep(0.05)
         self.settle(0.3)
 
     def activate(self, title):

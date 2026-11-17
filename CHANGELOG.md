@@ -2,6 +2,15 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.5] - 2026-11-18
+
+**Fixes**
+- **A single window no longer alternates between monitors** ([#14](https://github.com/IamAndelib/window-geometry-restore/pull/14), fix by @stasadev). With an app's windows closed on two monitors, alike (same title and size), opening one window again took the save closed first, and closing it there made that one the newest: every launch it switched monitors. Equal matches now go to the save closed last, so it reopens where it was closed. A better title or size match still wins, and the other monitor keeps its save for a second window.
+
+**Under the hood**
+- Type checking: `make test` and CI now type-check the shipped JavaScript first (TypeScript, strict), against types for KWin's API and the script's data. Nothing is compiled or shipped differently.
+- Real-KWin scenarios: one for this fix (fails with 1.4.4). Two scenarios relied on chance and are now deterministic: one used window titles that differ only in digits (which matching ignores), one moved windows by script where the user drags them.
+
 ## [1.4.4] - 2026-11-12
 
 **Fixes**
