@@ -676,3 +676,42 @@ test('System Settings is not excluded by default: it is an ordinary app window',
     const list = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
     assert.ok(!engine.isListed('systemsettings', engine.parseList(list.replace(/['\s]/g, '').split(',').join('\n'))))
 })
+
+test('keepsPlacement: the maximize mode and tile of the save a window was placed from, or none', () => {
+    const quick = (index) => ({ kind: 'quick', index, rel: null })
+    assert.equal(engine.keepsPlacement(save(), null), true, 'not placed, as it opened')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), null), false, 'maximized since')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), null), false, 'tiled since')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 })), true, 'maximized as restored')
+    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 })), false, 'unmaximized since')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) })), true, 'in the tile it was restored to')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) })), false, 'another tile')
+    assert.equal(engine.keepsPlacement(save({ x: 999, width: 10 }), save()), true, 'size and place aren\'t compared')
+})
+
+test('undoLayout puts back what recordLayout replaced, unless the layout changed since', () => {
+    const state = engine.newState()
+    const first = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 5)
+    const recorded = engine.layoutFor(state, 'app', 'desk')
+    assert.equal(engine.undoLayout(state, 'app', 'desk', recorded, first), true)
+    assert.equal(state.apps.app, undefined, 'nothing was saved before: the app is gone')
+
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Main' })], 5)
+    engine.recordLayout(state, 'app', 'other', [save({ caption: 'Elsewhere' })], 6)
+    const main = engine.layoutFor(state, 'app', 'desk')
+    const before = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 7)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', engine.layoutFor(state, 'app', 'desk'), before), true)
+    assert.equal(engine.layoutFor(state, 'app', 'desk'), main, 'the layout from before')
+    assert.equal(state.apps.app.saves[0].caption, 'Elsewhere', 'and the latest layout for older versions')
+    assert.equal(state.apps.app.lastAccess, 6)
+    assert.equal(engine.layoutFor(state, 'app', 'other').saves[0].caption, 'Elsewhere', 'other desktops untouched')
+
+    const stale = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 8)
+    const splash = engine.layoutFor(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Later' })], 9)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', splash, stale), false, 'saved again since: left')
+    assert.equal(engine.layoutFor(state, 'app', 'desk').saves[0].caption, 'Later')
+})

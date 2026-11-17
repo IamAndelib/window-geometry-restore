@@ -46,3 +46,4 @@ needs on top.
 - `docs/plans/per-monitor-restore.md`: monitors independent while an app runs; everything back
   on a fresh start.
 - `docs/plans/app-key.md`: windows keyed by desktop file name; the one-time fallback to the class.
+- `docs/plans/splash-handoff.md`: splash screens and startup prompts; undoing a hand-off's save.

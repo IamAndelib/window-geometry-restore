@@ -115,13 +115,60 @@ def s_fixed_size_window():
     """A non-resizable window gets its position back and keeps its size."""
     with sandbox(outputs=1) as sb:
         a = sb.open_app("org.example.fixed", "Fixed", size=(600, 400), fixed=True)
-        size = rect(sb.window("Fixed"))[2:]
-        sb.set_geometry("Fixed", 100, 120, size[0], size[1])
+        w = sb.window("Fixed")
+        size = rect(w)[2:]
+        # Dragged, as the user moves it: a fixed-size window closed untouched and reopened at once
+        # reads as a splash screen handing over (s_splash_hands_over).
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 100 - rect(w)[0], y + 120 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window("Fixed"))[:2] == (100, 120), 3, "the drag")
         a.close()
         sb.open_app("org.example.fixed", "Fixed", size=(600, 400), fixed=True)
         w = sb.window("Fixed")
         check(rect(w)[:2] == (100, 120), "position restored: %s" % (rect(w),))
         check(rect(w)[2:] == size, "size kept: %s" % (rect(w),))
+
+
+def s_splash_hands_over():
+    """A splash screen, a fixed-size window shown alone before the app's window, isn't the
+    app's layout: saved, the app's window opened at its size (LibreOffice). Nor does it take the
+    app window's save by elimination: it was moved off centre."""
+    title = "Untitled 1 - Suite Writer"
+    with sandbox(outputs=1) as sb:
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.1)
+        where = rect(sb.window("Suite 1.0"))
+        splash.close()
+        app = sb.open_app("org.example.suite", title, size=(1200, 700))
+        check("org.example.suite" not in ((sb.saved() or {}).get("apps") or {}), "the splash's save undone: %s" % (sb.saved(),))
+        check(logged(sb.script_log(), '"Suite 1.0" handed over to a new window of the app'), "logged")
+        w = sb.window(title)
+        size = rect(w)[2:]
+        check(size[0] == 1200 and size[1] >= 700, "the window at its own size (with its title bar): %s" % (rect(w),))
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window(title))[:2] == (300, 150), 3, "the drag")
+        app.close()
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.5)
+        check(rect(sb.window("Suite 1.0")) == where, "the splash left where KWin put it: %s" % (rect(sb.window("Suite 1.0")),))
+        splash.close()
+        sb.open_app("org.example.suite", title, size=(1200, 700))
+        check(rect(sb.window(title)) == (300, 150) + size, "the window restored: %s" % (rect(sb.window(title)),))
+
+
+def s_splash_hands_over_to_renamed_component():
+    """LibreOffice's components, given their own desktop file names by KWin rules: the splash
+    keeps the suite's, and hands over by window class."""
+    title = "Untitled 1 - Suite Writer"
+    rules = [rule("org.example.suite", title=title, titlematch="1", desktopfile="org.example.suite.writer", desktopfilerule=2)]
+    with sandbox(outputs=1, rules=rules) as sb:
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.1)
+        splash.close()
+        app = sb.open_app("org.example.suite", title, size=(1200, 700))
+        check(sb.window(title)["df"] == "org.example.suite.writer", "precondition: the rule names it: %s" % (sb.window(title),))
+        check("org.example.suite" not in ((sb.saved() or {}).get("apps") or {}), "the splash's save undone: %s" % (sb.saved(),))
+        sb.set_geometry(title, 300, 150, 1200, 700)
+        app.close()
+        check(list(sb.saved()["apps"]) == ["org.example.suite.writer"], "only Writer saved: %s" % (list(sb.saved()["apps"]),))
 
 
 def maximize_and_close(sb, title, x, y, w, h, app="org.example.alpha"):
@@ -281,7 +328,12 @@ def s_window_rule_size_only():
     """A forced size rule: the window is left to KWin entirely."""
     with sandbox(outputs=1, rules=[rule("org.example.sized", size="700,450", sizerule=2)]) as sb:
         a = sb.open_app("org.example.sized", "Sized")
-        move_to(sb, "Sized", 900, 400)
+        # Dragged: a forced size makes the window fixed-size to KWin, and one moved by a script
+        # and reopened at once reads as a splash screen handing over (s_splash_hands_over).
+        w = sb.window("Sized")
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 900 - rect(w)[0], y + 400 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window("Sized"))[:2] == (900, 400), 3, "the drag")
         a.close()
         sb.script_log()
         sb.open_app("org.example.sized", "Sized")
@@ -1178,6 +1230,8 @@ SCENARIOS = [
     s_returns_to_its_monitor,
     s_logout_login,
     s_fixed_size_window,
+    s_splash_hands_over,
+    s_splash_hands_over_to_renamed_component,
     s_maximized_at_close,
     s_maximized_by_dragging_to_the_top,
     s_app_opens_maximized_by_itself,

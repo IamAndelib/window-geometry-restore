@@ -42,6 +42,9 @@ var RESTORE_TIMEOUT_MS = 10000
 // within PREDICTION_MS was mispredicted: then it is no longer fresh, so it only changes app.
 var LEARN_MS = 3000
 var PREDICTION_MS = RESTORE_TIMEOUT_MS
+// A splash screen or startup prompt hands over to the app's window within this (main.qml
+// handOff; LibreOffice's splash: ~0.8 s).
+var HANDOFF_MS = 3000
 var MAX_OPENINGS = 4
 // Titles are app-controlled and may be huge: stored, matched and tested against rules only up
 // to this length (matching is O(length) per pair, and saved titles are kept on disk).
@@ -719,6 +722,60 @@ function latestClose(state) {
         }
     }
     return latest
+}
+
+// Whether a closing window is as the script left it: in the maximize mode and tile of the save it
+// was placed from, or of none if it wasn't placed. Its size and place aren't compared: the app
+// sizes its own windows, and a window the user moved or resized is userPlaced (main.qml).
+/**
+ * @param {Save} snap
+ * @param {Save | null} from
+ * @returns {boolean}
+ */
+function keepsPlacement(snap, from) {
+    return snap.maximized === (from ? from.maximized : 0) && tileKey(snap.tile) === tileKey(from ? from.tile : null)
+}
+
+/**
+ * @param {TileRef | null} tile
+ * @returns {string}
+ */
+function tileKey(tile) {
+    if (!tile) return ''
+    return tile.kind === 'quick' ? 'quick ' + tile.index : 'custom ' + tile.path.join(',')
+}
+
+// What recordLayout replaces for an app on one desktop, to put back with undoLayout.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @returns {LayoutBefore}
+ */
+function layoutBefore(state, cls, key) {
+    var app = state.apps[cls]
+    return { layout: layoutFor(state, cls, key), saves: app ? app.saves : [], lastAccess: app ? app.lastAccess : 0 }
+}
+
+// Puts back what an app's layout on one desktop was before `recorded` was recorded, unless it has
+// changed since. An app left without data is removed. Returns whether it was put back.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @param {Layout} recorded
+ * @param {LayoutBefore} before
+ * @returns {boolean}
+ */
+function undoLayout(state, cls, key, recorded, before) {
+    var app = state.apps[cls]
+    if (!app || layoutFor(state, cls, key) !== recorded) return false
+    if (before.layout) app.desktops[key] = before.layout
+    else delete app.desktops[key]
+    app.saves = before.saves
+    app.lastAccess = before.lastAccess || app.lastAccess
+    if (!hasData(app)) delete state.apps[cls]
+    return true
 }
 
 // The layout an app left on one desktop: { lastAccess, saves } or null.

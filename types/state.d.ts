@@ -42,6 +42,9 @@ type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: G
  *  by this order, so keep it. */
 interface Layout { lastAccess: number; saves: Save[] }
 
+/** What Engine.recordLayout replaces for an app on one desktop (Engine.layoutBefore). */
+interface LayoutBefore { layout: Layout | null; saves: Save[]; lastAccess: number }
+
 /** How an app's windows open before KWin names them: as app `cls`, titled `caption`. */
 interface Opening { cls: string; caption: string }
 
@@ -161,6 +164,24 @@ interface Close {
     monitor: SavedScreen | null
     /** The save the script placed the window at: replaced by this close (issue #8). */
     from: Save | null
+    /** The app's last window, closed as the script left it: how a window opening next could be
+     *  the one it handed over to (main.qml handOff). Null if it can't be. */
+    handoff: { resourceClass: string; pid: number; fixedSize: boolean } | null
+}
+
+/** A layout saved from a window that may have been a splash screen or startup prompt: undone if
+ *  the window it handed over to opens by `until` (main.qml handOff). */
+interface Handoff {
+    cls: string
+    desktopKey: string
+    resourceClass: string
+    /** The closed window's process (0 unknown), and whether it couldn't be resized. */
+    pid: number
+    fixedSize: boolean
+    caption: string
+    until: number
+    recorded: Layout
+    before: LayoutBefore
 }
 
 /** An app's open windows on one desktop key. */

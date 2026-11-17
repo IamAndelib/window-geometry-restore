@@ -41,7 +41,7 @@ const extracted = extractFunctions(qml)
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'logOnce', 'removeFromArray', 'connectSignal', 'disconnectSignal',
     'loadConfig', 'loadPersisted', 'persist',
-    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
+    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
     'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
@@ -435,6 +435,7 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         var live = {};
         var tracked = {};
         var retries = [];
+        var handoffs = [];
         var root = {};
         ${Object.keys(extracted).map((name) => {
             const fn = extracted[name]
@@ -3716,4 +3717,153 @@ test('close times keep increasing across sessions, whatever the clock did', () =
     w.emitClosed()
     const saves = savedApp(rt, 'files').d['desk-uuid-1'].w
     assert.ok(Math.max(...saves.filter((s) => s.c === 'Doc').map((s) => s.ct)) > future, 'closed later, so ranked later')
+})
+
+// ---- splash screens and startup prompts: a window handing over to the app's is not saved ----
+
+const LO = 'org.libreoffice.LibreOffice'
+// LibreOffice's splash: a fixed size, from another process than the app's window on a first start.
+const splashWindow = (rt, fields = {}) => {
+    const w = makeWindow({ cls: LO, caption: 'LibreOffice 26.8', x: 638, y: 422, width: 644, height: 235, ...fields })
+    w.resizeable = false
+    w.pid = fields.pid ?? 401431
+    rt.trackWindow(w)
+    return w
+}
+const appWindow = (rt, fields = {}) => {
+    const w = makeWindow({ cls: LO, caption: 'Untitled 1 — LibreOffice Writer', x: 298, y: 165, width: 1324, height: 750, ...fields })
+    w.pid = fields.pid ?? 401486
+    rt.trackWindow(w)
+    return w
+}
+const frameOf = (w) => [w.x, w.y, w.width, w.height]
+// The splash's short life, then the app's window.
+const handOver = (rt, from, open) => {
+    advanceClock(rt, 120)
+    from.emitClosed()
+    advanceClock(rt, 700)
+    return open()
+}
+
+test('a splash screen handing over to the app\'s window is not saved: the window opens at its own size', () => {
+    const rt = buildRuntime()
+    const writer = handOver(rt, splashWindow(rt), () => appWindow(rt))
+    assert.equal(savedApp(rt, LO), undefined, 'the splash\'s save is undone')
+    assert.ok(rt.getLogs().some((l) => /"LibreOffice 26\.8" handed over to a new window of the app/.test(l)))
+    assert.deepEqual(frameOf(writer), [298, 165, 1324, 750])
+
+    // The user places the window; next launch, the splash stays where it opens, and the window
+    // is restored.
+    advanceClock(rt, 60000)
+    writer.emitMoveResizeStarted()
+    writer._setFrame({ x: 100, y: 80, width: 1500, height: 900 })
+    writer.emitClosed()
+    advanceClock(rt, 60000)
+    const splash = splashWindow(rt)
+    assert.deepEqual(frameOf(splash), [638, 422, 644, 235], 'a fixed-size window takes no save by elimination')
+    const again = handOver(rt, splash, () => appWindow(rt))
+    assert.deepEqual(frameOf(again), [100, 80, 1500, 900])
+    assert.deepEqual(savedApp(rt, LO).d['desk-uuid-1'].w.map((s) => [s.c, s.w]), [['Untitled 1 — LibreOffice Writer', 1500]])
+})
+
+test('a splash screen shared with LibreOffice\'s components (a rule names them) hands over by window class', () => {
+    const rt = buildRuntime()
+    handOver(rt, splashWindow(rt), () => appWindow(rt, { df: LO + '.writer' }))
+    assert.equal(savedApp(rt, LO), undefined)
+})
+
+test('a startup prompt hands over to a window of its own process, not to the app opened again', () => {
+    const prompt = (rt, pid) => {
+        const w = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 520, height: 400 })
+        w.pid = pid
+        rt.trackWindow(w)
+        return w
+    }
+    const main = (rt, pid) => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 200, y: 100, width: 1400, height: 900 })
+        w.pid = pid
+        rt.trackWindow(w)
+        return w
+    }
+    let rt = buildRuntime()
+    handOver(rt, prompt(rt, 42), () => main(rt, 42))
+    assert.equal(savedApp(rt, 'mail'), undefined, 'the same process: a hand-off')
+
+    rt = buildRuntime()
+    handOver(rt, prompt(rt, 42), () => main(rt, 43))
+    assert.equal(savedApp(rt, 'mail').d['desk-uuid-1'].w[0].c, 'Choose User Profile', 'another process: the app opened again, kept')
+
+    rt = buildRuntime()
+    handOver(rt, prompt(rt, 0), () => main(rt, 0))
+    assert.ok(savedApp(rt, 'mail'), 'a resizable window of an unknown process: kept')
+})
+
+test('a hand-off needs an untouched lone window, closed just before', () => {
+    // Moved by the user.
+    let rt = buildRuntime()
+    let splash = splashWindow(rt)
+    splash.emitMoveResizeStarted()
+    splash._setFrame({ x: 10, y: 10, width: 644, height: 235 })
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO), 'moved: kept')
+
+    // Too late.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    advanceClock(rt, 120)
+    splash.emitClosed()
+    advanceClock(rt, Engine.HANDOFF_MS + 1)
+    appWindow(rt)
+    assert.ok(savedApp(rt, LO), 'too late: kept')
+
+    // Closed with another window: the app quitting, not a hand-off.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    const other = appWindow(rt, { caption: 'Other' })
+    advanceClock(rt, 120)
+    other.emitClosed()
+    handOver(rt, splash, () => appWindow(rt))
+    assert.equal(savedApp(rt, LO).d['desk-uuid-1'].w.length, 2, 'closed together: kept')
+
+    // On another desktop.
+    rt = buildRuntime()
+    handOver(rt, splashWindow(rt), () => appWindow(rt, { desktop: 2 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'another desktop: kept')
+
+    // Maximized by the user (no move or resize).
+    rt = buildRuntime()
+    const prompt = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 520, height: 400 })
+    prompt.pid = 42
+    rt.trackWindow(prompt)
+    prompt.setMaximize(true, true)
+    handOver(rt, prompt, () => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 200, y: 100, width: 1400, height: 900 })
+        w.pid = 42
+        rt.trackWindow(w)
+        return w
+    })
+    assert.equal(savedApp(rt, 'mail').d['desk-uuid-1'].w[0].max, 3, 'maximized: kept')
+
+    // The app still has a window on another monitor: it is running, not starting.
+    rt = buildRuntime()
+    appWindow(rt, { caption: 'Left', x: 100, y: 100, outputIndex: 0 })
+    handOver(rt, splashWindow(rt, { x: 2600, y: 400, outputIndex: 1 }), () => appWindow(rt, { x: 2200, y: 100, outputIndex: 1 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'].w.some((s) => s.c === 'LibreOffice 26.8'), 'app running: kept')
+})
+
+test('a startup prompt restored to the app\'s save hands over, and the app\'s layout comes back', () => {
+    const W = { c: 'Inbox - Mail', x: 200, y: 100, w: 1400, h: 900, o: null }
+    const rt = buildRuntime(savedLayouts({ mail: [W] }))
+    const prompt = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 800, height: 600 })
+    prompt.pid = 42
+    rt.trackWindow(prompt)
+    assert.deepEqual(frameOf(prompt), [200, 100, 1400, 900], 'the only save, restored to the prompt (not dialog-sized)')
+    const main = handOver(rt, prompt, () => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 0, y: 0, width: 1000, height: 700 })
+        w.pid = 42
+        rt.trackWindow(w)
+        return w
+    })
+    assert.deepEqual(savedApp(rt, 'mail').d['desk-uuid-1'].w.map((s) => s.c), ['Inbox - Mail'], 'the layout from before')
+    assert.deepEqual(frameOf(main), [200, 100, 1400, 900])
 })

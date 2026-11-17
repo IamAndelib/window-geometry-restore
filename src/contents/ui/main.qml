@@ -54,6 +54,8 @@ Item {
     property var tracked: ({})
     // Geometry writes that have not stuck yet: { id, target, tries, born }
     property var retries: []
+    // Layouts saved from a window that may have handed over to the app's window (handOff).
+    property var handoffs: []
 
     // ---- logging and signals -------------------------------------------------------------
 
@@ -227,6 +229,7 @@ Item {
         entry.groupKey = entry.cls + '\n' + entry.desktopKey
         // x11DesktopNumber is KWin's name for a desktop's position, on Wayland too.
         entry.label = entry.cls + (entry.desktopKey === '*' ? ' (all desktops)' : ' (desktop ' + w.desktops[0].x11DesktopNumber + ')')
+        if (entry.openedAt && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS) handOff(entry)
         if (!live[entry.groupKey]) {
             live[entry.groupKey] = {
                 key: entry.groupKey, cls: entry.cls, desktopKey: entry.desktopKey, label: entry.label,
@@ -236,6 +239,32 @@ Item {
         }
         live[entry.groupKey].open.push(entry.id)
         return live[entry.groupKey]
+    }
+
+    // A splash screen or startup prompt is a normal window to KWin. Shown alone before the app's
+    // window (LibreOffice's splash, a profile chooser), its close was saved as the app's layout,
+    // and the app's window then opened at its size. A window opening soon after (HANDOFF_MS) is the
+    // one it handed over to if it is the same app (app key or window class: a KWin rule can give
+    // an app's windows their own desktop file names, as for LibreOffice's components) on the same
+    // desktop, and comes from the same process, or the closed window couldn't be resized, as a
+    // splash screen can't (LibreOffice's comes from another process on a first start). That save
+    // is undone: the app's layout is again what it was before.
+    /**
+     * @param {Entry} entry
+     */
+    function handOff(entry) {
+        var now = Date.now()
+        handoffs = handoffs.filter(function (h) { return h.until > now })
+        for (var i = handoffs.length - 1; i >= 0; i--) {
+            var h = handoffs[i]
+            if (h.desktopKey !== entry.desktopKey || (h.cls !== entry.cls && h.resourceClass !== entry.resourceClass)) continue
+            if (!h.fixedSize && !(h.pid > 0 && h.pid === entry.w.pid)) continue
+            handoffs.splice(i, 1)
+            if (!Engine.undoLayout(store, h.cls, h.desktopKey, h.recorded, h.before)) continue
+            log(h.cls + ': "' + h.caption + '" handed over to a new window of the app, as a splash screen or ' +
+                'startup prompt does: its save undone')
+            persist()
+        }
     }
 
     // Takes a window out of its group when it moves to another desktop or app. Closes buffered
@@ -805,7 +834,11 @@ Item {
             untrack(entry)
         }
         if (snap) {
-            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output, from: entry.placedFrom })
+            // The app's last window, untouched: it may hand over to a window opening next (handOff).
+            var w = entry.w
+            var handoff = !group.open.length && !entry.userPlaced && Engine.keepsPlacement(snap, entry.placedFrom)
+                ? { resourceClass: entry.resourceClass, pid: w.pid > 0 ? w.pid : 0, fixedSize: !w.resizeable } : null
+            group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output, from: entry.placedFrom, handoff: handoff })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
         }
         var saved = finalizeLeftMonitors(group)
@@ -877,8 +910,19 @@ Item {
             }
             kept.push(save)
         }
+        var before = Engine.layoutBefore(store, group.cls, group.desktopKey)
         Engine.recordLayout(store, group.cls, group.desktopKey, kept.concat(saves), Date.now())
         log(group.label + ' closed' + (monitor ? ' on ' + monitor.name : '') + ', saved ' + saves.length + ' window(s)')
+        // The app's only window, which may hand over to the app's window (handOff).
+        var handoff = closed[closed.length - 1].handoff
+        if (saves.length === 1 && handoff) {
+            handoffs.push({
+                cls: group.cls, desktopKey: group.desktopKey, resourceClass: handoff.resourceClass,
+                pid: handoff.pid, fixedSize: handoff.fixedSize, caption: saves[0].caption,
+                until: Date.now() + Engine.HANDOFF_MS,
+                recorded: /** @type {Layout} */ (Engine.layoutFor(store, group.cls, group.desktopKey)), before: before
+            })
+        }
         return true
     }
 
@@ -1169,6 +1213,13 @@ Item {
             return null
         }
         var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height }, taken, scores)
+        // A window that can't be resized always opens at its size, which its own saves have. Matched
+        // by neither title nor size, only as the save left, it is another window: a splash screen
+        // (LibreOffice's) took the app window's place, off centre.
+        if (match && match.tier === 4 && !w.resizeable) {
+            dbg(entry.label + ': "' + caption + '" can\'t be resized and matches no save by title or size: left as it is')
+            return null
+        }
         // A save after all (its title or size changed): the app's window.
         if (match) entry.dialog = null
         // The other app's saves never arrive: one save left for this caption is a clear match.

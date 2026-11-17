@@ -79,6 +79,16 @@ on, and how to test a change before it reaches anyone's desktop.
     `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
     isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
     start), until it grows out of it (noteGeometry) (issue #3).
+  - A window that can't be resized is restored only from a save matching its title or size,
+    never as the one save left: a splash screen opens before the app's window and would take its
+    place (`matchFor`).
+  - **Hand-offs** (`handOff`). A splash screen or startup prompt shown alone before the app's
+    window is saved when it closes, as any window. If a window of the same app (app key or window
+    class) opens on that desktop within `HANDOFF_MS`, and the closed window was the app's only
+    one, untouched (not moved or resized by the user, in the maximize mode and tile it was placed
+    in: `Engine.keepsPlacement`), and either from the same process (`pid`) or of a fixed size,
+    that save is undone (`Engine.undoLayout`), unless the layout was saved again since. Saves are
+    still written at once; a user closing and reopening an app starts a new process.
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     geometry for a drag out of the tile. A quick tile that waits for the window to become
     active waits at the tile's rect instead; the pre-tile geometry is written just before the
@@ -122,12 +132,20 @@ on, and how to test a change before it reaches anyone's desktop.
     later, so its desktop file name arrives after `windowAdded`: the script follows
     `desktopFileNameChanged`. On X11 the name comes from
   `_KDE_NET_WM_DESKTOP_FILE`, `_GTK_APPLICATION_ID`, or a desktop file's `StartupWMClass`.
+- **A window's process** (6.8.3, `Window::pid`): on Wayland, the client's (from the connection's
+  credentials, `WaylandWindow`), fixed for the window's life; -1 unknown. A Flatpak app's windows
+  report the sandboxed process. LibreOffice (26.8) shows its splash from another process than its
+  windows on a first start (two splashes, the second from the app's process).
+- **Fixed size** (6.8.3, `XdgToplevelWindow::isResizable`): `resizeable` is false when the
+  minimum and maximum sizes are equal, for a fullscreen request, and under a Force size rule.
+  LibreOffice's splash: 644x199 both ways, decorated, `splash` false.
 - **Dialogs without a parent are ordinary windows** (6.8.2): an xdg toplevel is
   `WindowType::Normal` unless a Plasma shell role says otherwise (`xdgshellwindow.h`),
   `transient` only with a parent (`handleTransientForChanged`), and `modal` only through
   xdg-dialog-v1, which GTK3 (Firefox, Thunderbird, Betterbird) doesn't use. Thunderbird's
   primary-password prompt at startup and its profile chooser open that way, before the main
-  window; the same prompt shown later has the main window as its parent.
+  window; the same prompt shown later has the main window as its parent. So do splash screens:
+  `splash` is an X11 window type, and a Wayland one isn't.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences
   it doesn't know.
