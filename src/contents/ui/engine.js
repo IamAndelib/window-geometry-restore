@@ -187,7 +187,11 @@ function captionScore(a, b) {
 }
 
 // Ranking shared by single-window matching and the deadline sweep:
-// lower tier first, then more matching dimensions, then higher caption score.
+// lower tier first, then more matching dimensions, then higher caption score; then, between
+// equal matches, by close time: a save closed clearly later (more than BURST_MS apart: closed
+// on its own, #14) wins; saves closed together (a logout, the app quitting) go in close order,
+// first closed first, so windows reopening in the order they opened keep their places. Saves
+// without close times (closedAt 0, from older versions) keep the order they are listed in.
 /**
  * @param {Match} a
  * @param {Match} b
@@ -196,7 +200,9 @@ function captionScore(a, b) {
 function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
-    return a.score > b.score
+    if (a.score !== b.score) return a.score > b.score
+    var later = a.closedAt - b.closedAt
+    return later > BURST_MS || (later < 0 && later >= -BURST_MS)
 }
 
 // Deterministic slot matching: pick the best save not yet taken for one live window.
@@ -204,10 +210,8 @@ function isBetterMatch(a, b) {
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
-// Equal matches go to the save closed last: a layout lists its saves in close order (see Layout
-// in types/state.d.ts). Alike windows (same title once digits are dropped, same size) can't be
-// told apart, so which takes which save among them is a guess either way; this one keeps a
-// single window on the monitor it was closed on.
+// Equal matches (alike windows: the same title once digits are dropped, the same size) are
+// ranked by close time (see isBetterMatch).
 // Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
@@ -228,7 +232,7 @@ function bestMatch(saves, live, taken, scores) {
     var best = null
     var free = -1
     var freeCount = 0
-    for (var i = saves.length - 1; i >= 0; i--) {
+    for (var i = 0; i < saves.length; i++) {
         if (taken[i]) continue
         free = i
         freeCount++
@@ -240,11 +244,11 @@ function bestMatch(saves, live, taken, scores) {
         else if (dims === 2) tier = 2
         else if (caption >= CAPTION_FALLBACK) tier = 3
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: caption }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption, closedAt: s.closedAt }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: score(free) }
+        return { index: free, tier: 4, dims: 0, score: score(free), closedAt: saves[free].closedAt }
     }
     return best
 }
@@ -297,7 +301,8 @@ function makeSave(fields) {
         output: fields.output || null,
         tile: fields.tile || null,
         free: fields.free || null,
-        maximized: fields.maximized || 0
+        maximized: fields.maximized || 0,
+        closedAt: fields.closedAt || 0
     }
 }
 
@@ -427,6 +432,7 @@ function encodeSave(s) {
     if (s.tile) out.t = encodeTile(s.tile)
     if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
     if (s.maximized) out.max = s.maximized
+    if (s.closedAt) out.ct = s.closedAt
     return out
 }
 
@@ -444,6 +450,7 @@ function decodeSave(s) {
     fields.tile = tile
     fields.free = tile ? decodeGeometry(s.f) : null
     fields.maximized = isIndex(s.max, 4) ? s.max : 0
+    fields.closedAt = numberOr(s.ct, 0)
     return makeSave(fields)
 }
 

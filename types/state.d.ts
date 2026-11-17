@@ -28,14 +28,18 @@ interface Save extends Geometry {
     /** KWin's maximize mode at close (0 none, 1 vertical, 2 horizontal, 3 both); x/y/width/height
      *  are then the normal geometry to return to. */
     maximized: number
+    /** When the window closed (ms, strictly increasing per close: close order). 0 for saves from
+     *  older versions. */
+    closedAt: number
 }
 
 /** What Engine.makeSave is built from. */
-type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number }
+type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number; closedAt?: number }
 
 /** An app's windows on one desktop. `saves` are in close order, the save closed last at the end:
  *  finalizeMonitor appends the closing monitor's part after the others' (kept in their order).
- *  Engine.bestMatch gives ties to the save closed last, so keep that order. */
+ *  Engine.isBetterMatch gives ties among saves closed together to the one listed first, so keep
+ *  that order. */
 interface Layout { lastAccess: number; saves: Save[] }
 
 /** How an app's windows open before KWin names them: as app `cls`, titled `caption`. */
@@ -65,6 +69,8 @@ interface EncodedSave {
     t?: EncodedTile
     f?: EncodedRect & { o: EncodedOutput | null }
     max?: number
+    /** Close time (optional; older versions ignore it). */
+    ct?: number
 }
 interface EncodedApp {
     t: number
@@ -83,6 +89,8 @@ interface Match {
     /** Dimensions that match (0-2). */
     dims: number
     score: number
+    /** The save's close time: equal matches go to one closed clearly later. */
+    closedAt: number
     /** A web app's one-time fallback: the only save with its caption. */
     only?: boolean
 }

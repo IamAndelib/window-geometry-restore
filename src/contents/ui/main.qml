@@ -35,6 +35,9 @@ Item {
     // The saved data as this script last wrote it: when the file still holds it, no other KWin
     // instance wrote in between, and saving skips reading it back.
     property string lastWritten: ''
+    // The last close time given to a save: each close gets a later one, so saves keep the order
+    // windows closed in, even closed in the same millisecond (a logout).
+    property real lastClosedAt: 0
     // Persisted: { apps: { cls: { lastAccess, saves, desktops: { desktopKey: { lastAccess, saves } } } } }.
     // A desktop's layout keeps each monitor's part until the app's next close on that monitor
     // (or of a window restored from it), so a crash or power loss still restores the last layout.
@@ -754,6 +757,8 @@ Item {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
             fields.caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
+            // When it closed, in close order (equal matches are ranked by it: Engine.isBetterMatch).
+            fields.closedAt = lastClosedAt = Math.max(Date.now(), lastClosedAt + 1)
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)

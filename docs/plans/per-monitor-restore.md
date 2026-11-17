@@ -11,7 +11,10 @@ Option 2: independent while the app runs, back to their own monitors on a fresh 
   desktop as well, keeps its old save.
 - **Fresh start** (the app is not running on this desktop): the whole layout is restored, every
   window back on its own monitor. That includes monitors whose windows closed at different times.
-  Equal matches take the save closed last, so a single window doesn't alternate between monitors.
+  Equal matches (alike windows) are ranked by close time (`closedAt`, saved as `ct`): a save closed
+  clearly later, on its own, wins, so a single window doesn't alternate between monitors (#14);
+  saves closed together, at a logout or an app's quit, go in close order, so alike windows don't
+  swap places (#14 alone made them swap at every login).
 - **App already running:** a new window opened on a monitor where the app has no window gets that
   monitor's part of the layout only, and stays on that monitor. A window opened next to one already
   there is left where KWin put it.

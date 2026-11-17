@@ -5,11 +5,12 @@ Notable changes to Window Geometry Restore. Each release's GitHub notes are publ
 ## [1.4.5] - 2026-11-18
 
 **Fixes**
-- **A single window no longer alternates between monitors** ([#14](https://github.com/IamAndelib/window-geometry-restore/pull/14), fix by @stasadev). With an app's windows closed on two monitors, alike (same title and size), opening one window again took the save closed first, and closing it there made that one the newest: every launch it switched monitors. Equal matches now go to the save closed last, so it reopens where it was closed. A better title or size match still wins, and the other monitor keeps its save for a second window.
+- **A single window no longer alternates between monitors** ([#14](https://github.com/IamAndelib/window-geometry-restore/pull/14), fix by @stasadev). With an app's windows closed on two monitors, alike (same title and size), opening one window again took the save closed first, and closing it there made that one the newest: every launch it switched monitors. Saves now remember when they closed: among equal matches, one closed clearly later (on its own) wins, so the window reopens where it was closed last. Windows closed together, at a logout or when the app quits, still come back in the order they closed, so alike windows don't swap places either. A better title or size match still wins, and the other monitor keeps its save for a second window.
 
 **Under the hood**
 - Type checking: `make test` and CI now type-check the shipped JavaScript first (TypeScript, strict), against types for KWin's API and the script's data. Nothing is compiled or shipped differently.
-- Real-KWin scenarios: one for this fix (fails with 1.4.4). Two scenarios relied on chance and are now deterministic: one used window titles that differ only in digits (which matching ignores), one moved windows by script where the user drags them.
+- Saved data: a save may carry `ct`, when its window closed (optional; older versions ignore it, and saves without it are matched as before).
+- Real-KWin scenarios: one for this fix (fails with 1.4.4), and one for alike windows across logouts (fails with #14 alone, which made them swap places at every login; found reviewing it). `s_desktops_times_monitors` reopens windows one at a time with titles alike once digits are ignored, which the new rule sends where an alike one closed last: it now uses distinct titles. `s_rapid_open_close` moved windows by script right after their restore, which the restore's retries undid when the app acknowledged late: it drags like a user.
 
 ## [1.4.4] - 2026-11-12
 

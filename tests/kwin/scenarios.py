@@ -1001,6 +1001,25 @@ def s_single_window_reopens_where_closed_last():
         check(saves == [("Virtual-0", 200, 150), ("Virtual-1", 2300, 250)], "monitor 1 keeps its own save: %s" % saves)
 
 
+def s_alike_windows_keep_places_across_logouts():
+    """Two alike windows (titles alike once digits are ignored, same size), one on each monitor,
+    left open at logout. Apps reopen them in the order they opened: each comes back to its own
+    place, login after login, instead of swapping (found reviewing #14)."""
+    with sandbox(outputs=2) as sb:
+        sb.open_app("org.example.term", "Term 1")
+        move_to(sb, "Term 1", 200, 150)
+        sb.open_app("org.example.term", "Term 2")
+        move_to(sb, "Term 2", 2300, 250)
+        for i in range(2):
+            sb.restart_kwin()  # logout and login: the script saves the open windows
+            sb.pointer.move(400, 400)
+            sb.open_app("org.example.term", "Term 1")
+            sb.open_app("org.example.term", "Term 2")
+            sb.settle(1.0)
+            places = (rect(sb.window("Term 1"))[:2], rect(sb.window("Term 2"))[:2])
+            check(places == ((200, 150), (2300, 250)), "login %d: each back at its own place: %s" % (i + 1, places))
+
+
 def s_undock_two_of_three_monitors():
     """Three monitors, the app open on each; monitors 2 and 3 go at once (undocking), the
     parked windows close at different times; docked again, each window returns to its monitor."""
@@ -1108,7 +1127,9 @@ def s_desktops_times_monitors():
     """One app with its own layout on each desktop and monitor: each combination comes back."""
     with sandbox(outputs=2, desktops=2) as sb:
         spots = {(0, 0): (200, 150), (0, 1): (2300, 250), (1, 0): (600, 350), (1, 1): (2700, 450)}
-        # Titles that differ in more than digits: digits don't count in matching ("(3) Inbox").
+        # Titles that differ in more than digits, which matching ignores ("(3) Inbox"). With titles
+        # alike, the windows here, reopened one at a time, would each go where an alike one was
+        # closed last (#14): the scenario is about desktops and monitors, not about alike windows.
         name = lambda desk, mon: "Grid %s %s" % ("AB"[desk], "LR"[mon])
         # Both windows of a desktop are open at once: a window restored from one monitor's save
         # and moved to the other would take that save along.
@@ -1197,6 +1218,7 @@ SCENARIOS = [
     s_fresh_start_both_monitors,
     s_moved_to_other_monitor,
     s_single_window_reopens_where_closed_last,
+    s_alike_windows_keep_places_across_logouts,
     s_used_undocked_keeps_docked_layout,
     s_maximized_on_unplugged_monitor,
     s_undock_two_of_three_monitors,

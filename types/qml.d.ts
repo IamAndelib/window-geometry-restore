@@ -8,6 +8,7 @@ declare var restoreTiles: boolean
 declare var excluded: ExclusionList
 declare var reported: Record<string, boolean>
 declare var lastWritten: string
+declare var lastClosedAt: number
 declare var store: State
 declare var live: Record<string, Group>
 declare var tracked: Record<string, Entry>

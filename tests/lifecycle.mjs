@@ -430,6 +430,7 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         var excluded = Engine.parseList('');
         var reported = {};
         var lastWritten = '';
+        var lastClosedAt = 0;
         var store = Engine.newState();
         var live = {};
         var tracked = {};
@@ -3675,4 +3676,32 @@ test('a web app\'s prompt is judged only against the saves its fallback could gi
     rt.trackWindow(w)
     assert.equal(w.maximizeMode, 0, 'not given the web app\'s maximized save')
     assert.ok(rt.trackedRef()[w.internalId].dialog)
+})
+
+// --- Alike windows across logouts: closed together, they keep their places (1.4.5 review) ---
+
+// Logs out (the script saves the open windows) and in, then opens `count` alike windows in the
+// same order on `monitors` (output index per window); returns where each came back.
+function logoutCycles(placesOf, monitors, cycles) {
+    let rt = buildRuntime()
+    let windows = monitors.map((m, i) => onMonitor(rt, 'term', m, placesOf[i], 'Term ' + (i + 1)))
+    const seen = []
+    for (let c = 0; c < cycles; c++) {
+        rt.shutdown()
+        rt = buildRuntime(rt.blobRef())
+        windows = monitors.map((m, i) => onMonitor(rt, 'term', m, { x: 0, y: 0, width: placesOf[i].width, height: placesOf[i].height }, 'Term ' + (i + 1)))
+        advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+        rt.tick()
+        seen.push(windows.map((w) => [w.x, w.y]))
+    }
+    return seen
+}
+
+test('alike windows keep their places across logouts, on one monitor and on two', () => {
+    const one = [{ x: 100, y: 100, width: 960, height: 635 }, { x: 500, y: 300, width: 960, height: 635 }]
+    for (const s of logoutCycles(one, [0, 0], 4)) assert.deepEqual(s, [[100, 100], [500, 300]], 'one monitor')
+    const two = [{ x: 100, y: 100, width: 960, height: 635 }, { x: 2100, y: 150, width: 960, height: 635 }]
+    for (const s of logoutCycles(two, [0, 1], 4)) assert.deepEqual(s, [[100, 100], [2100, 150]], 'two monitors')
+    const three = [two[0], two[1], { x: 600, y: 300, width: 960, height: 635 }]
+    for (const s of logoutCycles(three, [0, 1, 0], 4)) assert.deepEqual(s, [[100, 100], [2100, 150], [600, 300]], 'three windows')
 })

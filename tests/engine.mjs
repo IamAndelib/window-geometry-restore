@@ -178,10 +178,21 @@ test('bestMatch: prefers higher tier, then dims, then score', () => {
     assert.equal(m.tier, 2)
 })
 
-test('bestMatch: equal matches go to the save closed last, the end of the list', () => {
-    const saves = [save(), save(), save({ caption: 'Other', width: 1, height: 1 })]
-    assert.equal(engine.bestMatch(saves, live(), []).index, 1)
-    assert.equal(engine.bestMatch(saves, live(), [false, true]).index, 0, 'then the one closed before')
+test('bestMatch: equal matches go to a save closed clearly later, else to the one listed first', () => {
+    const other = save({ caption: 'Other', width: 1, height: 1 })
+    const apart = [save({ closedAt: 10000 }), save({ closedAt: 20000 }), other]
+    assert.equal(engine.bestMatch(apart, live(), []).index, 1, 'closed on its own, later (#14)')
+    assert.equal(engine.bestMatch(apart, live(), [false, true]).index, 0, 'then the one closed before')
+    const together = [save({ closedAt: 10000 }), save({ closedAt: 10000 + engine.BURST_MS }), other]
+    assert.equal(engine.bestMatch(together, live(), []).index, 0, 'closed together (a logout): close order')
+    const crossed = [save({ caption: 'B', closedAt: 10002 }), save({ caption: 'A', closedAt: 10001 })]
+    assert.equal(engine.bestMatch(crossed, live({ caption: 'A' }), []).index, 1, 'precondition: caption decides')
+    assert.equal(engine.bestMatch([save({ closedAt: 10002 }), save({ closedAt: 10001 })], live(), []).index, 1,
+        'closed together but listed out of order (another monitor\'s part first): the one closed first')
+    const older = [save(), save()]
+    assert.equal(engine.bestMatch(older, live(), []).index, 0, 'saves from before close times: as before')
+    assert.equal(engine.bestMatch([save({ closedAt: 1 }), save({ caption: 'Window two', closedAt: 99999 })], live(), []).index, 0,
+        'only between equal matches: a better caption wins, closed earlier or not')
 })
 
 test('isBetterMatch: tier, then dims, then score', () => {
@@ -231,7 +242,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
     assert.equal(a.tile, null)
     assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))
