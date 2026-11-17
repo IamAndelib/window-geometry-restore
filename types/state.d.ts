@@ -38,8 +38,8 @@ type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: G
 
 /** An app's windows on one desktop. `saves` are in close order, the save closed last at the end:
  *  finalizeMonitor appends the closing monitor's part after the others' (kept in their order).
- *  Engine.isBetterMatch gives ties among saves closed together to the one listed first, so keep
- *  that order. */
+ *  Saves with close times are ranked by them (Engine.closeRanks); saves without (older versions)
+ *  by this order, so keep it. */
 interface Layout { lastAccess: number; saves: Save[] }
 
 /** How an app's windows open before KWin names them: as app `cls`, titled `caption`. */
@@ -89,8 +89,8 @@ interface Match {
     /** Dimensions that match (0-2). */
     dims: number
     score: number
-    /** The save's close time: equal matches go to one closed clearly later. */
-    closedAt: number
+    /** The save's close rank (Engine.closeRanks): equal matches go to the lower. */
+    rank: number
     /** A web app's one-time fallback: the only save with its caption. */
     only?: boolean
 }

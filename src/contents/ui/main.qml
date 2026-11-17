@@ -154,6 +154,8 @@ Item {
             lastWritten = raw
         }
         store = result.state
+        // Close times keep increasing across sessions, whatever the clock did in between.
+        lastClosedAt = Math.max(lastClosedAt, Engine.latestClose(store))
         var removed = Engine.pruneExpired(store, Date.now())
         var count = 0
         for (var cls in store.apps) {
@@ -757,7 +759,7 @@ Item {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
             fields.caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
-            // When it closed, in close order (equal matches are ranked by it: Engine.isBetterMatch).
+            // When it closed, in close order (equal matches are ranked by it: Engine.closeRanks).
             fields.closedAt = lastClosedAt = Math.max(Date.now(), lastClosedAt + 1)
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.

@@ -187,11 +187,9 @@ function captionScore(a, b) {
 }
 
 // Ranking shared by single-window matching and the deadline sweep:
-// lower tier first, then more matching dimensions, then higher caption score; then, between
-// equal matches, by close time: a save closed clearly later (more than BURST_MS apart: closed
-// on its own, #14) wins; saves closed together (a logout, the app quitting) go in close order,
-// first closed first, so windows reopening in the order they opened keep their places. Saves
-// without close times (closedAt 0, from older versions) keep the order they are listed in.
+// lower tier first, then more matching dimensions, then higher caption score, then the save's
+// close rank (closeRanks): equal matches are alike windows, which only their saves' close times
+// tell apart.
 /**
  * @param {Match} a
  * @param {Match} b
@@ -201,8 +199,38 @@ function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
     if (a.score !== b.score) return a.score > b.score
-    var later = a.closedAt - b.closedAt
-    return later > BURST_MS || (later < 0 && later >= -BURST_MS)
+    return a.rank < b.rank
+}
+
+// The order in which equal matches take saves, by when they closed (`closedAt`): saves closed
+// within BURST_MS of the next form one burst, as finalizeMonitor groups closes, but across
+// monitors. The newest burst first: a window closed on its own later is where the app was left
+// (#14: a single window reopens where it was closed last). Within a burst, the first closed
+// first: windows closed together (a logout, the app quitting) reopen in the order they opened
+// and keep their places. Saves without close times (from older versions) are the oldest burst,
+// in the order they are listed. A strict order (no cycles), so the result doesn't depend on
+// which save is looked at first. Returns each save's rank (0 first).
+/**
+ * @param {Save[]} saves
+ * @returns {number[]}
+ */
+function closeRanks(saves) {
+    var order = saves.map(function (s, i) { return i })
+    order.sort(function (a, b) { return (saves[a].closedAt - saves[b].closedAt) || (a - b) })
+    /** @type {number[]} */
+    var burst = []
+    for (var k = 0; k < order.length; k++) {
+        var at = saves[order[k]].closedAt
+        var previous = k ? saves[order[k - 1]].closedAt : NaN
+        burst[order[k]] = k && at > 0 && previous > 0 && at - previous <= BURST_MS ? burst[order[k - 1]] : at
+    }
+    order.sort(function (a, b) {
+        return (burst[b] - burst[a]) || (saves[a].closedAt - saves[b].closedAt) || (a - b)
+    })
+    /** @type {number[]} */
+    var ranks = []
+    for (var r = 0; r < order.length; r++) ranks[order[r]] = r
+    return ranks
 }
 
 // Deterministic slot matching: pick the best save not yet taken for one live window.
@@ -210,8 +238,8 @@ function isBetterMatch(a, b) {
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
-// Equal matches (alike windows: the same title once digits are dropped, the same size) are
-// ranked by close time (see isBetterMatch).
+// Equal matches (alike windows: the same title once digits are dropped, the same size) go by
+// closeRanks.
 // Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
@@ -229,6 +257,7 @@ function bestMatch(saves, live, taken, scores) {
         if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
         return scores[i]
     }
+    var ranks = closeRanks(saves)
     var best = null
     var free = -1
     var freeCount = 0
@@ -244,11 +273,11 @@ function bestMatch(saves, live, taken, scores) {
         else if (dims === 2) tier = 2
         else if (caption >= CAPTION_FALLBACK) tier = 3
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: caption, closedAt: s.closedAt }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption, rank: ranks[i] }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: score(free), closedAt: saves[free].closedAt }
+        return { index: free, tier: 4, dims: 0, score: score(free), rank: ranks[free] }
     }
     return best
 }
@@ -673,6 +702,23 @@ function predictedKey(state, cls, caption) {
         }
     }
     return found
+}
+
+// The latest close time in the saved data: close times keep increasing from it.
+/**
+ * @param {State} state
+ * @returns {number}
+ */
+function latestClose(state) {
+    var latest = 0
+    for (var key in state.apps) {
+        var app = state.apps[key]
+        for (var desk in app.desktops) {
+            var saves = app.desktops[desk].saves
+            for (var i = 0; i < saves.length; i++) latest = Math.max(latest, saves[i].closedAt || 0)
+        }
+    }
+    return latest
 }
 
 // The layout an app left on one desktop: { lastAccess, saves } or null.

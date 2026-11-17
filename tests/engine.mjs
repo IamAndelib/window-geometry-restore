@@ -178,6 +178,31 @@ test('bestMatch: prefers higher tier, then dims, then score', () => {
     assert.equal(m.tier, 2)
 })
 
+test('closeRanks: the newest burst first, the first closed first within a burst, as a strict order', () => {
+    const at = (...times) => times.map((t) => save({ closedAt: t }))
+    assert.deepEqual(engine.closeRanks(at(10000, 20000)), [1, 0], 'closed apart: the later first (#14)')
+    assert.deepEqual(engine.closeRanks(at(10000, 10500)), [0, 1], 'closed together: in close order')
+    assert.deepEqual(engine.closeRanks(at(10000, 11000, 12000)), [0, 1, 2], 'a burst chains (each within BURST_MS of the next)')
+    assert.deepEqual(engine.closeRanks(at(10002, 10001, 10003)), [1, 0, 2], 'listed out of order (another monitor first): by time')
+    assert.deepEqual(engine.closeRanks(at(10000, 10001, 30000, 30001)), [2, 3, 0, 1], 'two bursts: the newer one first, each in close order')
+    assert.deepEqual(engine.closeRanks(at(0, 0, 50000)), [1, 2, 0], 'older saves without close times: the oldest burst, in list order')
+    assert.deepEqual(engine.closeRanks([]), [])
+})
+
+test('alike windows taking saves one after another follow the close ranks, without cycles', () => {
+    // The review's case: one chained burst at 10, 11 and 12 s. Pairwise "within BURST_MS" ranked
+    // these in a cycle and handed out C, A, B.
+    const saves = [save({ closedAt: 10000 }), save({ closedAt: 11000 }), save({ closedAt: 12000 })]
+    const taken = []
+    const got = []
+    for (let n = 0; n < 3; n++) {
+        const m = engine.bestMatch(saves, live(), taken)
+        got.push(m.index)
+        taken[m.index] = true
+    }
+    assert.deepEqual(got, [0, 1, 2])
+})
+
 test('bestMatch: equal matches go to a save closed clearly later, else to the one listed first', () => {
     const other = save({ caption: 'Other', width: 1, height: 1 })
     const apart = [save({ closedAt: 10000 }), save({ closedAt: 20000 }), other]
@@ -196,10 +221,12 @@ test('bestMatch: equal matches go to a save closed clearly later, else to the on
 })
 
 test('isBetterMatch: tier, then dims, then score', () => {
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0 }, { tier: 2, dims: 2, score: 100 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 0, score: 99 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 1, score: 80 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, rank: 1 }, { tier: 2, dims: 2, score: 100, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 0, score: 99, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80, rank: 1 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 1, score: 80, rank: 1 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 0 }, { tier: 1, dims: 2, score: 100, rank: 1 }), true, 'then the close rank')
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 1 }, { tier: 1, dims: 2, score: 100, rank: 0 }), false)
 })
 
 test('single-save fallback: the lone save always applies to the next window (tier 4)', () => {

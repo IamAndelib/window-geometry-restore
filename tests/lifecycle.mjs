@@ -3705,3 +3705,15 @@ test('alike windows keep their places across logouts, on one monitor and on two'
     const three = [two[0], two[1], { x: 600, y: 300, width: 960, height: 635 }]
     for (const s of logoutCycles(three, [0, 1, 0], 4)) assert.deepEqual(s, [[100, 100], [2100, 150], [600, 300]], 'three windows')
 })
+
+test('close times keep increasing across sessions, whatever the clock did', () => {
+    // A save from a session whose clock ran ahead (before NTP corrected it).
+    const future = 1000000000 + 7200000
+    const rt = buildRuntime(savedLayouts({ files: [{ c: 'Home', x: 2100, y: 150, w: 960, h: 635, o: null, ct: future }] }))
+    const w = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Doc')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    w.emitClosed()
+    const saves = savedApp(rt, 'files').d['desk-uuid-1'].w
+    assert.ok(Math.max(...saves.filter((s) => s.c === 'Doc').map((s) => s.ct)) > future, 'closed later, so ranked later')
+})
