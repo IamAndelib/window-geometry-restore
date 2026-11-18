@@ -40,15 +40,15 @@ const extracted = extractFunctions(qml)
 // from main.qml must be listed here too.
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'logOnce', 'removeFromArray', 'connectSignal', 'disconnectSignal',
-    'loadConfig', 'loadPersisted', 'persist',
-    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'isAppOf', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
+    'loadConfig', 'loadPersisted', 'persist', 'followSavedCloses', 'nextCloseTime',
+    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'pruneHandoffs', 'isAppOf', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
     'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
     'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'dialogSizeOf', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
-    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
+    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'notePlacement', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
     'sweepRetries', 'sweepSessions', 'sweepPredictions', 'isIdle', 'ensureTick', 'onTick',
@@ -431,6 +431,7 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         var reported = {};
         var lastWritten = '';
         var lastClosedAt = 0;
+        var closeOffset = 0;
         var store = Engine.newState();
         var live = {};
         var tracked = {};
@@ -3707,6 +3708,33 @@ test('alike windows keep their places across logouts, on one monitor and on two'
     for (const s of logoutCycles(three, [0, 1, 0], 4)) assert.deepEqual(s, [[100, 100], [2100, 150], [600, 300]], 'three windows')
 })
 
+test('after a clock that ran ahead, close times still count real time: separate closes stay separate bursts', () => {
+    const future = 1000000000 + 7200000
+    const rt = buildRuntime(savedLayouts({ files: [{ c: 'Home', x: 2100, y: 150, w: 960, h: 635, o: null, ct: future }] }))
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    const first = makeWindow({ cls: 'other', caption: 'One' })
+    rt.trackWindow(first)
+    first.emitClosed()
+    const ct = () => savedApp(rt, 'other').d['desk-uuid-1'].w[0].ct
+    const one = ct()
+    assert.ok(one > future, 'after the saved close')
+    advanceClock(rt, 60000)
+    const second = makeWindow({ cls: 'other', caption: 'Two' })
+    rt.trackWindow(second)
+    second.emitClosed()
+    assert.equal(ct() - one, 60000, 'a minute apart, as they closed')
+})
+
+test('a fixed-size window asking for fullscreen still takes the one save left', () => {
+    const rt = buildRuntime(savedLayouts({ player: [{ c: 'Library', x: 300, y: 200, w: 900, h: 600, o: null }] }))
+    const w = makeWindow({ cls: 'player', caption: 'Movie', x: 0, y: 0, width: 1920, height: 1080 })
+    w.resizeable = false
+    w.fullScreen = true
+    rt.trackWindow(w)
+    assert.ok(rt.getLogs().some((l) => /restored window to saved state/.test(l)), rt.getLogs().join('\n'))
+})
+
 test('close times keep increasing across sessions, whatever the clock did', () => {
     // A save from a session whose clock ran ahead (before NTP corrected it).
     const future = 1000000000 + 7200000
@@ -3861,6 +3889,14 @@ test('a hand-off needs an untouched lone window, closed just before', () => {
     earlier._moveToDesktop(1)
     assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'an earlier window: kept')
 
+    // Restored, then sent to another desktop and closed there.
+    rt = buildRuntime(savedLayouts({ [LO]: [{ c: 'Untitled 1 — LibreOffice Writer', x: 100, y: 80, w: 1500, h: 900, o: null }] }))
+    const sent = appWindow(rt)
+    assert.deepEqual(frameOf(sent), [100, 80, 1500, 900], 'precondition: restored')
+    sent._moveToDesktop(2)
+    handOver(rt, sent, () => appWindow(rt, { desktop: 2 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-2'], 'sent to another desktop: kept')
+
     // The app has a window open on another desktop: it is running, not starting.
     rt = buildRuntime()
     appWindow(rt, { caption: 'Elsewhere', desktop: 2 })
@@ -3906,4 +3942,52 @@ test('a fixed-size window near its save\'s size takes it as the one save left: i
     w.resizeable = false
     rt.trackWindow(w)
     assert.deepEqual([w.x, w.y], [300, 200])
+})
+
+// One window of an app reopened after its windows closed a minute apart on two monitors: it goes
+// where the last one closed (#14), as long as close times count real time.
+const reopenAfterTwoCloses = (rt) => {
+    const right = onMonitor(rt, 'files', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'Home 2')
+    const left = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Home 1')
+    advanceClock(rt, 60000)
+    right.emitClosed()
+    advanceClock(rt, 60000)
+    left.emitClosed()
+    advanceClock(rt, 60000)
+    const again = onMonitor(rt, 'files', 0, { x: 0, y: 0, width: 960, height: 635 }, 'Home 3')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    return [again.x, again.y]
+}
+
+test('a clock set back during the session starts a new burst: the window closed last still wins', () => {
+    assert.deepEqual(reopenAfterTwoCloses(buildRuntime()), [100, 100], 'control')
+    const rt = buildRuntime()
+    const start = rt.nowRef()
+    rt.setNow(start + 2 * 3600 * 1000) // ahead at login
+    onMonitor(rt, 'other', 0, { x: 0, y: 0, width: 500, height: 500 }, 'X').emitClosed()
+    rt.setNow(start + 60000) // NTP sets it back
+    assert.deepEqual(reopenAfterTwoCloses(rt), [100, 100])
+})
+
+test('a window dragged out of its tile and back in is not untouched: no hand-off undoes its save', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set(outputs[0], layout)
+    saveTiled(rt, 'doc', layout.tiles[1].tiles[0])
+    advanceClock(rt, 60000)
+    const w = reopen(rt, 'doc')
+    w.pid = 7
+    rt.tick()
+    w._dragOut(600, 400)
+    w._setFrame({ x: 600, y: 400, width: 1200, height: 800 })
+    w._tileTo(layout.tiles[1].tiles[0])
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    advanceClock(rt, 500)
+    const next = makeWindow({ cls: 'doc', caption: 'Other', x: 40, y: 40, width: 960, height: 1080 })
+    next.pid = 7
+    rt.trackWindow(next)
+    const f = savedApp(rt, 'doc').d['desk-uuid-1'].w[0].f
+    assert.deepEqual([f.x, f.y, f.w, f.h], [600, 400, 1200, 800])
 })

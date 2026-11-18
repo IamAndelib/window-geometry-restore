@@ -687,15 +687,25 @@ test('keepsPlacement: where, and as, the save a window was placed from put it, o
     assert.equal(engine.keepsPlacement(save(), null, null), false, 'where it opened unknown')
     assert.equal(engine.keepsPlacement(save({ maximized: 3 }), null, at), false, 'maximized since')
     assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), null, at), false, 'tiled since')
-    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 }), null), true, 'maximized as restored')
-    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 }), null), false, 'unmaximized since')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 }), at), true, 'maximized as restored')
+    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 }), at), false, 'unmaximized since')
     assert.equal(engine.keepsPlacement(save({ x: 5 }), save(), at), false, 'moved from the save')
-    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) }), null), true, 'in its quick tile')
-    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) }), null), false, 'another quick tile')
-    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 1) }), null), true, 'in its custom tile')
-    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 2) }), null), false, 'another custom tile')
-    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: custom(0, 1) }), null), false, 'a parent tile')
-    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: quick(0) }), null), false, 'another kind')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) }), at), true, 'in its quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) }), at), false, 'another quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 1) }), at), true, 'in its custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 2) }), at), false, 'another custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: custom(0, 1) }), at), false, 'a parent tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: quick(0) }), at), false, 'another kind')
+    assert.equal(engine.keepsPlacement(save(), save(), null), false, 'placed, then sent to another desktop')
+})
+
+test('decodeState drops close times a Date can\'t hold', () => {
+    const blob = (ct) => JSON.stringify({ version: 2, apps: { a: { t: 1, w: [], d: { k: { t: 1, w: [{ c: 'A', x: 0, y: 0, w: 10, h: 10, o: null, ct }] } } } } })
+    const closedAt = (ct) => engine.decodeState(blob(ct)).state.apps.a.desktops.k.saves[0].closedAt
+    assert.equal(closedAt(1234.5), 1234)
+    assert.equal(closedAt(1e300), 0)
+    assert.equal(closedAt(-5), 0)
+    assert.equal(closedAt('soon'), 0)
 })
 
 test('nearSize: within a fifth both ways', () => {

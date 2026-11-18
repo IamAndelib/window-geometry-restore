@@ -20,9 +20,10 @@
 //              { k: 'c', p: [childIndexes], g: { x, y, w, h } }  custom tile, relativeGeometry
 //           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own,
 //           max: KWin's maximize mode (1 vertical, 2 horizontal, 3 both; only when maximized
-//                at close; x/y/w/h are then the normal geometry to return to) }
+//                at close; x/y/w/h are then the normal geometry to return to),
+//           ct: close time (ms, increasing in close order; closeRanks) }
 // Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
-// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3).
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt.
 // v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
 // ignored.
 
@@ -54,6 +55,8 @@ var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
 var TICK_MS = 250
 var MAX_BUFFER = 64
+// The latest time a Date can hold (ms).
+var MAX_TIME = 8.64e15
 
 // Tiles. KWin creates the quick tiles in this order; the actions quick-tile the active window.
 /** @type {KQuickTileAction[]} */
@@ -243,7 +246,6 @@ function closeRanks(saves) {
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
 // Equal matches (alike windows: the same title once digits are dropped, the same size) go by
 // closeRanks.
-// Returns { index, tier, dims, score } or null.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
 /**
@@ -482,7 +484,9 @@ function decodeSave(s) {
     fields.tile = tile
     fields.free = tile ? decodeGeometry(s.f) : null
     fields.maximized = isIndex(s.max, 4) ? s.max : 0
-    fields.closedAt = numberOr(s.ct, 0)
+    // A time a Date can hold, so later closes still count up from it (main.qml followSavedCloses).
+    var ct = numberOr(s.ct, 0)
+    fields.closedAt = ct > 0 && ct <= MAX_TIME ? Math.floor(ct) : 0
     return makeSave(fields)
 }
 
@@ -621,7 +625,7 @@ function decodeOpenings(list) {
     return opens
 }
 
-// A title as openings keep it.
+// A title as saves and openings keep it.
 /**
  * @param {unknown} caption
  * @returns {string}
@@ -707,7 +711,7 @@ function predictedKey(state, cls, caption) {
     return found
 }
 
-// The latest close time in the saved data: close times keep increasing from it.
+// The latest close time in the saved data (main.qml followSavedCloses).
 /**
  * @param {State} state
  * @returns {number}
@@ -725,9 +729,9 @@ function latestClose(state) {
 }
 
 // Whether a closing window is as the script left it: where, and in the maximize mode and tile,
-// the save it was placed from put it, or where it `opened` if it wasn't placed (null: unknown,
-// so it may have been moved). A window moved by any means, a shortcut or another script too,
-// or resized by the app, isn't.
+// the save it was placed from put it, or where it `opened` if it wasn't placed. A window moved by
+// any means, a shortcut or another script too, or resized by the app, isn't. `opened` is null
+// when unknown (adopted) or when the window was sent to another desktop: then it isn't either.
 /**
  * @param {Save} snap
  * @param {Save | null} from
@@ -735,7 +739,7 @@ function latestClose(state) {
  * @returns {boolean}
  */
 function keepsPlacement(snap, from, opened) {
-    var at = from ? { x: from.x, y: from.y, w: from.width, h: from.height } : opened
+    var at = !opened ? null : from ? { x: from.x, y: from.y, w: from.width, h: from.height } : opened
     return !!at && snap.x === at.x && snap.y === at.y && snap.width === at.w && snap.height === at.h &&
         snap.maximized === (from ? from.maximized : 0) && sameTile(snap.tile, from ? from.tile : null)
 }

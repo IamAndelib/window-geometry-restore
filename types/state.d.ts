@@ -164,8 +164,8 @@ interface Close {
     monitor: SavedScreen | null
     /** The save the script placed the window at: replaced by this close (issue #8). */
     from: Save | null
-    /** The app's last window, closed as the script left it: it may have handed over to a window
-     *  opening next (main.qml handOff). */
+    /** Set when the window closed as the script left it (Engine.keepsPlacement); a possible
+     *  hand-off (main.qml handOff) if it is its monitor's only close (finalizeMonitor). */
     handoff: HandoffSource | null
 }
 
@@ -174,13 +174,12 @@ interface Close {
 interface HandoffSource { resourceClass: string; pid: number; fixedSize: boolean }
 
 /** A layout saved from a window that may have been a splash screen or startup prompt: undone if
- *  the window it handed over to opens after `closedAt`, by `until` (main.qml handOff). */
+ *  the window it handed over to opens by `until` (main.qml handOff). */
 interface Handoff {
     from: HandoffSource
     cls: string
     desktopKey: string
     caption: string
-    closedAt: number
     until: number
     recorded: Layout
     before: LayoutBefore
@@ -244,7 +243,7 @@ interface Entry {
     userPlaced: boolean
     provisional: { save: Save; until: number } | null
     openedAt: number
-    /** Where it opened (null if adopted): untouched while it is still there (Engine.keepsPlacement). */
+    /** Where it opened; null if adopted or sent to another desktop (Engine.keepsPlacement). */
     opened: PixelRect | null
     restoredFrom: RestoredFrom | null
     placedFrom: Save | null

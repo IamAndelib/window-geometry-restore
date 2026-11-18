@@ -33,11 +33,14 @@ needs on top.
 ## State model (main.qml)
 - `store`: persisted layouts per app and desktop (`d`), plus the latest one (`w`) for older
   versions. Each monitor's part of a desktop's layout is replaced by the app's next close on
-  that monitor. A closing window also drops the save it was placed from (`placedFrom`), on any monitor.
+  that monitor. A closing window also drops the save it was placed from (`placedFrom`), on any
+  monitor the app has no window on.
 - `live`: runtime groups (an app on one desktop key) with `open`, `buffer`, `session` and
   `settled`.
 - `tracked`: runtime entries per window id, with `home`, `tile`, `free` and `pendingTile`.
 - `retries`: geometry writes that haven't stuck yet.
+- `handoffs`: layouts saved from a window that may have handed over to the app's window (a
+  splash screen); `handOff` undoes them within `HANDOFF_MS`.
 - A window's close is detected only through `Workspace.windowRemoved`.
 
 ## Design notes

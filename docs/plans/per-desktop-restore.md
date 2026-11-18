@@ -40,7 +40,7 @@ while waiting for its restore is not restored.
 app: { t, w: [latest layout, any desktop],          read by older versions, never restored from
        d: { "<desktop id>" | "*": { t, w: [...] } } }  per-desktop layouts
 ```
-- When a group's last window closes, its layout is written to `d[key]`, and also to `w` so that
+- When a group's last window closes (per monitor since per-monitor-restore.md), its layout is written to `d[key]`, and also to `w` so that
   older versions keep working.
 - A restore reads only `d[key]`, so data from older versions (`w` only) restores nothing.
 - Pruning works per desktop: a deleted desktop's layouts expire after 30 days. The merge with

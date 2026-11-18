@@ -29,6 +29,7 @@ on, and how to test a change before it reaches anyone's desktop.
 | `src/contents/ui/main.qml` | Runtime: KWin signals, tracking, restore sessions, placement, tiles, persistence |
 | `src/contents/ui/engine.js` | Pure logic, no KWin: the saved-data format, matching, exclusion list, window rules |
 | `src/contents/config/main.xml`, `src/contents/ui/config.ui` | Settings. The default exclusion list is also in `main.qml`; a test checks the two copies match |
+| `types/` | Types for the type check: KWin's scripting API, the script's data, what `main.qml` sees |
 | `tests/engine.mjs` | Unit tests for `engine.js` |
 | `tests/lifecycle.mjs` | The real functions of `main.qml` against a fake KWin |
 | `tests/kwin/` | Scenarios against a real, headless KWin |
@@ -73,7 +74,10 @@ on, and how to test a change before it reaches anyone's desktop.
     rest wait up to 10 s for the set to arrive. Equal matches (alike windows) are ranked by when
     their saves closed: one closed clearly later, on its own, wins (a single window reopens where
     it was closed last); saves closed together (a logout, an app quitting) go in close order, so
-    alike windows reopening in the order they opened keep their places.
+    alike windows reopening in the order they opened keep their places (`Engine.closeRanks`,
+    bursts chained as `finalizeMonitor` chains closes). Close times count real time, after every
+    saved one (`followSavedCloses`, `nextCloseTime`): a clock that ran ahead, or was set back,
+    doesn't chain later closes into one burst.
   - A window at its minimum width (sized to its content) and under half the width and height of
     every save it could take is a dialog shown without a parent (a startup password prompt,
     `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
@@ -89,7 +93,8 @@ on, and how to test a change before it reaches anyone's desktop.
     the app is open, and:
     - the closed window was the only one closed there (its monitor's buffer) and untouched: where,
       and in the maximize mode and tile, it was placed, or where it opened
-      (`Engine.keepsPlacement`), so undoing its save loses nothing the user did;
+      (`Engine.keepsPlacement`), never dragged (`userPlaced`) or sent to another desktop, so
+      undoing its save loses nothing the user did;
     - it came from the same process (`pid`), or couldn't be resized.
 
     Saves are still written at once. See docs/plans/splash-handoff.md.

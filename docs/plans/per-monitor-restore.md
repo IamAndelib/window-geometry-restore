@@ -48,4 +48,4 @@ Option 2: independent while the app runs, back to their own monitors on a fresh 
 - `tests/kwin/scenarios.py`: the same against a real KWin. `s_monitors_independent_while_running`
   fails with the old "a running app never restores" rule, so it guards the change.
 
-## Status (2026-10-30): implemented; unit tests and all 16 real-KWin scenarios pass
+## Status (2026-10-30): implemented; unit tests and the real-KWin scenarios pass

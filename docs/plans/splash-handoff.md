@@ -43,6 +43,10 @@ the splash, Writer and Calc are one app to the script.
   `Engine.isDialog` catches it when the app has much larger saves.
 - A prompt restored to the app's save (the only one left, resizable) still shows at the app's
   size; only its save is undone.
+- A window under a Force size rule is fixed-size to KWin, so it hands over across processes
+  too; untouched, and placed by its rule anyway, it loses nothing.
+- An undone save can come back if another KWin instance rewrote the file meanwhile
+  (`persist` adopts layouts on disk that the store lacks).
 - A fixed-size app closed untouched and reopened within 3 s gets the layout from before its
   close, which it was placed from anyway; one never saved before opens where KWin puts it, as
   it did.

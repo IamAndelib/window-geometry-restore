@@ -38,21 +38,21 @@ Item {
     // The last close time given to a save: each close gets a later one, so saves keep the order
     // windows closed in, even closed in the same millisecond (a logout).
     property real lastClosedAt: 0
-    // Persisted: { apps: { cls: { lastAccess, saves, desktops: { desktopKey: { lastAccess, saves } } } } }.
-    // A desktop's layout keeps each monitor's part until the app's next close on that monitor
-    // (or of a window restored from it), so a crash or power loss still restores the last layout.
+    // Added to the clock for close times, so they come after every saved one (followSavedCloses).
+    property real closeOffset: 0
+    // Persisted (State, types/state.d.ts). A desktop's layout keeps each monitor's part until the
+    // app's next close on that monitor (or of a window placed from it), so a crash or power loss
+    // still restores the last layout.
     property var store: Engine.newState()
-    // Runtime, per group (an app on one desktop key, see desktopKeyOf) with open windows:
-    // { key, cls, desktopKey, label, open: [ids], buffer: [closes], session, settled }
+    // Runtime, per group (Group: an app on one desktop key, see desktopKeyOf) with open windows.
     property var live: ({})
-    // Runtime, per window id: { id, w, cls, desktopKey, groupKey, label, assigned, userPlaced,
-    //   provisional, home, tile, free, pendingTile, and the handlers connected to the window }
+    // Runtime, per window id (Entry):
     // - `home`: the window's geometry on its own monitor: the last one seen while not away (see
     //   isAway), or the saved one after a provisional placement; null once the user moves it.
     // - `tile`: the last tile seen; `free`: the last floating geometry (both save-shaped).
     // - `pendingTile`: a quick tile waiting for the window to become active.
     property var tracked: ({})
-    // Geometry writes that have not stuck yet: { id, target, tries, born }
+    // Geometry writes that have not stuck yet (Retry).
     property var retries: []
     // Layouts saved from a window that may have handed over to the app's window (handOff).
     property var handoffs: []
@@ -156,8 +156,7 @@ Item {
             lastWritten = raw
         }
         store = result.state
-        // Close times keep increasing across sessions, whatever the clock did in between.
-        lastClosedAt = Math.max(lastClosedAt, Engine.latestClose(store))
+        followSavedCloses()
         var removed = Engine.pruneExpired(store, Date.now())
         var count = 0
         for (var cls in store.apps) {
@@ -177,7 +176,7 @@ Item {
             if (raw !== lastWritten) {
                 var disk = Engine.decodeState(raw)
                 if (!disk.error) {
-                    Engine.mergeDiskApps(store, disk.state)
+                    if (Engine.mergeDiskApps(store, disk.state)) followSavedCloses()
                 } else {
                     log('saved window data on disk unreadable (' + disk.error + ') - kept a copy before saving')
                     settings.setValue(storeKey + '_corrupt', raw)
@@ -190,6 +189,25 @@ Item {
         } catch (e) {
             log('failed to persist: ' + e)
         }
+    }
+
+    // Close times come after every saved one, whatever the clock did since (it ran ahead before
+    // NTP set it, or another KWin instance saved): an offset keeps the time between closes, which
+    // closeRanks reads bursts from.
+    function followSavedCloses() {
+        closeOffset = Math.max(closeOffset, Engine.latestClose(store) + 1 - Date.now())
+    }
+
+    // A close time: after every earlier and saved one, and counting real time, as closeRanks
+    // reads bursts from the time between closes. A clock set back (NTP, after it ran ahead) starts
+    // a new burst rather than chaining 1 ms after the last close.
+    /**
+     * @returns {number}
+     */
+    function nextCloseTime() {
+        var now = Date.now()
+        if (now + closeOffset < lastClosedAt - Engine.BURST_MS) closeOffset = lastClosedAt + Engine.BURST_MS + 1 - now
+        return lastClosedAt = Math.max(now + closeOffset, lastClosedAt + 1)
     }
 
     // ---- tracking windows ------------------------------------------------------------------
@@ -229,7 +247,6 @@ Item {
         entry.groupKey = entry.cls + '\n' + entry.desktopKey
         // x11DesktopNumber is KWin's name for a desktop's position, on Wayland too.
         entry.label = entry.cls + (entry.desktopKey === '*' ? ' (all desktops)' : ' (desktop ' + w.desktops[0].x11DesktopNumber + ')')
-        if (entry.openedAt && Date.now() - entry.openedAt < Engine.RESTORE_TIMEOUT_MS) handOff(entry)
         if (!live[entry.groupKey]) {
             live[entry.groupKey] = {
                 key: entry.groupKey, cls: entry.cls, desktopKey: entry.desktopKey, label: entry.label,
@@ -243,23 +260,23 @@ Item {
 
     // A splash screen or startup prompt is a normal window to KWin. Shown alone before the app's
     // window (LibreOffice's splash, a profile chooser), its close was saved as the app's layout,
-    // and the app's window then opened at its size. A window opening after it closed, soon
-    // (HANDOFF_MS), is the one it handed over to if it is the same app (app key or window class:
-    // a KWin rule can give an app's windows their own desktop file names, as for LibreOffice's
-    // components) on the same desktop, no other window of the app is open (it is starting), and
-    // it comes from the same process, or the closed window couldn't be resized, as a splash
-    // screen can't (LibreOffice's comes from another process on a first start). That save is
+    // and the app's window then opened at its size. A window opening soon after (HANDOFF_MS) is
+    // the one it handed over to if it is the same app (app key or window class: a KWin rule can
+    // give an app's windows their own desktop file names, as for LibreOffice's components) on the
+    // same desktop, no other window of the app is open (it is starting), and it comes from the
+    // same process, or the closed window couldn't be resized, as a splash screen can't
+    // (LibreOffice's comes from another process on a first start). That save is
     // undone: the app's layout is again what it was before. The closed window was untouched,
     // where it was placed or opened, so nothing the user did is lost.
     /**
      * @param {Entry} entry
      */
     function handOff(entry) {
-        var now = Date.now()
-        handoffs = handoffs.filter(function (h) { return h.until > now })
+        pruneHandoffs(Date.now())
+        var undone = false
         for (var i = handoffs.length - 1; i >= 0; i--) {
             var h = handoffs[i]
-            if (h.desktopKey !== entry.desktopKey || entry.openedAt < h.closedAt || !isAppOf(entry, h)) continue
+            if (h.desktopKey !== entry.desktopKey || !isAppOf(entry, h)) continue
             if (!h.from.fixedSize && !(h.from.pid > 0 && h.from.pid === entry.w.pid)) continue
             var running = false
             for (var id in tracked) {
@@ -270,8 +287,16 @@ Item {
             if (!Engine.undoLayout(store, h.cls, h.desktopKey, h.recorded, h.before)) continue
             log(h.cls + ': "' + h.caption + '" handed over to a new window of the app, as a splash screen or ' +
                 'startup prompt does: its save undone')
-            persist()
+            undone = true
         }
+        if (undone) persist()
+    }
+
+    /**
+     * @param {number} now
+     */
+    function pruneHandoffs(now) {
+        handoffs = handoffs.filter(function (h) { return h.until > now })
     }
 
     /**
@@ -341,6 +366,7 @@ Item {
         }
         tracked[id] = entry
         var group = joinGroup(entry)
+        if (!adopted) handOff(entry)
         entry.moveHandler = connectSignal(w, 'interactiveMoveResizeStarted', function () { onUserMoveResize(id) })
         entry.geometryHandler = connectSignal(w, 'frameGeometryChanged', function () { noteGeometry(id) })
         entry.tileHandler = connectSignal(w, 'tileChanged', function () { noteTile(id) })
@@ -421,6 +447,8 @@ Item {
         var entry = tracked[id]
         if (!entry || desktopKeyOf(entry.w) === entry.desktopKey) return
         var label = entry.label
+        // Sent elsewhere by the user: not as the script left it (Engine.keepsPlacement).
+        entry.opened = null
         if (leaveGroup(entry)) {
             entry.assigned = true
             log(label + ': window moved to another desktop before its restore, not restoring it')
@@ -804,9 +832,9 @@ Item {
             } else {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
-            fields.caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
+            fields.caption = Engine.openingTitle(w.caption)
             // When it closed, in close order (equal matches are ranked by it: Engine.closeRanks).
-            fields.closedAt = lastClosedAt = Math.max(Date.now(), lastClosedAt + 1)
+            fields.closedAt = nextCloseTime()
             // The tile as last seen while the window was open: on close, KWin lets go of the window
             // before scripts hear of it, and resets the quick-tile split if no quick tile is used.
             var current = away ? null : describeTile(w.tile)
@@ -853,7 +881,8 @@ Item {
         if (snap) {
             // Untouched: it may hand over to a window opening next (handOff).
             var w = entry.w
-            var handoff = Engine.keepsPlacement(snap, entry.placedFrom, entry.opened)
+            // A drag counts even back to where it was: out of a tile and into it again.
+            var handoff = !entry.userPlaced && Engine.keepsPlacement(snap, entry.placedFrom, entry.opened)
                 ? { resourceClass: entry.resourceClass, pid: w.pid > 0 ? w.pid : 0, fixedSize: !w.resizeable } : null
             group.buffer.push({ closeTime: Date.now(), snap: snap, monitor: snap.output, from: entry.placedFrom, handoff: handoff })
             if (group.buffer.length > Engine.MAX_BUFFER) group.buffer.shift()
@@ -884,7 +913,7 @@ Item {
 
     // The windows that closed together on one monitor (each within BURST_MS of the next) become
     // that monitor's part of the app's layout on this desktop. Other monitors keep theirs, except
-    // the saves these windows were restored from: a window moved here keeps no save where it left.
+    // the saves these windows were placed from: a window moved here keeps no save where it left.
     /**
      * @param {Group} group
      * @param {SavedScreen | null} monitor
@@ -933,9 +962,10 @@ Item {
         var recorded = Engine.recordLayout(store, group.cls, group.desktopKey, kept.concat(saves), Date.now())
         log(group.label + ' closed' + (monitor ? ' on ' + monitor.name : '') + ', saved ' + saves.length + ' window(s)')
         if (handoff && before) {
+            pruneHandoffs(Date.now())
             handoffs.push({
                 from: handoff, cls: group.cls, desktopKey: group.desktopKey, caption: saves[0].caption,
-                closedAt: closed[0].closeTime, until: Date.now() + Engine.HANDOFF_MS, recorded: recorded, before: before
+                until: Date.now() + Engine.HANDOFF_MS, recorded: recorded, before: before
             })
         }
         return true
@@ -1201,7 +1231,7 @@ Item {
      */
     function matchFor(entry, session, scores) {
         var w = entry.w
-        var caption = String(w.caption || '').slice(0, Engine.MAX_CAPTION)
+        var caption = Engine.openingTitle(w.caption)
         scores = scores || []
         var taken = session.taken
         var candidates = 0
@@ -1228,17 +1258,20 @@ Item {
             return null
         }
         var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height }, taken, scores)
-        // A window that can't be resized always opens at its size, which its own saves have. Matched
-        // by neither title nor size, only as the save left, and far from its size, it is another
-        // window: a splash screen (LibreOffice's) took the app window's place, off centre.
-        if (match && match.tier === 4 && !w.resizeable && !Engine.nearSize(size, session.saves[match.index])) {
+        // A window that can't be resized (other than by asking for fullscreen) always opens at its
+        // size, which its own saves have. Matched by neither title nor size, only as the save
+        // left, and far from its size, it is another window: a splash screen (LibreOffice's) took
+        // the app window's place, off centre.
+        if (match && match.tier === 4 && !w.resizeable && !w.fullScreen && !Engine.nearSize(size, session.saves[match.index])) {
             dbg(entry.label + ': "' + caption + '" can\'t be resized and matches no save by title or size: left as it is')
             return null
         }
         // A save after all (its title or size changed): the app's window.
-        if (match) entry.dialog = null
-        // The other app's saves never arrive: one save left for this caption is a clear match.
-        if (match) match.only = candidates === 1
+        if (match) {
+            entry.dialog = null
+            // The other app's saves never arrive: one save left for this caption is a clear match.
+            match.only = candidates === 1
+        }
         return match
     }
 
@@ -1410,6 +1443,22 @@ Item {
         w.frameGeometry = Qt.rect(rect.x, rect.y, rect.w, rect.h)
     }
 
+    // Where a save puts a window: on its own monitor, or provisionally on another (its own is
+    // missing), until `until`.
+    /**
+     * @param {Entry} entry
+     * @param {Save} save
+     * @param {Target} target
+     * @param {number} until
+     */
+    function notePlacement(entry, save, target, until) {
+        entry.provisional = target.provisional ? { save: save, until: until } : null
+        if (target.provisional) entry.home = save // the whole save: maximized and tile included
+        // Placed on the save's own monitor: a close elsewhere takes this save along (issue #8).
+        // Not when its monitor is missing: the window didn't leave it, the script couldn't get there.
+        entry.placedFrom = target.provisional ? null : save
+    }
+
     // Returns true when the window was moved. A provisional placement may be redone
     // until `until` if the saved screen shows up (see reapplyProvisional).
     // A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
@@ -1433,11 +1482,7 @@ Item {
         // rect, so it doesn't show at its floating geometry first (see quickTileWhenActive).
         var target = free && tiling && tiling.tile ? free : targetFor(w, save)
         if (!target) return false
-        entry.provisional = target.provisional ? { save: save, until: until } : null
-        if (target.provisional) entry.home = save // the whole save: maximized and tile included
-        // Placed on the save's own monitor: a close elsewhere takes this save along (issue #8).
-        // Not when its monitor is missing: the window didn't leave it, the script couldn't get there.
-        entry.placedFrom = target.provisional ? null : save
+        notePlacement(entry, save, target, until)
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)
@@ -1473,11 +1518,7 @@ Item {
         if (w.tile || w.fullScreen || w.move || w.resize) return false
         var target = targetFor(w, save)
         if (!target) return false
-        entry.provisional = target.provisional ? { save: save, until: until } : null
-        if (target.provisional) entry.home = save // the whole save: maximized and tile included
-        // Placed on the save's own monitor: a close elsewhere takes this save along (issue #8).
-        // Not when its monitor is missing: the window didn't leave it, the script couldn't get there.
-        entry.placedFrom = target.provisional ? null : save
+        notePlacement(entry, save, target, until)
         var r = target.rect
         if (w.maximizeMode) w.setMaximize(false, false)
         setGeometry(w, r) // onto its monitor: KWin maximizes the window where it is
