@@ -358,7 +358,7 @@ Item {
         var entry = {
             id: id, w: w, cls: cls, resourceClass: resourceClass, desktopKey: '', groupKey: '', label: cls,
             assigned: !!adopted, userPlaced: false, provisional: null, openedAt: adopted ? 0 : Date.now(),
-            opened: adopted ? null : { x: Math.round(w.x), y: Math.round(w.y), w: Math.round(w.width), h: Math.round(w.height) }, restoredFrom: null, placedFrom: null, dialog: null, unmaximizedUntil: 0,
+            opened: adopted ? null : { x: Math.round(w.x), y: Math.round(w.y), w: Math.round(w.width), h: Math.round(w.height) }, restoredFrom: null, placedFrom: null, dialog: null, framed: null, unmaximizedUntil: 0,
             openedKey: named, openingCaption: caption, learnedAs: null, learnings: 0, prediction: predicted ? { from: named, until: Date.now() + Engine.PREDICTION_MS } : null,
             home: null, tile: null, free: null, pendingTile: null,
             captionHandler: null, moveHandler: null, geometryHandler: null, tileHandler: null,
@@ -590,10 +590,11 @@ Item {
                 if (typeof w.tile.unmanage === 'function') w.tile.unmanage(w)
                 else w.tile = null
             }
-            if (from.save.maximized && w.maximizeMode) {
-                w.setMaximize(false, false)
+            if (from.save.maximized) {
                 // The frame stays maximized until the app follows: canPlace must not wait for it.
-                entry.unmaximizedUntil = Date.now() + Engine.RETRY_MAX_AGE_MS
+                if (w.maximizeMode) entry.unmaximizedUntil = Date.now() + Engine.RETRY_MAX_AGE_MS
+                // Also when KWin hasn't confirmed the maximize yet (see applyMaximized).
+                w.setMaximize(false, false)
             }
             setGeometry(w, before)
             entry.free = null
@@ -738,6 +739,8 @@ Item {
         if (!entry) return
         var w = entry.w
         try {
+            var framed = framedOf(w)
+            if (framed !== null) entry.framed = framed
             if (isAway(entry)) {
                 if (entry.pendingTile) quickTileWhenActive(id)
                 return
@@ -746,7 +749,7 @@ Item {
             entry.home = frame
             // A window taken for a dialog that grew out of it (the app sized it, or the user did)
             // is the app's window after all: saved, and counted.
-            if (entry.dialog && !Engine.isDialog(dialogSizeOf(w), entry.dialog.saves, [])) {
+            if (entry.dialog && !entry.dialog.framedUnlike && !Engine.isDialog(dialogSizeOf(w), entry.dialog.saves, [])) {
                 entry.dialog = null
                 dbg(entry.label + ': no longer dialog-sized, the app\'s window after all')
             }
@@ -833,6 +836,7 @@ Item {
                 fields = geometryOf(w.output, w.x, w.y, w.width, w.height)
             }
             fields.caption = Engine.openingTitle(w.caption)
+            fields.framed = entry.framed
             // When it closed, in close order (equal matches are ranked by it: Engine.closeRanks).
             fields.closedAt = nextCloseTime()
             // The tile as last seen while the window was open: on close, KWin lets go of the window
@@ -1196,6 +1200,12 @@ Item {
         var entry = tracked[id]
         if (!entry || entry.userPlaced) return
         entry.userPlaced = true
+        // Framed unlike the app's saves, but the user places it: one of the app's windows (an app
+        // whose title bar changed, Firefox's setting): saved, and counted.
+        if (entry.dialog && entry.dialog.framedUnlike) {
+            entry.dialog = null
+            dbg(entry.label + ': placed by the user, the app\'s window after all')
+        }
         entry.provisional = null
         entry.home = null
         cancelPendingTile(entry)
@@ -1207,7 +1217,7 @@ Item {
         log(entry.label + ': window placed by the user, not restoring it')
     }
 
-    // A window's size and title as Engine.isDialog reads them.
+    // A window's size as Engine.isDialog reads it.
     /**
      * @param {KWindow} w
      * @returns {DialogSize}
@@ -1217,11 +1227,20 @@ Item {
             width: Math.round(w.width),
             height: Math.round(w.height),
             clientWidth: Math.round(w.clientGeometry ? w.clientGeometry.width : w.width),
-            clientHeight: Math.round(w.clientGeometry ? w.clientGeometry.height : w.height),
-            minWidth: w.minSize ? Math.round(w.minSize.width) : 0,
-            minHeight: w.minSize ? Math.round(w.minSize.height) : 0,
-            caption: Engine.openingTitle(w.caption)
+            minWidth: w.minSize ? Math.round(w.minSize.width) : 0
         }
+    }
+
+    // Whether KWin draws a title bar on the window: its frame is taller than its client area.
+    // Unknown (null) while it is maximized or fullscreen, as KWin can leave maximized windows
+    // without one (Breeze's "hide title bars of maximized windows").
+    /**
+     * @param {KWindow} w
+     * @returns {boolean | null}
+     */
+    function framedOf(w) {
+        if (w.maximizeMode || w.fullScreen || !w.clientGeometry) return null
+        return w.height - w.clientGeometry.height >= 1
     }
 
     // `scores` (optional): this window's caption scores against the session's saves, kept by a
@@ -1251,18 +1270,25 @@ Item {
         }
         // Not the app's window but a dialog shown without a parent (Engine.isDialog): Gecko's
         // primary-password prompt opens that way before the main window, and took the main
-        // window's maximized or tiled state, then saved it as the app's layout; Kdenlive's welcome
-        // screen took the main window's place, and the main window, opened beside it, wasn't
-        // restored. Judged against the saves this window could take; noteGeometry looks again
-        // when its size changes.
+        // window's maximized or tiled state, then saved it as the app's layout. Judged against
+        // the saves this window could take; noteGeometry looks again when its size changes.
         var size = dialogSizeOf(w)
         if (Engine.isDialog(size, session.saves, taken)) {
-            if (!entry.dialog) log(entry.label + ': "' + caption + '" is a dialog-sized window (sized to its content, smaller ' +
-                'than the app\'s saved windows): left as it is, not saved')
-            entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }) }
+            if (!entry.dialog) log(entry.label + ': "' + caption + '" is a dialog-sized window (much smaller than the ' +
+                'app\'s saved windows, at its minimum width): left as it is, not saved')
+            entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }), framedUnlike: false }
             return null
         }
-        var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height }, taken, scores)
+        // Framed unlike every save it could take (a splash or welcome screen without a title bar,
+        // QGIS's or Kdenlive's, before the framed main window): not restored, not saved, and the
+        // main window, opening beside it, is the app's first.
+        if (Engine.isFramedUnlike(entry.framed, session.saves, taken)) {
+            if (!entry.dialog) log(entry.label + ': "' + caption + '" has ' + (entry.framed ? 'a' : 'no') + ' title bar, unlike ' +
+                'the app\'s saved windows (a splash or welcome screen): left as it is, not saved')
+            entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }), framedUnlike: true }
+            return null
+        }
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height, framed: entry.framed }, taken, scores)
         // A window that can't be resized (other than by asking for fullscreen) always opens at its
         // size, which its own saves have. Matched by neither title nor size, only as the save
         // left, and far from its size, it is another window: a splash screen (LibreOffice's) took
@@ -1488,6 +1514,9 @@ Item {
         var target = free && tiling && tiling.tile ? free : targetFor(w, save)
         if (!target) return false
         notePlacement(entry, save, target, until)
+        // Not maximized here: also a maximize the app asked for that KWin hasn't confirmed, which
+        // would keep the geometry written (see applyMaximized).
+        w.setMaximize(false, false)
         var moved = !rectEquals(w, target.rect)
         if (moved) {
             setGeometry(w, target.rect)

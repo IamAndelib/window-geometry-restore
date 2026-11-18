@@ -21,9 +21,11 @@
 //           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own,
 //           max: KWin's maximize mode (1 vertical, 2 horizontal, 3 both; only when maximized
 //                at close; x/y/w/h are then the normal geometry to return to),
-//           ct: close time (ms, increasing in close order; closeRanks) }
+//           ct: close time (ms, increasing in close order; closeRanks),
+//           fr: 1 if KWin drew a title bar on it, 0 if not (unknown when missing; framedUnlike) }
 // Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
-// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt.
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt,
+// framed (true, false or null).
 // v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
 // ignored.
 
@@ -245,7 +247,7 @@ function closeRanks(saves) {
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
 // Equal matches (alike windows: the same title once digits are dropped, the same size) go by
-// closeRanks.
+// closeRanks. A save framed unlike the window (framedUnlike) is never its own.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
 /**
@@ -267,7 +269,7 @@ function bestMatch(saves, live, taken, scores) {
     var free = -1
     var freeCount = 0
     for (var i = 0; i < saves.length; i++) {
-        if (taken[i]) continue
+        if (taken[i] || framedUnlike(saves[i], live.framed)) continue
         free = i
         freeCount++
         var s = saves[i]
@@ -298,16 +300,12 @@ function isDialogSized(width, height, save) {
     return width < save.width / 2 && height < save.height / 2
 }
 
-// A dialog the app shows without a parent (a password prompt or profile chooser at startup, a
-// welcome screen): on Wayland KWin can't tell it from the app's window (issue #3). Taken for one:
-// a window at its minimum width (sized to its content, as dialogs open; an app's window opens at
-// its default size), and against every save it could take, either
-// - under half its size both ways (Thunderbird's password prompt), or
-// - at its minimum height too (wholly sized to its content), smaller both ways, and with a title
-//   unlike the save's (Kdenlive's welcome screen, which the main window opens beside).
-// `win`: the frame (width, height, as saves are) and the client size with KWin's minSize (the
-// client's: no borders), and the title.
-var DIALOG_MIN_SIZE_SLACK = 32
+// A dialog the app shows without a parent (a password prompt or profile chooser at startup):
+// on Wayland KWin can't tell it from the app's window (issue #3). Taken for one: a window at its
+// minimum width (sized to its content, as dialogs open; an app's window opens at its default
+// size) and under half the size of every save it could take. `win`: { width, height (the
+// frame, as saves are), clientWidth, minWidth (KWin's minSize is the client's: no borders) }.
+var DIALOG_MIN_WIDTH_SLACK = 32
 /**
  * @param {DialogSize} win
  * @param {Save[]} saves
@@ -315,15 +313,42 @@ var DIALOG_MIN_SIZE_SLACK = 32
  * @returns {boolean}
  */
 function isDialog(win, saves, taken) {
-    if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_SIZE_SLACK) return false
-    var fitted = win.clientHeight <= win.minHeight + DIALOG_MIN_SIZE_SLACK
+    if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
     var free = 0
     for (var i = 0; i < saves.length; i++) {
         if (taken[i]) continue
-        var save = saves[i]
-        var smaller = fitted && win.width < save.width && win.height < save.height &&
-            captionScore(save.caption, win.caption) < CAPTION_FALLBACK
-        if (!smaller && !isDialogSized(win.width, win.height, save)) return false
+        if (!isDialogSized(win.width, win.height, saves[i])) return false
+        free++
+    }
+    return free > 0
+}
+
+// Whether a window and a save were framed differently: KWin draws a title bar on one and not on
+// the other (each known only when recorded, see Save.framed). Never the same window: a splash or
+// welcome screen without a title bar (QGIS's, Kdenlive's) isn't the app's framed window, whatever
+// its title or size. An app that draws its own title bar has KWin draw none on any of its windows.
+/**
+ * @param {Save} save
+ * @param {boolean | null | undefined} framed
+ * @returns {boolean}
+ */
+function framedUnlike(save, framed) {
+    return typeof framed === 'boolean' && typeof save.framed === 'boolean' && save.framed !== framed
+}
+
+// A window framed unlike every save it could take (framedUnlike): not one of the app's windows
+// these saves came from, but one shown before or beside them (a splash or welcome screen).
+/**
+ * @param {boolean | null} framed
+ * @param {Save[]} saves
+ * @param {boolean[]} taken
+ * @returns {boolean}
+ */
+function isFramedUnlike(framed, saves, taken) {
+    var free = 0
+    for (var i = 0; i < saves.length; i++) {
+        if (taken[i]) continue
+        if (!framedUnlike(saves[i], framed)) return false
         free++
     }
     return free > 0
@@ -344,7 +369,8 @@ function makeSave(fields) {
         tile: fields.tile || null,
         free: fields.free || null,
         maximized: fields.maximized || 0,
-        closedAt: fields.closedAt || 0
+        closedAt: fields.closedAt || 0,
+        framed: typeof fields.framed === 'boolean' ? fields.framed : null
     }
 }
 
@@ -475,6 +501,7 @@ function encodeSave(s) {
     if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
     if (s.maximized) out.max = s.maximized
     if (s.closedAt) out.ct = s.closedAt
+    if (s.framed !== null) out.fr = s.framed ? 1 : 0
     return out
 }
 
@@ -495,6 +522,7 @@ function decodeSave(s) {
     // A time a Date can hold, so later closes still count up from it (main.qml followSavedCloses).
     var ct = numberOr(s.ct, 0)
     fields.closedAt = ct > 0 && ct <= MAX_TIME ? Math.floor(ct) : 0
+    fields.framed = s.fr === 1 ? true : s.fr === 0 ? false : null
     return makeSave(fields)
 }
 

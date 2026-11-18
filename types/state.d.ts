@@ -31,10 +31,13 @@ interface Save extends Geometry {
     /** When the window closed (ms, strictly increasing per close: close order). 0 for saves from
      *  older versions. */
     closedAt: number
+    /** Whether KWin drew a title bar on it, seen while not maximized; null if unknown (older
+     *  versions, or never seen unmaximized). */
+    framed: boolean | null
 }
 
 /** What Engine.makeSave is built from. */
-type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number; closedAt?: number }
+type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number; closedAt?: number; framed?: boolean | null }
 
 /** An app's windows on one desktop. `saves` are in close order, the save closed last at the end:
  *  finalizeMonitor appends the closing monitor's part after the others' (kept in their order).
@@ -74,6 +77,8 @@ interface EncodedSave {
     max?: number
     /** Close time (optional; older versions ignore it). */
     ct?: number
+    /** 1 framed by KWin (a title bar), 0 not (optional; older versions ignore it). */
+    fr?: number
 }
 interface EncodedApp {
     t: number
@@ -99,7 +104,7 @@ interface Match {
 }
 
 /** What bestMatch compares a window by. */
-interface LiveWindow { caption: string; width: number; height: number }
+interface LiveWindow { caption: string; width: number; height: number; framed?: boolean | null }
 
 /** What Engine.isDialog judges a window by. */
 interface DialogSize {
@@ -108,10 +113,7 @@ interface DialogSize {
     height: number
     /** Without decoration borders, as KWin's minSize is. */
     clientWidth: number
-    clientHeight: number
     minWidth: number
-    minHeight: number
-    caption: string
 }
 
 /** The exclusion list: exact names, and wildcard patterns split at their stars. */
@@ -250,8 +252,11 @@ interface Entry {
     opened: PixelRect | null
     restoredFrom: RestoredFrom | null
     placedFrom: Save | null
-    /** A dialog without a parent (Engine.isDialog), and the saves it was judged against. */
-    dialog: { saves: Save[] } | null
+    /** A dialog without a parent (Engine.isDialog), or a window framed unlike the app's saves
+     *  (Engine.isFramedUnlike: a splash or welcome screen), and the saves it was judged against. */
+    dialog: { saves: Save[]; framedUnlike: boolean } | null
+    /** Whether KWin draws a title bar on it, last seen unmaximized; null until then. */
+    framed: boolean | null
     unmaximizedUntil: number
     openedKey: string
     openingCaption: string

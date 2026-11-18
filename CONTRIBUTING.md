@@ -78,13 +78,17 @@ on, and how to test a change before it reaches anyone's desktop.
     bursts chained as `finalizeMonitor` chains closes). Close times count real time, after every
     saved one (`followSavedCloses`, `nextCloseTime`): a clock that ran ahead, or was set back,
     doesn't chain later closes into one burst.
-  - A window at its minimum width (sized to its content) is a dialog shown without a parent if,
-    against every save it could take, it is under half the width and height (a startup password
-    prompt, issue #3), or it is also at its minimum height, smaller both ways, and titled unlike
-    the save (Kdenlive's welcome screen, which the main window opens beside) (`Engine.isDialog`;
-    client sizes, as KWin's `minSize` is the client's). It isn't restored, isn't saved, and
-    doesn't count as the app being open (on its monitor, or at all for a fresh start), until it
-    grows out of it (noteGeometry).
+  - A window at its minimum width (sized to its content) and under half the width and height of
+    every save it could take is a dialog shown without a parent (a startup password prompt,
+    `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
+    isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
+    start), until it grows out of it (noteGeometry) (issue #3).
+  - Saves record whether KWin drew a title bar on the window (`framed`, seen while it wasn't
+    maximized, `framedOf`). A save framed unlike the window is never its own (`bestMatch`), and a
+    window framed unlike every save it could take is set aside like a dialog
+    (`Engine.isFramedUnlike`): a splash or welcome screen without a title bar (QGIS's, Kdenlive's)
+    shown before or beside the framed main window. The main window is then the app's first and
+    restored. Set aside until the user moves or resizes it (an app whose title bar changed).
   - A window that can't be resized takes the one save left only if its size is near the save's
     (`Engine.nearSize`), otherwise only a save matching its title or size: a splash screen opens
     before the app's window and would take its place (`matchFor`).
@@ -131,13 +135,18 @@ on, and how to test a change before it reaches anyone's desktop.
   maximized by its app has no restore geometry. Dragging a maximized window out unmaximizes it
   and moves it under the pointer at once; on Wayland its size only shrinks once the app has
   followed.
+- **Title bar** (6.8.3): KWin's decoration is the frame's part outside the client area, so a
+  frame taller than `clientGeometry` has a title bar. An app drawing its own (GTK, Chrome) has
+  none from KWin; Breeze can hide it on maximized windows. QGIS 3.28's splash and Kdenlive 26.08's
+  welcome screen have none (frame = client), their main windows one.
 - **Maximize requested, not yet confirmed** (6.8.3, `XdgToplevelWindow::maximize`,
   `handleMaximizeRequested`): `maximizeMode` is the mode the app confirmed; KWin compares a new
   request with the requested one (`m_requestedMaximizeMode`), which scripts can't read. An app
   that asks to be maximized as it shows (Kdenlive) is added as not maximized while KWin has the
   request, so `setMaximize(true, true)` then returns early, and a geometry written meanwhile is
-  sent with the maximized state: maximized at that size. `applyMaximized` unmaximizes first
-  whatever `maximizeMode` says; with nothing requested that returns early too.
+  sent with the maximized state: maximized at that size. `applySave`, `applyMaximized` and
+  `undoRestore` unmaximize before writing geometry, whatever `maximizeMode` says; with nothing
+  requested that returns early.
 - **Class and desktop file name** (6.8.2, `XdgToplevelWindow::handleAppIdChanged`): both come
   from the app id. For a sandboxed (Flatpak) client whose app id doesn't start with the sandbox's
   id, KWin uses the sandbox's id instead, so a Flatpak browser's web apps get the browser's class.

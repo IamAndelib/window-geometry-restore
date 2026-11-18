@@ -1,12 +1,12 @@
 // A test window for the KWin sandbox (tests/kwin/sandbox.py builds it).
 //
-//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [dialog] [fitted] [maximized] [maximize-late] [retitle=NEW] [retitle-ms=MS]
+//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [dialog] [frameless] [maximized] [maximize-late] [retitle=NEW] [retitle-ms=MS]
 //
 // The app id becomes the window's resourceClass in KWin, so scenarios can run
 // several apps side by side. "fixed" makes the window non-resizable; "maximized"
 // opens it maximized, as apps that remember being maximized do. "dialog" makes its minimum
-// width its width, as a dialog sized to its content (Thunderbird's password prompt); "fitted" its
-// minimum size its size, still resizable (Kdenlive's welcome screen). "maximize-late" asks to be
+// width its width, as a dialog sized to its content (Thunderbird's password prompt); "frameless"
+// asks KWin for no title bar (QGIS's splash, Kdenlive's welcome screen). "maximize-late" asks to be
 // maximized just after showing, before KWin confirms the window (Kdenlive). "retitle=NEW"
 // changes the title to NEW shortly after the window is shown (300 ms, or MS), as browsers do.
 #include <QColor>
@@ -43,8 +43,8 @@ int main(int argc, char **argv)
     if (args.contains(QStringLiteral("dialog"))) {
         window.setMinimumWidth(size.width());
     }
-    if (args.contains(QStringLiteral("fitted"))) {
-        window.setMinimumSize(size);
+    if (args.contains(QStringLiteral("frameless"))) {
+        window.setFlag(Qt::FramelessWindowHint);
     }
     if (args.contains(QStringLiteral("fixed"))) {
         window.setMinimumSize(size);

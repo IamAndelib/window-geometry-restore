@@ -132,18 +132,25 @@ test('isDialog: at its minimum width and under half of every save it could take'
     assert.equal(engine.isDialog(win(426, 183, 425), saves, [true, true]), false, 'none free')
 })
 
-test('isDialog: at its minimum size both ways, smaller than every save it could take, with an unlike title', () => {
-    // Kdenlive 26.08's welcome screen, and the main window's save it would take.
-    const main = save({ caption: 'Untitled / HD 1080p 25 fps — Kdenlive', width: 1280, height: 756 })
-    const win = (fields = {}) => ({ width: 612, height: 648, clientWidth: 612, clientHeight: 648, minWidth: 612, minHeight: 648, caption: 'Kdenlive', ...fields })
-    assert.equal(engine.isDialog(win(), [main], []), true, 'the welcome screen')
-    assert.equal(engine.isDialog(win({ minHeight: 300 }), [main], []), false, 'taller than its minimum: an app\'s window')
-    assert.equal(engine.isDialog(win({ minHeight: 0 }), [main], []), false, 'minimum height unknown')
-    assert.equal(engine.isDialog(win({ height: 800, clientHeight: 800, minHeight: 800 }), [main], []), false, 'taller than the save')
-    assert.equal(engine.isDialog(win(), [save({ caption: 'Narrow', width: 600, height: 1000 })], []), false, 'wider than the save')
-    assert.equal(engine.isDialog(win({ caption: 'Untitled / HD 1080p 25 fps — Kdenlive' }), [main], []), false, 'the save\'s title: the app\'s window')
-    assert.equal(engine.isDialog(win(), [main, save({ caption: 'Small', width: 500, height: 400 })], []), false, 'against every save')
-    assert.equal(engine.isDialog(win({ clientWidth: 700 }), [main], []), false, 'wider than its minimum')
+test('framedUnlike / isFramedUnlike: a title bar on one and not the other, both known', () => {
+    const framed = save({ framed: true })
+    assert.equal(engine.framedUnlike(framed, false), true, 'no title bar against one')
+    assert.equal(engine.framedUnlike(framed, true), false)
+    assert.equal(engine.framedUnlike(save({ framed: false }), false), false, 'both drawn by the app')
+    assert.equal(engine.framedUnlike(save(), false), false, 'an older save: unknown')
+    assert.equal(engine.framedUnlike(framed, null), false, 'the window maximized: unknown')
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: true })], []), true)
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: false })], []), false, 'against every save')
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: false })], [false, true]), true, 'only free saves count')
+    assert.equal(engine.isFramedUnlike(false, [framed], [true]), false, 'none free')
+})
+
+test('bestMatch: a save framed unlike the window is never its own, not even as the only save left', () => {
+    const main = save({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: true })
+    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: false }), []), null)
+    assert.equal(engine.bestMatch([main], live({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: false }), []), null, 'whatever its title and size')
+    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: true }), []).tier, 4, 'framed alike: the only save left')
+    assert.equal(engine.bestMatch([save({ framed: true }), save({ caption: 'Splash', framed: false })], live({ caption: 'Window', framed: false }), []).index, 1)
 })
 
 test('parseList/isListed: exact, wildcard, no false positives', () => {
@@ -283,7 +290,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'framed', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
     assert.equal(a.tile, null)
     assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))

@@ -838,29 +838,50 @@ def s_dialog_before_maximized_main_window():
         check(sb.window("Inbox")["maximized"] == 3, "the main window maximized again: %s" % sb.window("Inbox"))
 
 
+def place_main(sb, app, main):
+    """Open the app's framed main window, drag it to 300,150 and close it; returns its size."""
+    a = sb.open_app(app, main, size=(1200, 700))
+    w = sb.window(main)
+    size = rect(w)[2:]
+    x, y = titlebar(w)
+    sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+    sb.wait(lambda: rect(sb.window(main))[:2] == (300, 150), 3, "the drag")
+    a.close()
+    return size
+
+
 def s_welcome_screen_beside_main_window():
-    """Kdenlive 26.08: a welcome screen at its minimum size both ways opens first, and its main
+    """Kdenlive 26.08: a welcome screen without a title bar opens first, and the framed main
     window opens beside it. The welcome screen stays as it opens and isn't saved; the main
     window, the app's first, is restored (it was left where KWin put it, the welcome screen at
     its place)."""
     app, main = "org.example.studio", "Untitled - Studio"
     with sandbox(outputs=1) as sb:
-        a = sb.open_app(app, main, size=(1200, 700))
-        w = sb.window(main)
-        size = rect(w)[2:]
-        x, y = titlebar(w)
-        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
-        sb.wait(lambda: rect(sb.window(main))[:2] == (300, 150), 3, "the drag")
-        a.close()
-        welcome = sb.open_app(app, "Studio", size=(612, 648), fitted=True)
-        check(rect(sb.window("Studio"))[2] < 700, "the welcome screen keeps its size: %s" % (rect(sb.window("Studio")),))
-        check(logged(sb.script_log(), '"Studio" is a dialog-sized window'), "logged")
+        size = place_main(sb, app, main)
+        welcome = sb.open_app(app, "Studio", size=(612, 648), frameless=True)
+        check(rect(sb.window("Studio"))[2:] == (612, 648), "the welcome screen keeps its size: %s" % (rect(sb.window("Studio")),))
+        check(logged(sb.script_log(), '"Studio" has no title bar, unlike the app\'s saved windows'), "logged")
         m = sb.open_app(app, main, size=(1200, 700))
         check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
         welcome.close()
         m.close()
         saved = [s["c"] for s in sb.saved()["apps"][app]["w"]]
         check(saved == [main], "only the main window saved: %s" % saved)
+
+
+def s_splash_without_title_bar_before_main_window():
+    """QGIS 3.28: a splash without a title bar (resizable, at no minimum size) shows while the
+    app loads; the framed main window opens and the splash closes right after. The splash keeps
+    its size (it took the main window's), and the main window is restored."""
+    app, main = "org.example.maps", "Untitled Project - Maps"
+    with sandbox(outputs=1) as sb:
+        size = place_main(sb, app, main)
+        splash = sb.open_app(app, "Maps3", size=(640, 306), frameless=True, settle=1.5)
+        check(rect(sb.window("Maps3"))[2:] == (640, 306), "the splash keeps its size: %s" % (rect(sb.window("Maps3")),))
+        sb.open_app(app, main, size=(1200, 700), settle=0.2)
+        splash.close()
+        sb.settle(0.8)
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
 
 
 def s_maximized_by_app_as_it_shows():
@@ -1297,6 +1318,7 @@ SCENARIOS = [
     s_dialog_before_maximized_main_window,
     s_dialog_before_tiled_main_window,
     s_welcome_screen_beside_main_window,
+    s_splash_without_title_bar_before_main_window,
     s_maximized_by_app_as_it_shows,
     s_late_monitor,
     s_unplugged_monitor_then_close,

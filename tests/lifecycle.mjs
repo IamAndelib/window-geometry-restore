@@ -47,7 +47,7 @@ const REQUIRED_FUNCTIONS = [
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
     'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
-    'onUserMoveResize', 'dialogSizeOf', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
+    'onUserMoveResize', 'dialogSizeOf', 'framedOf', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
     'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'notePlacement', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
@@ -237,6 +237,9 @@ function makeWindow(fields) {
         _async: false,
         _requested: null,
         active: false,
+        // KWin's title bar (px): the frame is that much taller than the client area.
+        _titleBar: fields.titleBar ?? 0,
+        get clientGeometry() { return { x: this._g.x, y: this._g.y + this._titleBar, width: this._g.width, height: this._g.height - this._titleBar } },
         get x() { return this._g.x },
         get y() { return this._g.y },
         get width() { return this._g.width },
@@ -291,6 +294,11 @@ function makeWindow(fields) {
         _maximizeCalls: 0,
         // A mode the app asked for that KWin hasn't confirmed yet (maximizeMode is the confirmed one).
         _pendingMaximize: undefined,
+        // KWin confirms it: maximized, at whatever geometry was written meanwhile.
+        _confirmPending() {
+            if (this._pendingMaximize !== undefined) this.maximizeMode = this._pendingMaximize
+            this._pendingMaximize = undefined
+        },
         setMaximize(vertically, horizontally, restore) {
             const mode = (vertically ? 1 : 0) | (horizontally ? 2 : 0)
             const requested = this._pendingMaximize ?? this.maximizeMode
@@ -3999,12 +4007,14 @@ test('a window dragged out of its tile and back in is not untouched: no hand-off
     assert.deepEqual([f.x, f.y, f.w, f.h], [600, 400, 1200, 800])
 })
 
-// --- A welcome screen the main window opens beside (Kdenlive 26.08) ---
-// Measured on KWin 6.8.2: "Kdenlive", 612x648 at its minimum size both ways, resizable; "New
-// Project…" opens the main window, titled "Kdenlive" too, while the welcome screen stays open.
+// --- A splash or welcome screen without a title bar, beside the framed main window ---
+// Measured on KWin 6.8.2. Kdenlive 26.08: a welcome screen "Kdenlive", 612x648, no title bar;
+// "New Project…" opens the main window, framed and titled "Kdenlive" too, while it stays open.
+// QGIS 3.28 (Flatpak): a splash "QGIS3", 640x306, no title bar, minimum 20x20; the main window
+// opens framed 3 s later, and the splash closes 1 ms after.
 
 const KDENLIVE = 'org.kde.kdenlive'
-const MAIN_SAVE = { c: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 150, y: 90, w: 1280, h: 756, o: null }
+const MAIN_SAVE = { c: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 150, y: 90, w: 1280, h: 756, o: null, fr: 1 }
 const welcomeScreen = (rt) => {
     const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 654, y: 216, width: 612, height: 648 })
     w.minSize = { width: 612, height: 648 }
@@ -4012,17 +4022,17 @@ const welcomeScreen = (rt) => {
     return w
 }
 const kdenliveMain = (rt) => {
-    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756 })
-    w.minSize = { width: 960, height: 699 }
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756, titleBar: 36 })
+    w.minSize = { width: 960, height: 663 }
     rt.trackWindow(w)
     return w
 }
 
-test('a welcome screen sized to its content stays as it opens, and the main window opened beside it is restored', () => {
+test('a welcome screen without a title bar stays as it opens, and the framed main window opened beside it is restored', () => {
     const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
     const welcome = welcomeScreen(rt)
     assert.deepEqual(frameOf(welcome), [654, 216, 612, 648], 'left as it opened')
-    assert.ok(rt.getLogs().some((l) => l.includes('"Kdenlive" is a dialog-sized window')))
+    assert.ok(rt.getLogs().some((l) => l.includes('"Kdenlive" has no title bar, unlike the app\'s saved windows')))
     advanceClock(rt, 3000)
     const main = kdenliveMain(rt)
     assert.deepEqual(frameOf(main), [150, 90, 1280, 756], 'the main window restored')
@@ -4031,32 +4041,89 @@ test('a welcome screen sized to its content stays as it opens, and the main wind
     main.emitMoveResizeStarted()
     main._setFrame({ x: 200, y: 120, width: 1300, height: 760 })
     main.emitClosed()
-    assert.deepEqual(savedApp(rt, KDENLIVE).d['desk-uuid-1'].w.map((s) => [s.c, s.x, s.w]), [['Kdenlive', 200, 1300]], 'only the main window saved')
+    assert.deepEqual(savedApp(rt, KDENLIVE).d['desk-uuid-1'].w.map((s) => [s.c, s.x, s.w, s.fr]), [['Kdenlive', 200, 1300, 1]],
+        'only the main window saved, framed')
+})
+
+test('the welcome screen stays aside even when the main window was saved under the same title', () => {
+    // Closed with only the app's name as its title: the welcome screen's title matches it fully.
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, c: 'Kdenlive' }] }))
+    const welcome = welcomeScreen(rt)
+    assert.deepEqual(frameOf(welcome), [654, 216, 612, 648])
+    assert.deepEqual(frameOf(kdenliveMain(rt)), [150, 90, 1280, 756])
 })
 
 test('a main window opened after the welcome screen\'s restore deadline is restored too: the welcome screen isn\'t the app', () => {
     const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
-    welcomeScreen(rt)
+    const welcome = welcomeScreen(rt)
     advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 5000)
     rt.tick()
-    const main = kdenliveMain(rt)
-    assert.deepEqual(frameOf(main), [150, 90, 1280, 756])
+    welcome._setFrame({ x: 600, y: 200, width: 700, height: 680 }) // the app resizes it: still aside
+    assert.deepEqual(frameOf(kdenliveMain(rt)), [150, 90, 1280, 756])
 })
 
 test('a welcome screen doesn\'t take the main window\'s maximized state; the main window does', () => {
     const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, max: 3 }] }))
     const welcome = welcomeScreen(rt)
     assert.equal(welcome.maximizeMode, 0)
-    const main = kdenliveMain(rt)
-    assert.equal(main.maximizeMode, 3)
+    assert.equal(kdenliveMain(rt).maximizeMode, 3)
 })
 
-test('a window at its minimum size with the save\'s title is the app\'s window, and is restored', () => {
-    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
-    const w = makeWindow({ cls: KDENLIVE, caption: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 654, y: 216, width: 612, height: 648 })
-    w.minSize = { width: 612, height: 648 }
+test('a splash screen without a title bar (QGIS) keeps its size, and the main window opened beside it is restored', () => {
+    const rt = buildRuntime(savedLayouts({ 'org.qgis.qgis': [{ c: 'Untitled Project — QGIS', x: 789, y: 152, w: 911, h: 741, o: null, fr: 1 }] }))
+    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306 })
+    splash.minSize = { width: 20, height: 20 }
+    rt.trackWindow(splash)
+    assert.deepEqual(frameOf(splash), [640, 366, 640, 306], 'its own size, where it opened')
+    advanceClock(rt, 3000)
+    const main = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS - 3.28.9-Firenze (\'Firenze\')', x: 504, y: 148, width: 911, height: 741, titleBar: 33 })
+    rt.trackWindow(main)
+    advanceClock(rt, 1)
+    splash.emitClosed()
+    assert.deepEqual(frameOf(main), [789, 152, 911, 741])
+})
+
+test('an older save that doesn\'t record its title bar is taken by elimination once; the next close records it', () => {
+    const rt = buildRuntime(savedLayouts({ 'org.qgis.qgis': [{ c: 'Untitled Project — QGIS', x: 789, y: 152, w: 911, h: 741, o: null }] }))
+    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306 })
+    rt.trackWindow(splash)
+    assert.deepEqual(frameOf(splash), [789, 152, 911, 741], 'as before: nothing to tell them apart')
+    const main = makeWindow({ cls: 'org.qgis.qgis', caption: 'Untitled Project — QGIS', x: 504, y: 148, width: 911, height: 741, titleBar: 33 })
+    rt.trackWindow(main)
+    splash.emitClosed()
+    advanceClock(rt, 60000)
+    main.emitClosed()
+    assert.equal(savedApp(rt, 'org.qgis.qgis').d['desk-uuid-1'].w.find((s) => s.x === 504).fr, 1)
+})
+
+test('a window framed unlike the app\'s saves that the user places is the app\'s window: saved', () => {
+    // Firefox after switching its title bar setting: its saves have one, the window none.
+    const rt = buildRuntime(savedLayouts({ firefox: [{ c: 'Mozilla Firefox', x: 100, y: 100, w: 1200, h: 800, o: null, fr: 1 }] }))
+    const w = makeWindow({ cls: 'firefox', caption: 'Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800 })
     rt.trackWindow(w)
-    assert.deepEqual([w.x, w.y], [150, 90])
+    assert.deepEqual([w.x, w.y], [300, 200], 'not restored from a save framed otherwise')
+    advanceClock(rt, 60000)
+    w.emitMoveResizeStarted()
+    w._setFrame({ x: 50, y: 60, width: 1200, height: 800 })
+    w.emitClosed()
+    assert.equal(savedApp(rt, 'firefox').d['desk-uuid-1'].w.find((s) => s.x === 50).fr, 0)
+})
+
+test('windows of an app drawing its own title bars all match as before', () => {
+    const rt = buildRuntime(savedLayouts({ gtkapp: [{ c: 'Files', x: 100, y: 100, w: 900, h: 600, o: null, fr: 0 }] }))
+    const w = makeWindow({ cls: 'gtkapp', caption: 'Other', x: 0, y: 0, width: 700, height: 500 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y, w.width], [100, 100, 900], 'the only save left')
+})
+
+test('a window whose app asked to be maximized as it showed, with a save that isn\'t, comes back at its save', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 320, y: 162, width: 1280, height: 756, titleBar: 36 })
+    w._pendingMaximize = 3 // Kdenlive closed maximized on another desktop: it maximizes itself
+    rt.trackWindow(w)
+    w._confirmPending()
+    assert.equal(w.maximizeMode, 0)
+    assert.deepEqual(frameOf(w), [150, 90, 1280, 756])
 })
 
 test('a window whose app asked to be maximized as it showed comes back maximized at full size', () => {
@@ -4064,12 +4131,26 @@ test('a window whose app asked to be maximized as it showed comes back maximized
     // KWin has the request. Maximizing it again then changes nothing, and the normal geometry
     // written meanwhile would stay: maximized, at its normal size.
     const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, max: 3 }] }))
-    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756 })
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756, titleBar: 36 })
     w._pendingMaximize = 3
     rt.trackWindow(w)
+    w._confirmPending()
     const a = fakeWorkspace.clientArea(3, w)
     assert.equal(w.maximizeMode, 3)
     assert.deepEqual(frameOf(w), [a.x, a.y, a.width, a.height], 'filling the screen')
     w._dragOutOfMaximize(500, 300)
     assert.deepEqual([w.width, w.height], [1280, 756], 'its normal size to return to')
+})
+
+test('a window closed maximized keeps the title bar seen before, though KWin hides it while maximized', () => {
+    // Breeze's "hide title bars of maximized windows": maximized, the frame is the client area.
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'framedapp', caption: 'Doc', x: 100, y: 100, width: 900, height: 600, titleBar: 30 })
+    rt.trackWindow(w)
+    w._titleBar = 0
+    w.setMaximize(true, true)
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    const save = savedApp(rt, 'framedapp').d['desk-uuid-1'].w[0]
+    assert.deepEqual([save.max, save.fr], [3, 1])
 })
