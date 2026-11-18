@@ -863,6 +863,22 @@ def s_welcome_screen_beside_main_window():
         check(saved == [main], "only the main window saved: %s" % saved)
 
 
+def s_maximized_by_app_as_it_shows():
+    """An app that asks to be maximized as it shows, before KWin confirms it (Kdenlive): the
+    window shows as not maximized, and maximizing it again changed nothing, so the normal
+    geometry the restore wrote stayed: maximized at its normal size. It fills the screen."""
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app("org.example.late", "Late", size=(1000, 650))
+        sb.probe("win('Late').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        full = rect(sb.window("Late"))
+        check(sb.window("Late")["maximized"] == 3, "precondition: maximized")
+        a.close()
+        sb.open_app("org.example.late", "Late", size=(1000, 650), maximize_late=True, settle=1.2)
+        w = sb.window("Late")
+        check(w["maximized"] == 3 and rect(w) == full, "maximized, filling the screen: %s" % (w,))
+
+
 def s_dialog_before_tiled_main_window():
     """The main window saved in the left quick tile; the prompt opens first and gets focus:
     not tiled. The main window, opened while the prompt is still up, gets its tile."""
@@ -1281,6 +1297,7 @@ SCENARIOS = [
     s_dialog_before_maximized_main_window,
     s_dialog_before_tiled_main_window,
     s_welcome_screen_beside_main_window,
+    s_maximized_by_app_as_it_shows,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

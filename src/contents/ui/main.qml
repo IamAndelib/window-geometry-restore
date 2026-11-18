@@ -1510,8 +1510,11 @@ Item {
     // A window closed maximized comes back maximized by KWin, with its normal geometry as the one
     // to return to (a drag out, the maximize button). Apps that reopen maximized, or at their
     // maximized size, by themselves leave KWin without that geometry otherwise. KWin takes a
-    // restore geometry only when the maximize state changes, so a window that is maximized
-    // already is unmaximized first; KWin configures the app once, for the final state.
+    // restore geometry only when the maximize state changes, so the window is unmaximized first;
+    // KWin configures the app once, for the final state. Also when it doesn't show as maximized:
+    // an app may have asked to be (Kdenlive, as it shows), which KWin hasn't confirmed yet, and
+    // `maximizeMode` is only what the app confirmed. Maximized again, then, it changes nothing,
+    // and the normal geometry written meanwhile stays: maximized, at its normal size.
     /**
      * @param {Entry} entry
      * @param {Save} save
@@ -1525,7 +1528,7 @@ Item {
         if (!target) return false
         notePlacement(entry, save, target, until)
         var r = target.rect
-        if (w.maximizeMode) w.setMaximize(false, false)
+        w.setMaximize(false, false) // nothing if neither maximized nor asked to be
         setGeometry(w, r) // onto its monitor: KWin maximizes the window where it is
         w.setMaximize(!!(save.maximized & 1), !!(save.maximized & 2), Qt.rect(r.x, r.y, r.w, r.h))
         entry.free = geometryOf(target.output || w.output, r.x, r.y, r.w, r.h)

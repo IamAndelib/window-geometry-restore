@@ -131,6 +131,13 @@ on, and how to test a change before it reaches anyone's desktop.
   maximized by its app has no restore geometry. Dragging a maximized window out unmaximizes it
   and moves it under the pointer at once; on Wayland its size only shrinks once the app has
   followed.
+- **Maximize requested, not yet confirmed** (6.8.3, `XdgToplevelWindow::maximize`,
+  `handleMaximizeRequested`): `maximizeMode` is the mode the app confirmed; KWin compares a new
+  request with the requested one (`m_requestedMaximizeMode`), which scripts can't read. An app
+  that asks to be maximized as it shows (Kdenlive) is added as not maximized while KWin has the
+  request, so `setMaximize(true, true)` then returns early, and a geometry written meanwhile is
+  sent with the maximized state: maximized at that size. `applyMaximized` unmaximizes first
+  whatever `maximizeMode` says; with nothing requested that returns early too.
 - **Class and desktop file name** (6.8.2, `XdgToplevelWindow::handleAppIdChanged`): both come
   from the app id. For a sandboxed (Flatpak) client whose app id doesn't start with the sandbox's
   id, KWin uses the sandbox's id instead, so a Flatpak browser's web apps get the browser's class.

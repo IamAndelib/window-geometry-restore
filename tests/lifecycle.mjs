@@ -289,9 +289,16 @@ function makeWindow(fields) {
         // geometry before maximizing is kept; unmaximizing returns to it.
         _maxRestore: null,
         _maximizeCalls: 0,
+        // A mode the app asked for that KWin hasn't confirmed yet (maximizeMode is the confirmed one).
+        _pendingMaximize: undefined,
         setMaximize(vertically, horizontally, restore) {
             const mode = (vertically ? 1 : 0) | (horizontally ? 2 : 0)
-            if (mode === this.maximizeMode) return
+            const requested = this._pendingMaximize ?? this.maximizeMode
+            this._pendingMaximize = undefined
+            if (mode === requested) {
+                this.maximizeMode = mode
+                return
+            }
             this._maximizeCalls++
             if (restore && restore.width) this._maxRestore = { x: restore.x, y: restore.y, width: restore.width, height: restore.height }
             else if (!this.maximizeMode) this._maxRestore = { ...(this._requested || this._g) }
@@ -4050,4 +4057,19 @@ test('a window at its minimum size with the save\'s title is the app\'s window, 
     w.minSize = { width: 612, height: 648 }
     rt.trackWindow(w)
     assert.deepEqual([w.x, w.y], [150, 90])
+})
+
+test('a window whose app asked to be maximized as it showed comes back maximized at full size', () => {
+    // Kdenlive asks for it before KWin's first configure: the window shows as not maximized,
+    // KWin has the request. Maximizing it again then changes nothing, and the normal geometry
+    // written meanwhile would stay: maximized, at its normal size.
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, max: 3 }] }))
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756 })
+    w._pendingMaximize = 3
+    rt.trackWindow(w)
+    const a = fakeWorkspace.clientArea(3, w)
+    assert.equal(w.maximizeMode, 3)
+    assert.deepEqual(frameOf(w), [a.x, a.y, a.width, a.height], 'filling the screen')
+    w._dragOutOfMaximize(500, 300)
+    assert.deepEqual([w.width, w.height], [1280, 756], 'its normal size to return to')
 })

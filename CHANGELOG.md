@@ -6,9 +6,10 @@ Notable changes to Window Geometry Restore. Each release's GitHub notes are publ
 
 **Fixes**
 - **A welcome screen no longer takes the main window's place** (Kdenlive). Kdenlive opens a welcome screen first, and its main window beside it. The welcome screen got the main window's saved size and place (or came back maximized), and the main window, opened while the welcome screen was still open, counted as a second window of a running app and opened in the middle of the screen. A window that opens at its minimum size both ways (sized to its content, as dialogs are), smaller than the app's saved window and with a title unlike it, is now taken for a dialog: it stays as it opens and isn't saved, and the main window is restored when it opens.
+- **Windows closed maximized fill the screen again when their app also maximizes them** (Kdenlive). An app that asks to be maximized as it shows came back maximized at its normal size, not filling the screen: KWin hadn't confirmed the app's request yet when the script restored the window, so the script's own maximize changed nothing and its normal size stayed.
 
 **Under the hood**
-- Found and verified with real Kdenlive 26.08.3 in the headless KWin test bed. New real-KWin scenario: a welcome screen beside the main window (fails with 1.4.5). The test window can open at its minimum size both ways (`fitted`).
+- Found and verified with real Kdenlive 26.08.3 in the headless KWin test bed. New real-KWin scenario: a welcome screen beside the main window (fails with 1.4.5). The test window can open at its minimum size both ways (`fitted`), and ask to be maximized just after showing (`maximize-late`). New scenario: an app maximizing itself as it shows (fails with 1.4.5).
 
 ## [1.4.5] - 2026-11-18
 
