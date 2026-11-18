@@ -89,6 +89,9 @@ on, and how to test a change before it reaches anyone's desktop.
     (`Engine.isFramedUnlike`): a splash or welcome screen without a title bar (QGIS's, Kdenlive's)
     shown before or beside the framed main window. The main window is then the app's first and
     restored. Set aside until the user moves or resizes it (an app whose title bar changed).
+    A save that doesn't record it (older versions, or only seen maximized) isn't given as the
+    only save left to a smaller window without a title bar (`Engine.smallerUnframed`); that one
+    is still counted and saved, so an app drawing its own title bar misses one restore at most.
   - A window that can't be resized takes the one save left only if its size is near the save's
     (`Engine.nearSize`), otherwise only a save matching its title or size: a splash screen opens
     before the app's window and would take its place (`matchFor`).

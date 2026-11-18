@@ -336,6 +336,16 @@ function framedUnlike(save, framed) {
     return typeof framed === 'boolean' && typeof save.framed === 'boolean' && save.framed !== framed
 }
 
+// A save that doesn't record its title bar, larger both ways than a window (main.qml matchFor).
+/**
+ * @param {{ width: number, height: number }} size
+ * @param {Save} save
+ * @returns {boolean}
+ */
+function smallerUnframed(size, save) {
+    return save.framed === null && size.width < save.width && size.height < save.height
+}
+
 // A window framed unlike every save it could take (framedUnlike): not one of the app's windows
 // these saves came from, but one shown before or beside them (a splash or welcome screen).
 /**

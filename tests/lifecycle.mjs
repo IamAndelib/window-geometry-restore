@@ -237,8 +237,9 @@ function makeWindow(fields) {
         _async: false,
         _requested: null,
         active: false,
-        // KWin's title bar (px): the frame is that much taller than the client area.
-        _titleBar: fields.titleBar ?? 0,
+        // KWin's title bar (px): the frame is that much taller than the client area. Apps drawing
+        // their own (and splash or welcome screens) have none: titleBar 0.
+        _titleBar: fields.titleBar ?? 30,
         get clientGeometry() { return { x: this._g.x, y: this._g.y + this._titleBar, width: this._g.width, height: this._g.height - this._titleBar } },
         get x() { return this._g.x },
         get y() { return this._g.y },
@@ -4016,7 +4017,7 @@ test('a window dragged out of its tile and back in is not untouched: no hand-off
 const KDENLIVE = 'org.kde.kdenlive'
 const MAIN_SAVE = { c: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 150, y: 90, w: 1280, h: 756, o: null, fr: 1 }
 const welcomeScreen = (rt) => {
-    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 654, y: 216, width: 612, height: 648 })
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 654, y: 216, width: 612, height: 648, titleBar: 0 })
     w.minSize = { width: 612, height: 648 }
     rt.trackWindow(w)
     return w
@@ -4071,7 +4072,7 @@ test('a welcome screen doesn\'t take the main window\'s maximized state; the mai
 
 test('a splash screen without a title bar (QGIS) keeps its size, and the main window opened beside it is restored', () => {
     const rt = buildRuntime(savedLayouts({ 'org.qgis.qgis': [{ c: 'Untitled Project — QGIS', x: 789, y: 152, w: 911, h: 741, o: null, fr: 1 }] }))
-    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306 })
+    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306, titleBar: 0 })
     splash.minSize = { width: 20, height: 20 }
     rt.trackWindow(splash)
     assert.deepEqual(frameOf(splash), [640, 366, 640, 306], 'its own size, where it opened')
@@ -4083,23 +4084,43 @@ test('a splash screen without a title bar (QGIS) keeps its size, and the main wi
     assert.deepEqual(frameOf(main), [789, 152, 911, 741])
 })
 
-test('an older save that doesn\'t record its title bar is taken by elimination once; the next close records it', () => {
+test('an older save that doesn\'t record its title bar isn\'t given to a smaller splash without one; the main window is restored', () => {
     const rt = buildRuntime(savedLayouts({ 'org.qgis.qgis': [{ c: 'Untitled Project — QGIS', x: 789, y: 152, w: 911, h: 741, o: null }] }))
-    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306 })
+    const splash = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS3', x: 640, y: 366, width: 640, height: 306, titleBar: 0 })
     rt.trackWindow(splash)
-    assert.deepEqual(frameOf(splash), [789, 152, 911, 741], 'as before: nothing to tell them apart')
-    const main = makeWindow({ cls: 'org.qgis.qgis', caption: 'Untitled Project — QGIS', x: 504, y: 148, width: 911, height: 741, titleBar: 33 })
+    assert.deepEqual(frameOf(splash), [640, 366, 640, 306], 'its own size, where it opened')
+    advanceClock(rt, 3000)
+    const main = makeWindow({ cls: 'org.qgis.qgis', caption: 'QGIS - 3.28.9-Firenze', x: 504, y: 148, width: 911, height: 741, titleBar: 33 })
     rt.trackWindow(main)
+    assert.deepEqual(frameOf(main), [789, 152, 911, 741], 'restored the same launch')
     splash.emitClosed()
     advanceClock(rt, 60000)
     main.emitClosed()
-    assert.equal(savedApp(rt, 'org.qgis.qgis').d['desk-uuid-1'].w.find((s) => s.x === 504).fr, 1)
+    assert.equal(savedApp(rt, 'org.qgis.qgis').d['desk-uuid-1'].w.find((s) => s.c === 'QGIS - 3.28.9-Firenze').fr, 1, 'its save records the title bar')
+})
+
+test('a window of an app drawing its own title bar misses one restore from an older save, then its save records it', () => {
+    const rt = buildRuntime(savedLayouts({ gtkapp: [{ c: 'notes.txt', x: 100, y: 100, w: 900, h: 700, o: null }] }))
+    const w = makeWindow({ cls: 'gtkapp', caption: 'todo.md', x: 300, y: 200, width: 700, height: 500, titleBar: 0 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [300, 200], 'smaller, no title bar, nothing in common: left as it is')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 60000)
+    rt.tick()
+    w.emitClosed()
+    assert.equal(savedApp(rt, 'gtkapp').d['desk-uuid-1'].w.find((s) => s.c === 'todo.md').fr, 0, 'saved, recording no title bar')
+})
+
+test('a window without a title bar not smaller than an older save still takes it as the one save left', () => {
+    const rt = buildRuntime(savedLayouts({ gtkapp: [{ c: 'notes.txt', x: 100, y: 100, w: 900, h: 700, o: null }] }))
+    const w = makeWindow({ cls: 'gtkapp', caption: 'todo.md', x: 300, y: 200, width: 1000, height: 650, titleBar: 0 })
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y, w.width, w.height], [100, 100, 900, 700])
 })
 
 test('a window framed unlike the app\'s saves that the user places is the app\'s window: saved', () => {
     // Firefox after switching its title bar setting: its saves have one, the window none.
     const rt = buildRuntime(savedLayouts({ firefox: [{ c: 'Mozilla Firefox', x: 100, y: 100, w: 1200, h: 800, o: null, fr: 1 }] }))
-    const w = makeWindow({ cls: 'firefox', caption: 'Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800 })
+    const w = makeWindow({ cls: 'firefox', caption: 'Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800, titleBar: 0 })
     rt.trackWindow(w)
     assert.deepEqual([w.x, w.y], [300, 200], 'not restored from a save framed otherwise')
     advanceClock(rt, 60000)
@@ -4111,7 +4132,7 @@ test('a window framed unlike the app\'s saves that the user places is the app\'s
 
 test('windows of an app drawing its own title bars all match as before', () => {
     const rt = buildRuntime(savedLayouts({ gtkapp: [{ c: 'Files', x: 100, y: 100, w: 900, h: 600, o: null, fr: 0 }] }))
-    const w = makeWindow({ cls: 'gtkapp', caption: 'Other', x: 0, y: 0, width: 700, height: 500 })
+    const w = makeWindow({ cls: 'gtkapp', caption: 'Other', x: 0, y: 0, width: 700, height: 500, titleBar: 0 })
     rt.trackWindow(w)
     assert.deepEqual([w.x, w.y, w.width], [100, 100, 900], 'the only save left')
 })

@@ -884,6 +884,26 @@ def s_splash_without_title_bar_before_main_window():
         check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
 
 
+def s_splash_without_title_bar_older_save():
+    """The same splash on the first launch with a save from an older version, which doesn't
+    record its title bar: smaller, without one, and matching it on neither title nor size, the
+    splash isn't given it. The main window, opening within the restore, is."""
+    app, main = "org.example.maps", "Untitled Project - Maps"
+    with sandbox(outputs=1) as sb:
+        size = place_main(sb, app, main)
+        blob = sb.saved()
+        for saves in [blob["apps"][app]["w"]] + [d["w"] for d in blob["apps"][app]["d"].values()]:
+            for save in saves:
+                save.pop("fr", None)
+        sb.restart_kwin(store=json.dumps(blob))
+        splash = sb.open_app(app, "Maps3", size=(640, 306), frameless=True, settle=1.5)
+        check(rect(sb.window("Maps3"))[2:] == (640, 306), "the splash keeps its size: %s" % (rect(sb.window("Maps3")),))
+        sb.open_app(app, main, size=(1200, 700), settle=0.2)
+        splash.close()
+        sb.settle(0.8)
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
+
+
 def s_maximized_by_app_as_it_shows():
     """An app that asks to be maximized as it shows, before KWin confirms it (Kdenlive): the
     window shows as not maximized, and maximizing it again changed nothing, so the normal
@@ -1319,6 +1339,7 @@ SCENARIOS = [
     s_dialog_before_tiled_main_window,
     s_welcome_screen_beside_main_window,
     s_splash_without_title_bar_before_main_window,
+    s_splash_without_title_bar_older_save,
     s_maximized_by_app_as_it_shows,
     s_late_monitor,
     s_unplugged_monitor_then_close,

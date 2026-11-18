@@ -1297,6 +1297,15 @@ Item {
             dbg(entry.label + ': "' + caption + '" can\'t be resized and matches no save by title or size: left as it is')
             return null
         }
+        // A save that doesn't record its title bar (made by an older version, or only ever seen
+        // maximized) can't be told from a splash screen's by it. A window without a title bar,
+        // smaller both ways, taking it on neither title nor size, is likely one (QGIS's, the first
+        // launch with older saves): left as it is. Still counted and saved, so the window of an
+        // app drawing its own title bar misses one restore, and its save then records it.
+        if (match && match.tier === 4 && entry.framed === false && Engine.smallerUnframed(size, session.saves[match.index])) {
+            dbg(entry.label + ': "' + caption + '" has no title bar and is smaller than the save, which records none: left as it is')
+            return null
+        }
         // A save after all (its title or size changed): the app's window.
         if (match) {
             entry.dialog = null
