@@ -2,7 +2,7 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
-## [Unreleased]
+## [1.4.6] - 2026-11-18
 
 **Fixes**
 - **Splash and welcome screens without a title bar no longer take the main window's place** (QGIS, Kdenlive). They opened first and got the main window's saved size and place, or came back maximized; the main window, opening while they were still open, counted as a second window of a running app and opened in the middle of the screen. Saves now record whether KWin drew a title bar on the window, and a window is never given the layout of a window framed otherwise: a splash or welcome screen without a title bar stays as it opens and isn't saved, and the main window is restored. Saves made before this version don't record it: against those, a smaller window without a title bar that has nothing else in common with the save isn't given it either, so the first launch is right too (an app drawing its own title bars may miss one restore, then its save records it). A window set aside this way that closes as the app's only window is the app's window, and is saved, so an app that switched to drawing its own title bar isn't left unrestored. A title bar KWin removes itself (borderless maximized windows, a no-titlebar rule), or one seen while a window fills the screen (KWin changes the frame before it confirms fullscreen or maximized), doesn't count.
