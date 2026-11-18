@@ -853,8 +853,8 @@ def place_main(sb, app, main):
 def s_welcome_screen_beside_main_window():
     """Kdenlive 26.08: a welcome screen without a title bar opens first, and the framed main
     window opens beside it. The welcome screen stays as it opens and isn't saved; the main
-    window, the app's first, is restored (it was left where KWin put it, the welcome screen at
-    its place)."""
+    window, the app's first, is restored (with 1.4.5 it was left where KWin put it, the welcome
+    screen at its place)."""
     app, main = "org.example.studio", "Untitled - Studio"
     with sandbox(outputs=1) as sb:
         size = place_main(sb, app, main)
@@ -872,7 +872,7 @@ def s_welcome_screen_beside_main_window():
 def s_splash_without_title_bar_before_main_window():
     """QGIS 3.28: a splash without a title bar (resizable, at no minimum size) shows while the
     app loads; the framed main window opens and the splash closes right after. The splash keeps
-    its size (it took the main window's), and the main window is restored."""
+    its size (with 1.4.5 it took the main window's), and the main window is restored."""
     app, main = "org.example.maps", "Untitled Project - Maps"
     with sandbox(outputs=1) as sb:
         size = place_main(sb, app, main)

@@ -78,6 +78,9 @@ interface KWindow {
     readonly minSize: KSize
     readonly maxSize: KSize
     readonly fullScreen: boolean
+    /** KWin turned the decoration off (DecorationPolicy::None: a rule, "No titlebar", borderless
+     *  maximized windows); not for a client drawing its own. */
+    readonly noBorder: boolean
     /** KWin::MaximizeMode, as the app acknowledged it: 0 restored, 1 vertical, 2 horizontal, 3 both. */
     readonly maximizeMode: number
     readonly maximizable: boolean

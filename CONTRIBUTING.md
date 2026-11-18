@@ -73,8 +73,8 @@ on, and how to test a change before it reaches anyone's desktop.
   - Windows are matched to saves by caption and size (`Engine.bestMatch`): the same title and
     size first, then the same title (apps reopen windows at the size of the last one closed),
     then the same size, then a title alike, then the only save left. Titles are compared with
-    digits dropped, and the exact title breaks ties. Unambiguous matches apply at once; the
-    rest wait up to 10 s for the set to arrive. Equal matches (alike windows) are ranked by when
+    digits dropped (apps number new windows). Unambiguous matches apply at once; the rest wait up
+    to 10 s for the set to arrive. Equal matches (alike windows) are ranked by when
     their saves closed: one closed clearly later, on its own, wins (a single window reopens where
     it was closed last); saves closed together (a logout, an app quitting) go in close order, so
     alike windows reopening in the order they opened keep their places (`Engine.closeRanks`,
@@ -91,7 +91,9 @@ on, and how to test a change before it reaches anyone's desktop.
     window framed unlike every save it could take is set aside like a dialog
     (`Engine.isFramedUnlike`): a splash or welcome screen without a title bar (QGIS's, Kdenlive's)
     shown before or beside the framed main window. The main window is then the app's first and
-    restored. Set aside until the user moves or resizes it (an app whose title bar changed).
+    restored. Set aside until the user moves or resizes it, or until it closes as the app's only
+    window: then it is the app's, its title bar changed, and saved (`releaseWindow`). A title bar
+    KWin turned off itself (`noBorder`) is unknown.
     A save that doesn't record it (older versions, or only seen maximized) isn't given as the
     only save left to a smaller window without a title bar (`Engine.smallerUnframed`); that one
     is still counted and saved, so an app drawing its own title bar misses one restore at most.
@@ -120,7 +122,7 @@ on, and how to test a change before it reaches anyone's desktop.
   - its last tile and last floating geometry are recorded from KWin's signals;
   - its geometry on its own monitor (`home`) is kept while that monitor is unplugged.
 
-### KWin facts the script relies on (checked in KWin 6.7.5's source unless noted)
+### KWin facts the script relies on (checked in KWin 6.7.5's source unless noted; 6.8.3 is the source `dnf download --source kwin` gives while the container runs 6.8.2)
 - **Close order.** Tiles connect to `Workspace::windowRemoved` before any script does. On
   close, KWin unmanages the window and may reset the quick-tile split (`QuickRootTile::tryReset`)
   before the script hears of the close, so tiles are recorded while windows are open.
@@ -155,9 +157,9 @@ on, and how to test a change before it reaches anyone's desktop.
   request with the requested one (`m_requestedMaximizeMode`), which scripts can't read. An app
   that asks to be maximized as it shows (Kdenlive) is added as not maximized while KWin has the
   request, so `setMaximize(true, true)` then returns early, and a geometry written meanwhile is
-  sent with the maximized state: maximized at that size. `applySave`, `applyMaximized` and
-  `undoRestore` unmaximize before writing geometry, whatever `maximizeMode` says; with nothing
-  requested that returns early.
+  sent with the maximized state: maximized at that size. `applyMaximized`, `undoRestore` (of a
+  maximized save) and `applySave` (when `maximizeMode` is 0) unmaximize before writing geometry;
+  with nothing requested that returns early.
 - **Class and desktop file name** (6.8.2, `XdgToplevelWindow::handleAppIdChanged`): both come
   from the app id. For a sandboxed (Flatpak) client whose app id doesn't start with the sandbox's
   id, KWin uses the sandbox's id instead, so a Flatpak browser's web apps get the browser's class.

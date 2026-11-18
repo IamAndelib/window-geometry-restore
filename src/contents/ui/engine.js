@@ -195,10 +195,10 @@ function captionScore(a, b) {
 }
 
 // Ranking shared by single-window matching and the deadline sweep:
-// lower tier first, then more matching dimensions, then higher caption score, then the exact
-// title (titles alike once digits are dropped: chapter1.pdf and chapter2.pdf), then the save's
+// lower tier first, then more matching dimensions, then higher caption score, then the save's
 // close rank (closeRanks): equal matches are alike windows, which only their saves' close times
-// tell apart.
+// tell apart. Titles differing only in digits are alike: apps number new windows ("Untitled 1"),
+// and a window reopened alone goes where one closed last (#14), not by its number.
 /**
  * @param {Match} a
  * @param {Match} b
@@ -208,7 +208,6 @@ function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
     if (a.score !== b.score) return a.score > b.score
-    if (a.exact !== b.exact) return a.exact
     return a.rank < b.rank
 }
 
@@ -286,11 +285,11 @@ function bestMatch(saves, live, taken, scores, ranks) {
         else if (dims === 2) tier = 3
         else if (caption >= CAPTION_FALLBACK) tier = 4
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: caption, exact: s.caption === live.caption, rank: ranks[i] }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption, rank: ranks[i] }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 5, dims: 0, score: score(free), exact: saves[free].caption === live.caption, rank: ranks[free] }
+        return { index: free, tier: 5, dims: 0, score: score(free), rank: ranks[free] }
     }
     return best
 }

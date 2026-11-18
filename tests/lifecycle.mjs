@@ -717,7 +717,6 @@ test('persist re-adopts apps present on disk but missing from memory (self-heali
 
 // --- Regression tests: persistence across restarts ---
 
-const DAY_MS = 24 * 60 * 60 * 1000
 
 function closeAll(...windows) {
     for (const w of windows) w.emitClosed()
@@ -4046,6 +4045,17 @@ test('a welcome screen without a title bar stays as it opens, and the framed mai
         'only the main window saved, framed')
 })
 
+test('a welcome screen closing together with the main window (the app quitting) isn\'t saved', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    const welcome = welcomeScreen(rt)
+    const main = kdenliveMain(rt)
+    advanceClock(rt, 60000)
+    welcome.emitClosed()
+    advanceClock(rt, 100)
+    main.emitClosed()
+    assert.deepEqual(savedApp(rt, KDENLIVE).d['desk-uuid-1'].w.map((s) => s.c), ['Kdenlive'], 'the main window only')
+})
+
 test('the welcome screen stays aside even when the main window was saved under the same title', () => {
     // Closed with only the app's name as its title: the welcome screen's title matches it fully.
     const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, c: 'Kdenlive' }] }))
@@ -4197,17 +4207,6 @@ function withScreens(screens, fn) {
 }
 const outputAt = (x, y) => fakeWorkspace.screens.find((o) => x >= o.x && x < o.x + o.width && y >= o.y && y < o.y + o.height) || null
 
-test('a window takes the save with its exact title over one alike only once digits are dropped', () => {
-    const rt = buildRuntime()
-    onMonitor(rt, 'okular', 0, { x: 100, y: 100, width: 900, height: 700 }, 'chapter1.pdf — Okular')
-    onMonitor(rt, 'okular', 1, { x: 2100, y: 100, width: 900, height: 700 }, 'chapter2.pdf — Okular')
-    rt.shutdown() // logout: both saved in one burst, chapter1 first
-    const rt2 = buildRuntime(rt.blobRef())
-    // The user opens chapter2 alone (or session restore opens it first).
-    const w = onMonitor(rt2, 'okular', 0, { x: 0, y: 0, width: 900, height: 700 }, 'chapter2.pdf — Okular')
-    assert.deepEqual([w.x, w.y], [2100, 100], 'chapter2 back on HDMI-A-1 where it was')
-})
-
 test('at the deadline, a save with the window\'s exact title beats one with only its size', () => {
     const rt = buildRuntime()
     const a = onMonitor(rt, 'okular', 0, { x: 100, y: 50, width: 900, height: 1000 }, 'Thesis.pdf — Okular')
@@ -4314,4 +4313,81 @@ test('a window saved at the top of a monitor that now has a top panel keeps its 
     } finally {
         fakeWorkspace.clientArea = clientArea
     }
+})
+
+test('a window framed unlike the app\'s saves that closes as the app\'s only window is its window: saved, without a drag', () => {
+    // Firefox after switching to its own title bar, only maximized and closed by the user.
+    const rt = buildRuntime(savedLayouts({ firefox: [{ c: 'Mozilla Firefox', x: 100, y: 100, w: 1200, h: 800, o: null, fr: 1 }] }))
+    const w = makeWindow({ cls: 'firefox', caption: 'Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800, titleBar: 0 })
+    rt.trackWindow(w)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    w.emitClosed()
+    assert.ok(savedApp(rt, 'firefox').d['desk-uuid-1'].w.some((s) => s.x === 300 && s.fr === 0), 'saved, recording no title bar')
+})
+
+test('a title bar KWin turns off itself (borderless maximized, no-titlebar rule) isn\'t recorded as none', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'framedapp', caption: 'Doc', x: 100, y: 100, width: 900, height: 600 })
+    rt.trackWindow(w)
+    // Borderless maximized windows: KWin drops the decoration before the app confirms the maximize.
+    w.noBorder = true
+    w._titleBar = 0
+    w._setFrame({ x: 100, y: 100, width: 900, height: 570 })
+    w.setMaximize(true, true)
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    assert.equal(savedApp(rt, 'framedapp').d['desk-uuid-1'].w[0].fr, 1)
+})
+
+test('a fixed-size window fitted to a smaller monitor keeps its size', () => {
+    const big = makeOutput('DP-1', 'SER-1', 0, 0, 2560, 1440)
+    const right = makeOutput('HDMI-A-1', 'SER-2', 2560, 0, 1920, 1080)
+    withScreens([big, right], (set) => {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'fixed', caption: 'Calc', x: 1800, y: 200, width: 1400, height: 900 })
+        w._output = big
+        rt.trackWindow(w)
+        w.emitClosed()
+        const small = makeOutput('DP-1', 'SER-1', 0, 0, 1280, 1024)
+        set([small, makeOutput('HDMI-A-1', 'SER-2', 1280, 0, 1920, 1080)])
+        const rt2 = buildRuntime(rt.blobRef())
+        const w2 = makeWindow({ cls: 'fixed', caption: 'Calc', x: 0, y: 0, width: 1400, height: 900 })
+        w2.resizeable = false
+        w2._output = small
+        rt2.trackWindow(w2)
+        assert.deepEqual([w2.width, w2.height], [1400, 900], 'its size: it can\'t be resized')
+    })
+})
+
+test('a maximum size of 0 is no limit', () => {
+    const rt = buildRuntime(savedLayouts({ app: [{ c: 'App', x: 100, y: 50, w: 900, h: 700, o: null }] }))
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 300, width: 500, height: 400 })
+    w.maxSize = { width: 0, height: 0 }
+    rt.trackWindow(w)
+    assert.deepEqual([w.width, w.height], [900, 700])
+})
+
+test('a window an app opens maximized one way stays so when restored from a save that isn\'t', () => {
+    const rt = buildRuntime(savedLayouts({ app: [{ c: 'App', x: 100, y: 50, w: 900, h: 700, o: null }] }))
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 0, width: 900, height: 1080 })
+    w.maximizeMode = 1
+    rt.trackWindow(w)
+    assert.equal(w.maximizeMode, 1)
+})
+
+test('a window maximized one way and moved to another monitor keeps a free geometry on its own monitor', () => {
+    const left = makeOutput('DP-1', 'SER-1', 0, 0, 1920, 1080)
+    const right = makeOutput('HDMI-A-1', 'SER-2', 1920, 300, 1920, 1080)
+    withScreens([left, right], () => {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 200, width: 800, height: 600 })
+        w._output = left
+        rt.trackWindow(w)
+        w.setMaximize(true, false)
+        w._moveToOutput(right, { x: 2100, y: 300, width: 800, height: 1080 })
+        w.emitClosed()
+        const [s] = savedApp(rt, 'app').w
+        assert.ok(s.o.y >= 0, 'not above its monitor: ' + s.o.y)
+    })
 })

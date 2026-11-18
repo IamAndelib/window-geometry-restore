@@ -202,10 +202,10 @@ test('bestMatch: prefers higher tier, then dims, then score; the window\'s own t
     assert.equal(engine.bestMatch(loose, live(), []).index, 0, 'a title only alike: the size wins')
 })
 
-test('bestMatch: between titles alike once digits are dropped, the exact one wins', () => {
-    const saves = [save({ caption: 'chapter1.pdf — Okular' }), save({ caption: 'chapter2.pdf — Okular' })]
-    assert.equal(engine.bestMatch(saves, live({ caption: 'chapter2.pdf — Okular' }), []).index, 1)
-    assert.equal(engine.bestMatch(saves, live({ caption: 'chapter1.pdf — Okular' }), []).index, 0)
+test('bestMatch: titles differing only in digits are alike, and the close rank picks between them', () => {
+    // Apps number new windows: "Untitled 1" reopened alone goes where one closed last (#14).
+    const saves = [save({ caption: 'Untitled 1 — Writer', closedAt: 10000 }), save({ caption: 'Untitled 2 — Writer', closedAt: 20000 })]
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Untitled 1 — Writer' }), []).index, 1)
 })
 
 test('closeRanks: the newest burst first, the first closed first within a burst, as a strict order', () => {
@@ -250,14 +250,13 @@ test('bestMatch: equal matches go to a save closed clearly later, else to the on
         'only between equal matches: a better caption wins, closed earlier or not')
 })
 
-test('isBetterMatch: tier, then dims, then score', () => {
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, exact: false, rank: 1 }, { tier: 2, dims: 2, score: 100, exact: false, rank: 0 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, exact: false, rank: 1 }, { tier: 3, dims: 0, score: 99, exact: false, rank: 0 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81, exact: false }, { tier: 3, dims: 1, score: 80, exact: false, rank: 1 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, exact: false, rank: 1 }, { tier: 3, dims: 1, score: 80, exact: false, rank: 1 }), false)
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: false, rank: 0 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 1 }), true, 'then the close rank')
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: false, rank: 1 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 0 }), false)
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: true, rank: 1 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 0 }), true, 'then the exact title')
+test('isBetterMatch: tier, then dims, then score, then the close rank', () => {
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, rank: 1 }, { tier: 2, dims: 2, score: 100, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 0, score: 99, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80, rank: 1 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 1, score: 80, rank: 1 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 0 }, { tier: 1, dims: 2, score: 100, rank: 1 }), true, 'then the close rank')
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 1 }, { tier: 1, dims: 2, score: 100, rank: 0 }), false)
 })
 
 test('single-save fallback: the lone save always applies to the next window (tier 5)', () => {

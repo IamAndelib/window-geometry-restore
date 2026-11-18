@@ -49,7 +49,7 @@ Upstream RememberWindowPositions already re-tiles windows. It applies the steps 
 
 **Saving, in `main.qml`:**
 - Add a `free` record to each tracked entry: the window's last floating rect, output-relative like saves are today.
-  - It is updated from a `frameGeometryChanged` handler, only when the window is not tiled, maximized or fullscreen. The handler is a few comparisons.
+  - It is updated from a `frameGeometryChanged` handler, only when the window is not tiled, maximized or fullscreen; maximized one way, along the other (noteGeometry). The handler is a few comparisons.
   - It is seeded when the window is tracked, and when the script restores a pre-tile rect.
 - In `snapshotWindow`, when `w.tile` is set, also save:
   - `t`: a tile descriptor, either `{ k: 'q', i: 0–7 }` for a quick tile or `{ k: 'c', p: [path], g: relativeGeometry }` for a custom tile. A quick tile is the one whose parent has no parent and that has no `layoutDirection`.

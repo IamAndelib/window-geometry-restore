@@ -97,8 +97,6 @@ interface Match {
     /** Dimensions that match (0-2). */
     dims: number
     score: number
-    /** The save's title is the window's exactly (score 100 also takes titles differing in digits). */
-    exact: boolean
     /** The save's close rank (Engine.closeRanks): equal matches go to the lower. */
     rank: number
     /** A web app's one-time fallback: the only save with its caption. */
@@ -256,8 +254,9 @@ interface Entry {
     opened: PixelRect | null
     restoredFrom: RestoredFrom | null
     placedFrom: Save | null
-    /** A dialog without a parent (Engine.isDialog), or a window framed unlike the app's saves
-     *  (Engine.isFramedUnlike: a splash or welcome screen), and the saves it was judged against. */
+    /** A window set aside: a dialog without a parent (Engine.isDialog), with the saves it was
+     *  judged against (noteGeometry looks again), or one framed unlike the app's saves
+     *  (Engine.isFramedUnlike: a splash or welcome screen; no saves). */
     dialog: { saves: Save[]; framedUnlike: boolean } | null
     /** Whether KWin draws a title bar on it, last seen unmaximized; null until then. */
     framed: boolean | null
