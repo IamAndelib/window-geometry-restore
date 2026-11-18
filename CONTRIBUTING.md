@@ -29,6 +29,7 @@ on, and how to test a change before it reaches anyone's desktop.
 | `src/contents/ui/main.qml` | Runtime: KWin signals, tracking, restore sessions, placement, tiles, persistence |
 | `src/contents/ui/engine.js` | Pure logic, no KWin: the saved-data format, matching, exclusion list, window rules |
 | `src/contents/config/main.xml`, `src/contents/ui/config.ui` | Settings. The default exclusion list is also in `main.qml`; a test checks the two copies match |
+| `types/` | Types for the type check: KWin's scripting API, the script's data, what `main.qml` sees |
 | `tests/engine.mjs` | Unit tests for `engine.js` |
 | `tests/lifecycle.mjs` | The real functions of `main.qml` against a fake KWin |
 | `tests/kwin/` | Scenarios against a real, headless KWin |
@@ -70,12 +71,33 @@ on, and how to test a change before it reaches anyone's desktop.
     guess; without it within 10 s the window becomes its old app's again, where it is. An
     opening two apps share is not guessed.
   - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
-    rest wait up to 10 s for the set to arrive.
+    rest wait up to 10 s for the set to arrive. Equal matches (alike windows) are ranked by when
+    their saves closed: one closed clearly later, on its own, wins (a single window reopens where
+    it was closed last); saves closed together (a logout, an app quitting) go in close order, so
+    alike windows reopening in the order they opened keep their places (`Engine.closeRanks`,
+    bursts chained as `finalizeMonitor` chains closes). Close times count real time, after every
+    saved one (`followSavedCloses`, `nextCloseTime`): a clock that ran ahead, or was set back,
+    doesn't chain later closes into one burst.
   - A window at its minimum width (sized to its content) and under half the width and height of
     every save it could take is a dialog shown without a parent (a startup password prompt,
     `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
     isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
     start), until it grows out of it (noteGeometry) (issue #3).
+  - A window that can't be resized takes the one save left only if its size is near the save's
+    (`Engine.nearSize`), otherwise only a save matching its title or size: a splash screen opens
+    before the app's window and would take its place (`matchFor`).
+  - **Hand-offs** (`handOff`). A splash screen or startup prompt shown alone before the app's
+    window is saved when it closes, as any window. That save is undone (`Engine.undoLayout`,
+    unless the layout was saved again since) when a window of the same app (app key or window
+    class) opens after the close, within `HANDOFF_MS`, on that desktop, while no other window of
+    the app is open, and:
+    - the closed window was the only one closed there (its monitor's buffer) and untouched: where,
+      and in the maximize mode and tile, it was placed, or where it opened
+      (`Engine.keepsPlacement`), never dragged (`userPlaced`) or sent to another desktop, so
+      undoing its save loses nothing the user did;
+    - it came from the same process (`pid`), or couldn't be resized.
+
+    Saves are still written at once. See docs/plans/splash-handoff.md.
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     geometry for a drag out of the tile. A quick tile that waits for the window to become
     active waits at the tile's rect instead; the pre-tile geometry is written just before the
@@ -119,12 +141,20 @@ on, and how to test a change before it reaches anyone's desktop.
     later, so its desktop file name arrives after `windowAdded`: the script follows
     `desktopFileNameChanged`. On X11 the name comes from
   `_KDE_NET_WM_DESKTOP_FILE`, `_GTK_APPLICATION_ID`, or a desktop file's `StartupWMClass`.
+- **A window's process** (6.8.3, `Window::pid`): on Wayland, the client's (from the connection's
+  credentials, `WaylandWindow`), fixed for the window's life; -1 unknown. A Flatpak app's windows
+  report the sandboxed process. LibreOffice (26.8) shows its splash from another process than its
+  windows on a first start (two splashes, the second from the app's process).
+- **Fixed size** (6.8.3, `XdgToplevelWindow::isResizable`): `resizeable` is false when the
+  minimum and maximum sizes are equal, for a fullscreen request, and under a Force size rule.
+  LibreOffice's splash: 644x199 both ways, decorated, `splash` false.
 - **Dialogs without a parent are ordinary windows** (6.8.2): an xdg toplevel is
   `WindowType::Normal` unless a Plasma shell role says otherwise (`xdgshellwindow.h`),
   `transient` only with a parent (`handleTransientForChanged`), and `modal` only through
   xdg-dialog-v1, which GTK3 (Firefox, Thunderbird, Betterbird) doesn't use. Thunderbird's
   primary-password prompt at startup and its profile chooser open that way, before the main
-  window; the same prompt shown later has the main window as its parent.
+  window; the same prompt shown later has the main window as its parent. So do splash screens:
+  `splash` is an X11 window type, and a Wayland one isn't.
 - **Rules.** Window rules are not exposed to scripts. The script reads `kwinrulesrc` through
   QSettings, which hands lists over as QML sequences, not Arrays, and drops escape sequences
   it doesn't know.

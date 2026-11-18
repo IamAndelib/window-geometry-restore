@@ -28,13 +28,22 @@ interface Save extends Geometry {
     /** KWin's maximize mode at close (0 none, 1 vertical, 2 horizontal, 3 both); x/y/width/height
      *  are then the normal geometry to return to. */
     maximized: number
+    /** When the window closed (ms, strictly increasing per close: close order). 0 for saves from
+     *  older versions. */
+    closedAt: number
 }
 
 /** What Engine.makeSave is built from. */
-type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number }
+type SaveFields = Geometry & { caption?: string; tile?: TileRef | null; free?: Geometry | null; maximized?: number; closedAt?: number }
 
-/** An app's windows on one desktop. */
+/** An app's windows on one desktop. `saves` are in close order, the save closed last at the end:
+ *  finalizeMonitor appends the closing monitor's part after the others' (kept in their order).
+ *  Saves with close times are ranked by them (Engine.closeRanks); saves without (older versions)
+ *  by this order, so keep it. */
 interface Layout { lastAccess: number; saves: Save[] }
+
+/** What Engine.recordLayout replaces for an app on one desktop (Engine.layoutBefore). */
+interface LayoutBefore { layout: Layout | null; saves: Save[]; lastAccess: number }
 
 /** How an app's windows open before KWin names them: as app `cls`, titled `caption`. */
 interface Opening { cls: string; caption: string }
@@ -63,6 +72,8 @@ interface EncodedSave {
     t?: EncodedTile
     f?: EncodedRect & { o: EncodedOutput | null }
     max?: number
+    /** Close time (optional; older versions ignore it). */
+    ct?: number
 }
 interface EncodedApp {
     t: number
@@ -81,6 +92,8 @@ interface Match {
     /** Dimensions that match (0-2). */
     dims: number
     score: number
+    /** The save's close rank (Engine.closeRanks): equal matches go to the lower. */
+    rank: number
     /** A web app's one-time fallback: the only save with its caption. */
     only?: boolean
 }
@@ -151,6 +164,25 @@ interface Close {
     monitor: SavedScreen | null
     /** The save the script placed the window at: replaced by this close (issue #8). */
     from: Save | null
+    /** Set when the window closed as the script left it (Engine.keepsPlacement); a possible
+     *  hand-off (main.qml handOff) if it is its monitor's only close (finalizeMonitor). */
+    handoff: HandoffSource | null
+}
+
+/** A closed window that may have handed over: its window class, process (0 unknown), and
+ *  whether it couldn't be resized. */
+interface HandoffSource { resourceClass: string; pid: number; fixedSize: boolean }
+
+/** A layout saved from a window that may have been a splash screen or startup prompt: undone if
+ *  the window it handed over to opens by `until` (main.qml handOff). */
+interface Handoff {
+    from: HandoffSource
+    cls: string
+    desktopKey: string
+    caption: string
+    until: number
+    recorded: Layout
+    before: LayoutBefore
 }
 
 /** An app's open windows on one desktop key. */
@@ -211,6 +243,8 @@ interface Entry {
     userPlaced: boolean
     provisional: { save: Save; until: number } | null
     openedAt: number
+    /** Where it opened; null if adopted or sent to another desktop (Engine.keepsPlacement). */
+    opened: PixelRect | null
     restoredFrom: RestoredFrom | null
     placedFrom: Save | null
     /** A dialog without a parent (Engine.isDialog), and the saves it was judged against. */

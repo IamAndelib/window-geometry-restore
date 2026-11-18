@@ -124,6 +124,48 @@ def s_fixed_size_window():
         check(rect(w)[2:] == size, "size kept: %s" % (rect(w),))
 
 
+def s_splash_hands_over():
+    """A splash screen, a fixed-size window shown alone before the app's window, isn't the
+    app's layout: saved, the app's window opened at its size (LibreOffice). Nor does it take the
+    app window's save by elimination: it was moved off centre."""
+    title = "Untitled 1 - Suite Writer"
+    with sandbox(outputs=1) as sb:
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.1)
+        where = rect(sb.window("Suite 1.0"))
+        splash.close()
+        app = sb.open_app("org.example.suite", title, size=(1200, 700))
+        check("org.example.suite" not in ((sb.saved() or {}).get("apps") or {}), "the splash's save undone: %s" % (sb.saved(),))
+        check(logged(sb.script_log(), '"Suite 1.0" handed over to a new window of the app'), "logged")
+        w = sb.window(title)
+        size = rect(w)[2:]
+        check(size[0] == 1200 and size[1] >= 700, "the window at its own size (with its title bar): %s" % (rect(w),))
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window(title))[:2] == (300, 150), 3, "the drag")
+        app.close()
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.5)
+        check(rect(sb.window("Suite 1.0")) == where, "the splash left where KWin put it: %s" % (rect(sb.window("Suite 1.0")),))
+        splash.close()
+        sb.open_app("org.example.suite", title, size=(1200, 700))
+        check(rect(sb.window(title)) == (300, 150) + size, "the window restored: %s" % (rect(sb.window(title)),))
+
+
+def s_splash_hands_over_to_renamed_component():
+    """LibreOffice's components, given their own desktop file names by KWin rules: the splash
+    keeps the suite's, and hands over by window class."""
+    title = "Untitled 1 - Suite Writer"
+    rules = [rule("org.example.suite", title=title, titlematch="1", desktopfile="org.example.suite.writer", desktopfilerule=2)]
+    with sandbox(outputs=1, rules=rules) as sb:
+        splash = sb.open_app("org.example.suite", "Suite 1.0", size=(644, 235), fixed=True, settle=0.1)
+        splash.close()
+        app = sb.open_app("org.example.suite", title, size=(1200, 700))
+        check(sb.window(title)["df"] == "org.example.suite.writer", "precondition: the rule names it: %s" % (sb.window(title),))
+        check("org.example.suite" not in ((sb.saved() or {}).get("apps") or {}), "the splash's save undone: %s" % (sb.saved(),))
+        sb.set_geometry(title, 300, 150, 1200, 700)
+        app.close()
+        check(list(sb.saved()["apps"]) == ["org.example.suite.writer"], "only Writer saved: %s" % (list(sb.saved()["apps"]),))
+
+
 def maximize_and_close(sb, title, x, y, w, h, app="org.example.alpha"):
     """Open a window at x, y, w, h, maximize it, close it."""
     a = sb.open_app(app, title)
@@ -975,6 +1017,51 @@ def s_used_undocked_keeps_docked_layout():
         check(outputs == ["Virtual-0", "Virtual-1"], "both monitors' saves kept: %s" % outputs)
 
 
+def s_single_window_reopens_where_closed_last():
+    """Two alike windows (same title once digits are ignored, same size), one on each monitor,
+    closed one after the other. One window opened again, three times: it comes back on the
+    monitor where it was closed last each time, instead of alternating (PR #14). The other
+    monitor keeps its save, for a second window."""
+    with sandbox(outputs=2) as sb:
+        a = sb.open_app("org.example.files", "Home 1")
+        move_to(sb, "Home 1", 200, 150)
+        b = sb.open_app("org.example.files", "Home 2")
+        move_to(sb, "Home 2", 2300, 250)
+        check(sb.window("Home 2")["output"] == "Virtual-1", "precondition: one on each monitor")
+        a.close()
+        sb.settle(2.0)  # longer than BURST_MS: two separate closes
+        b.close()
+        for i in range(3):
+            sb.pointer.move(400, 400)  # KWin opens it on monitor 1
+            c = sb.open_app("org.example.files", "Home 1")
+            w = sb.window("Home 1")
+            check(w["output"] == "Virtual-1" and rect(w)[:2] == (2300, 250),
+                  "opening %d: back on monitor 2, where it was closed: %s on %s" % (i + 1, rect(w), w["output"]))
+            c.close()
+        saved = sb.saved()["apps"]["org.example.files"]
+        saves = sorted((s["o"]["n"], s["x"], s["y"]) for layout in saved["d"].values() for s in layout["w"])
+        check(saves == [("Virtual-0", 200, 150), ("Virtual-1", 2300, 250)], "monitor 1 keeps its own save: %s" % saves)
+
+
+def s_alike_windows_keep_places_across_logouts():
+    """Two alike windows (titles alike once digits are ignored, same size), one on each monitor,
+    left open at logout. Apps reopen them in the order they opened: each comes back to its own
+    place, login after login, instead of swapping (found reviewing #14)."""
+    with sandbox(outputs=2) as sb:
+        sb.open_app("org.example.term", "Term 1")
+        move_to(sb, "Term 1", 200, 150)
+        sb.open_app("org.example.term", "Term 2")
+        move_to(sb, "Term 2", 2300, 250)
+        for i in range(2):
+            sb.restart_kwin()  # logout and login: the script saves the open windows
+            sb.pointer.move(400, 400)
+            sb.open_app("org.example.term", "Term 1")
+            sb.open_app("org.example.term", "Term 2")
+            sb.settle(1.0)
+            places = (rect(sb.window("Term 1"))[:2], rect(sb.window("Term 2"))[:2])
+            check(places == ((200, 150), (2300, 250)), "login %d: each back at its own place: %s" % (i + 1, places))
+
+
 def s_undock_two_of_three_monitors():
     """Three monitors, the app open on each; monitors 2 and 3 go at once (undocking), the
     parked windows close at different times; docked again, each window returns to its monitor."""
@@ -1045,11 +1132,20 @@ def s_logout_two_monitors_two_desktops():
 
 
 def s_rapid_open_close():
-    """Twenty quick open/move/close cycles: the last place wins, nothing breaks."""
+    """Twenty quick open/move/close cycles: the last place wins, nothing breaks. The user drags
+    the window: a script write right after the restore would be undone by the restore's own
+    retries, which only a user's move cancels."""
     with sandbox(outputs=2) as sb:
         for i in range(20):
             a = sb.open_app("org.example.rapid", "Rapid", settle=0.15)
-            move_to(sb, "Rapid", 100 + 37 * i, 80 + 23 * i)
+            if i:  # restored to the last place: wait for it, so the drag starts on the title bar
+                last = (100 + 37 * (i - 1), 80 + 23 * (i - 1))
+                sb.wait(lambda: rect(sb.window("Rapid"))[:2] == last, 3, "the restore to %s" % (last,))
+            w = sb.window("Rapid")
+            x, y = titlebar(w)
+            target = (100 + 37 * i, 80 + 23 * i)
+            sb.drag((x, y), (x + target[0] - rect(w)[0], y + target[1] - rect(w)[1]))
+            sb.wait(lambda: rect(sb.window("Rapid"))[:2] == target, 3, "the drag to %s" % (target,))
             a.close()
         sb.open_app("org.example.rapid", "Rapid")
         check(rect(sb.window("Rapid"))[:2] == (100 + 37 * 19, 80 + 23 * 19), "the last place: %s" % (rect(sb.window("Rapid")),))
@@ -1073,13 +1169,17 @@ def s_desktops_times_monitors():
     """One app with its own layout on each desktop and monitor: each combination comes back."""
     with sandbox(outputs=2, desktops=2) as sb:
         spots = {(0, 0): (200, 150), (0, 1): (2300, 250), (1, 0): (600, 350), (1, 1): (2700, 450)}
+        # Titles that differ in more than digits, which matching ignores ("(3) Inbox"). With titles
+        # alike, the windows here, reopened one at a time, would each go where an alike one was
+        # closed last (#14): the scenario is about desktops and monitors, not about alike windows.
+        name = lambda desk, mon: "Grid %s %s" % ("AB"[desk], "LR"[mon])
         # Both windows of a desktop are open at once: a window restored from one monitor's save
         # and moved to the other would take that save along.
         for desk in (0, 1):
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
             apps = []
             for mon in (0, 1):
-                title = "D%d M%d" % (desk, mon)
+                title = name(desk, mon)
                 apps.append(sb.open_app("org.example.grid", title))
                 move_to(sb, title, *spots[(desk, mon)])
             for a in apps:
@@ -1087,7 +1187,7 @@ def s_desktops_times_monitors():
         for (desk, mon), spot in spots.items():
             sb.probe("workspace.currentDesktop = workspace.desktops[%d]; return 1" % desk)
             sb.pointer.move(400 + 1920 * mon, 400)
-            title = "D%d M%d" % (desk, mon)
+            title = name(desk, mon)
             a = sb.open_app("org.example.grid", title)
             w = sb.window(title)
             check(rect(w)[:2] == spot and w["desktops"] == [desk + 1], "%s: %s on %s" % (title, rect(w), w["desktops"]))
@@ -1120,6 +1220,8 @@ SCENARIOS = [
     s_returns_to_its_monitor,
     s_logout_login,
     s_fixed_size_window,
+    s_splash_hands_over,
+    s_splash_hands_over_to_renamed_component,
     s_maximized_at_close,
     s_maximized_by_dragging_to_the_top,
     s_app_opens_maximized_by_itself,
@@ -1159,6 +1261,8 @@ SCENARIOS = [
     s_new_window_beside_open_one_left_alone,
     s_fresh_start_both_monitors,
     s_moved_to_other_monitor,
+    s_single_window_reopens_where_closed_last,
+    s_alike_windows_keep_places_across_logouts,
     s_used_undocked_keeps_docked_layout,
     s_maximized_on_unplugged_monitor,
     s_undock_two_of_three_monitors,

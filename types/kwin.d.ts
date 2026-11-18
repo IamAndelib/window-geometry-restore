@@ -55,6 +55,8 @@ interface KWindow {
     readonly modal: boolean
     readonly transient: boolean
     readonly splash: boolean
+    /** The process that owns the window (Window::pid; on Wayland the client's, -1 unknown). */
+    readonly pid: number
     readonly resourceClass: string
     readonly resourceName: string
     readonly desktopFileName: string

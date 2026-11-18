@@ -20,9 +20,10 @@
 //              { k: 'c', p: [childIndexes], g: { x, y, w, h } }  custom tile, relativeGeometry
 //           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own,
 //           max: KWin's maximize mode (1 vertical, 2 horizontal, 3 both; only when maximized
-//                at close; x/y/w/h are then the normal geometry to return to) }
+//                at close; x/y/w/h are then the normal geometry to return to),
+//           ct: close time (ms, increasing in close order; closeRanks) }
 // Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
-// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3).
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt.
 // v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
 // ignored.
 
@@ -42,6 +43,9 @@ var RESTORE_TIMEOUT_MS = 10000
 // within PREDICTION_MS was mispredicted: then it is no longer fresh, so it only changes app.
 var LEARN_MS = 3000
 var PREDICTION_MS = RESTORE_TIMEOUT_MS
+// A splash screen or startup prompt hands over to the app's window within this (main.qml
+// handOff; LibreOffice's splash: ~0.8 s).
+var HANDOFF_MS = 3000
 var MAX_OPENINGS = 4
 // Titles are app-controlled and may be huge: stored, matched and tested against rules only up
 // to this length (matching is O(length) per pair, and saved titles are kept on disk).
@@ -51,6 +55,8 @@ var RETRY_MAX_AGE_MS = 10000
 var MAX_GEOMETRY_TRIES = 3
 var TICK_MS = 250
 var MAX_BUFFER = 64
+// The latest time a Date can hold (ms).
+var MAX_TIME = 8.64e15
 
 // Tiles. KWin creates the quick tiles in this order; the actions quick-tile the active window.
 /** @type {KQuickTileAction[]} */
@@ -187,7 +193,9 @@ function captionScore(a, b) {
 }
 
 // Ranking shared by single-window matching and the deadline sweep:
-// lower tier first, then more matching dimensions, then higher caption score.
+// lower tier first, then more matching dimensions, then higher caption score, then the save's
+// close rank (closeRanks): equal matches are alike windows, which only their saves' close times
+// tell apart.
 /**
  * @param {Match} a
  * @param {Match} b
@@ -196,7 +204,39 @@ function captionScore(a, b) {
 function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
-    return a.score > b.score
+    if (a.score !== b.score) return a.score > b.score
+    return a.rank < b.rank
+}
+
+// The order in which equal matches take saves, by when they closed (`closedAt`): saves closed
+// within BURST_MS of the next form one burst, as finalizeMonitor groups closes, but across
+// monitors. The newest burst first: a window closed on its own later is where the app was left
+// (#14: a single window reopens where it was closed last). Within a burst, the first closed
+// first: windows closed together (a logout, the app quitting) reopen in the order they opened
+// and keep their places. Saves without close times (from older versions) are the oldest burst,
+// in the order they are listed. A strict order (no cycles), so the result doesn't depend on
+// which save is looked at first. Returns each save's rank (0 first).
+/**
+ * @param {Save[]} saves
+ * @returns {number[]}
+ */
+function closeRanks(saves) {
+    var order = saves.map(function (s, i) { return i })
+    order.sort(function (a, b) { return (saves[a].closedAt - saves[b].closedAt) || (a - b) })
+    /** @type {number[]} */
+    var burst = []
+    for (var k = 0; k < order.length; k++) {
+        var at = saves[order[k]].closedAt
+        var previous = k ? saves[order[k - 1]].closedAt : NaN
+        burst[order[k]] = k && at > 0 && previous > 0 && at - previous <= BURST_MS ? burst[order[k - 1]] : at
+    }
+    order.sort(function (a, b) {
+        return (burst[b] - burst[a]) || (saves[a].closedAt - saves[b].closedAt) || (a - b)
+    })
+    /** @type {number[]} */
+    var ranks = []
+    for (var r = 0; r < order.length; r++) ranks[order[r]] = r
+    return ranks
 }
 
 // Deterministic slot matching: pick the best save not yet taken for one live window.
@@ -204,7 +244,8 @@ function isBetterMatch(a, b) {
 // Tier 2: same size
 // Tier 3: caption >= CAPTION_FALLBACK
 // Tier 4: the only save left, whatever it is - the "app never remembers anything" case
-// Returns { index, tier, dims, score } or null.
+// Equal matches (alike windows: the same title once digits are dropped, the same size) go by
+// closeRanks.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
 /**
@@ -221,6 +262,7 @@ function bestMatch(saves, live, taken, scores) {
         if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
         return scores[i]
     }
+    var ranks = closeRanks(saves)
     var best = null
     var free = -1
     var freeCount = 0
@@ -236,11 +278,11 @@ function bestMatch(saves, live, taken, scores) {
         else if (dims === 2) tier = 2
         else if (caption >= CAPTION_FALLBACK) tier = 3
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: caption }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption, rank: ranks[i] }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: score(free) }
+        return { index: free, tier: 4, dims: 0, score: score(free), rank: ranks[free] }
     }
     return best
 }
@@ -293,7 +335,8 @@ function makeSave(fields) {
         output: fields.output || null,
         tile: fields.tile || null,
         free: fields.free || null,
-        maximized: fields.maximized || 0
+        maximized: fields.maximized || 0,
+        closedAt: fields.closedAt || 0
     }
 }
 
@@ -423,6 +466,7 @@ function encodeSave(s) {
     if (s.tile) out.t = encodeTile(s.tile)
     if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
     if (s.maximized) out.max = s.maximized
+    if (s.closedAt) out.ct = s.closedAt
     return out
 }
 
@@ -440,6 +484,9 @@ function decodeSave(s) {
     fields.tile = tile
     fields.free = tile ? decodeGeometry(s.f) : null
     fields.maximized = isIndex(s.max, 4) ? s.max : 0
+    // A time a Date can hold, so later closes still count up from it (main.qml followSavedCloses).
+    var ct = numberOr(s.ct, 0)
+    fields.closedAt = ct > 0 && ct <= MAX_TIME ? Math.floor(ct) : 0
     return makeSave(fields)
 }
 
@@ -578,7 +625,7 @@ function decodeOpenings(list) {
     return opens
 }
 
-// A title as openings keep it.
+// A title as saves and openings keep it.
 /**
  * @param {unknown} caption
  * @returns {string}
@@ -664,6 +711,96 @@ function predictedKey(state, cls, caption) {
     return found
 }
 
+// The latest close time in the saved data (main.qml followSavedCloses).
+/**
+ * @param {State} state
+ * @returns {number}
+ */
+function latestClose(state) {
+    var latest = 0
+    for (var key in state.apps) {
+        var app = state.apps[key]
+        for (var desk in app.desktops) {
+            var saves = app.desktops[desk].saves
+            for (var i = 0; i < saves.length; i++) latest = Math.max(latest, saves[i].closedAt || 0)
+        }
+    }
+    return latest
+}
+
+// Whether a closing window is as the script left it: where, and in the maximize mode and tile,
+// the save it was placed from put it, or where it `opened` if it wasn't placed. A window moved by
+// any means, a shortcut or another script too, or resized by the app, isn't. `opened` is null
+// when unknown (adopted) or when the window was sent to another desktop: then it isn't either.
+/**
+ * @param {Save} snap
+ * @param {Save | null} from
+ * @param {PixelRect | null} opened
+ * @returns {boolean}
+ */
+function keepsPlacement(snap, from, opened) {
+    var at = !opened ? null : from ? { x: from.x, y: from.y, w: from.width, h: from.height } : opened
+    return !!at && snap.x === at.x && snap.y === at.y && snap.width === at.w && snap.height === at.h &&
+        snap.maximized === (from ? from.maximized : 0) && sameTile(snap.tile, from ? from.tile : null)
+}
+
+/**
+ * @param {TileRef | null} a
+ * @param {TileRef | null} b
+ * @returns {boolean}
+ */
+function sameTile(a, b) {
+    if (!a || !b) return !a && !b
+    if (a.kind === 'quick') return b.kind === 'quick' && a.index === b.index
+    if (b.kind === 'quick') return false
+    return a.path.length === b.path.length && a.path.every(function (step, i) { return step === b.path[i] })
+}
+
+// Whether a window's size is near a save's: within a fifth both ways (a frame grown with a theme's
+// borders, a title bar), not another window's (a splash screen and the app's window).
+/**
+ * @param {{ width: number, height: number }} size
+ * @param {Save} save
+ * @returns {boolean}
+ */
+function nearSize(size, save) {
+    return Math.abs(size.width - save.width) <= save.width / 5 && Math.abs(size.height - save.height) <= save.height / 5
+}
+
+// What recordLayout replaces for an app on one desktop, to put back with undoLayout.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @returns {LayoutBefore}
+ */
+function layoutBefore(state, cls, key) {
+    var app = state.apps[cls]
+    return { layout: layoutFor(state, cls, key), saves: app ? app.saves : [], lastAccess: app ? app.lastAccess : 0 }
+}
+
+// Puts back what an app's layout on one desktop was before `recorded` was recorded, unless it has
+// changed since. An app left without data is removed. Returns whether it was put back.
+/**
+ * @param {State} state
+ * @param {string} cls
+ * @param {string} key
+ * @param {Layout} recorded
+ * @param {LayoutBefore} before
+ * @returns {boolean}
+ */
+function undoLayout(state, cls, key, recorded, before) {
+    var app = state.apps[cls]
+    if (!app || layoutFor(state, cls, key) !== recorded) return false
+    if (before.layout) app.desktops[key] = before.layout
+    else delete app.desktops[key]
+    // The app's latest layout and use: only if no other desktop's close has set them since.
+    if (app.saves === recorded.saves) app.saves = before.saves
+    if (app.lastAccess === recorded.lastAccess && before.lastAccess) app.lastAccess = before.lastAccess
+    if (!hasData(app)) delete state.apps[cls]
+    return true
+}
+
 // The layout an app left on one desktop: { lastAccess, saves } or null.
 /**
  * @param {State} state
@@ -682,15 +819,17 @@ function layoutFor(state, cls, key) {
  * @param {string} key
  * @param {Save[]} saves
  * @param {number} now
+ * @returns {Layout}
  */
 function recordLayout(state, cls, key, saves, now) {
     var app = state.apps[cls]
     if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: newMap() }
     if (!isObject(app.desktops)) app.desktops = newMap()
     saves = saves.slice(-MAX_SAVES)
-    app.desktops[key] = { lastAccess: now, saves: saves }
+    var layout = app.desktops[key] = { lastAccess: now, saves: saves }
     app.saves = saves
     app.lastAccess = now
+    return layout
 }
 
 /**

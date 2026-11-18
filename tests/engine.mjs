@@ -178,11 +178,55 @@ test('bestMatch: prefers higher tier, then dims, then score', () => {
     assert.equal(m.tier, 2)
 })
 
+test('closeRanks: the newest burst first, the first closed first within a burst, as a strict order', () => {
+    const at = (...times) => times.map((t) => save({ closedAt: t }))
+    assert.deepEqual(engine.closeRanks(at(10000, 20000)), [1, 0], 'closed apart: the later first (#14)')
+    assert.deepEqual(engine.closeRanks(at(10000, 10500)), [0, 1], 'closed together: in close order')
+    assert.deepEqual(engine.closeRanks(at(10000, 11000, 12000)), [0, 1, 2], 'a burst chains (each within BURST_MS of the next)')
+    assert.deepEqual(engine.closeRanks(at(10002, 10001, 10003)), [1, 0, 2], 'listed out of order (another monitor first): by time')
+    assert.deepEqual(engine.closeRanks(at(10000, 10001, 30000, 30001)), [2, 3, 0, 1], 'two bursts: the newer one first, each in close order')
+    assert.deepEqual(engine.closeRanks(at(0, 0, 50000)), [1, 2, 0], 'older saves without close times: the oldest burst, in list order')
+    assert.deepEqual(engine.closeRanks([]), [])
+})
+
+test('alike windows taking saves one after another follow the close ranks, without cycles', () => {
+    // The review's case: one chained burst at 10, 11 and 12 s. Pairwise "within BURST_MS" ranked
+    // these in a cycle and handed out C, A, B.
+    const saves = [save({ closedAt: 10000 }), save({ closedAt: 11000 }), save({ closedAt: 12000 })]
+    const taken = []
+    const got = []
+    for (let n = 0; n < 3; n++) {
+        const m = engine.bestMatch(saves, live(), taken)
+        got.push(m.index)
+        taken[m.index] = true
+    }
+    assert.deepEqual(got, [0, 1, 2])
+})
+
+test('bestMatch: equal matches go to a save closed clearly later, else to the one listed first', () => {
+    const other = save({ caption: 'Other', width: 1, height: 1 })
+    const apart = [save({ closedAt: 10000 }), save({ closedAt: 20000 }), other]
+    assert.equal(engine.bestMatch(apart, live(), []).index, 1, 'closed on its own, later (#14)')
+    assert.equal(engine.bestMatch(apart, live(), [false, true]).index, 0, 'then the one closed before')
+    const together = [save({ closedAt: 10000 }), save({ closedAt: 10000 + engine.BURST_MS }), other]
+    assert.equal(engine.bestMatch(together, live(), []).index, 0, 'closed together (a logout): close order')
+    const crossed = [save({ caption: 'B', closedAt: 10002 }), save({ caption: 'A', closedAt: 10001 })]
+    assert.equal(engine.bestMatch(crossed, live({ caption: 'A' }), []).index, 1, 'precondition: caption decides')
+    assert.equal(engine.bestMatch([save({ closedAt: 10002 }), save({ closedAt: 10001 })], live(), []).index, 1,
+        'closed together but listed out of order (another monitor\'s part first): the one closed first')
+    const older = [save(), save()]
+    assert.equal(engine.bestMatch(older, live(), []).index, 0, 'saves from before close times: as before')
+    assert.equal(engine.bestMatch([save({ closedAt: 1 }), save({ caption: 'Window two', closedAt: 99999 })], live(), []).index, 0,
+        'only between equal matches: a better caption wins, closed earlier or not')
+})
+
 test('isBetterMatch: tier, then dims, then score', () => {
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0 }, { tier: 2, dims: 2, score: 100 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 0, score: 99 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80 }, { tier: 3, dims: 1, score: 80 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, rank: 1 }, { tier: 2, dims: 2, score: 100, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 0, score: 99, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80, rank: 1 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 1, score: 80, rank: 1 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 0 }, { tier: 1, dims: 2, score: 100, rank: 1 }), true, 'then the close rank')
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 1 }, { tier: 1, dims: 2, score: 100, rank: 0 }), false)
 })
 
 test('single-save fallback: the lone save always applies to the next window (tier 4)', () => {
@@ -225,7 +269,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
     assert.equal(a.tile, null)
     assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))
@@ -631,4 +675,77 @@ test('System Settings is not excluded by default: it is an ordinary app window',
     const qml = readFileSync(new URL('../src/contents/ui/main.qml', import.meta.url), 'utf8')
     const list = qml.match(/defaultExcluded: \[([\s\S]*?)\]\.join/)[1]
     assert.ok(!engine.isListed('systemsettings', engine.parseList(list.replace(/['\s]/g, '').split(',').join('\n'))))
+})
+
+test('keepsPlacement: where, and as, the save a window was placed from put it, or where it opened', () => {
+    const quick = (index) => ({ kind: 'quick', index, rel: null })
+    const custom = (...path) => ({ kind: 'custom', path, rel: { x: 0, y: 0, width: 1, height: 1 } })
+    const at = { x: 100, y: 50, w: 800, h: 600 }
+    assert.equal(engine.keepsPlacement(save(), null, at), true, 'not placed, where it opened')
+    assert.equal(engine.keepsPlacement(save({ x: 140 }), null, at), false, 'moved since, by any means')
+    assert.equal(engine.keepsPlacement(save({ width: 900 }), null, at), false, 'resized since')
+    assert.equal(engine.keepsPlacement(save(), null, null), false, 'where it opened unknown')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), null, at), false, 'maximized since')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), null, at), false, 'tiled since')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 }), at), true, 'maximized as restored')
+    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 }), at), false, 'unmaximized since')
+    assert.equal(engine.keepsPlacement(save({ x: 5 }), save(), at), false, 'moved from the save')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) }), at), true, 'in its quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) }), at), false, 'another quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 1) }), at), true, 'in its custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 2) }), at), false, 'another custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: custom(0, 1) }), at), false, 'a parent tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: quick(0) }), at), false, 'another kind')
+    assert.equal(engine.keepsPlacement(save(), save(), null), false, 'placed, then sent to another desktop')
+})
+
+test('decodeState drops close times a Date can\'t hold', () => {
+    const blob = (ct) => JSON.stringify({ version: 2, apps: { a: { t: 1, w: [], d: { k: { t: 1, w: [{ c: 'A', x: 0, y: 0, w: 10, h: 10, o: null, ct }] } } } } })
+    const closedAt = (ct) => engine.decodeState(blob(ct)).state.apps.a.desktops.k.saves[0].closedAt
+    assert.equal(closedAt(1234.5), 1234)
+    assert.equal(closedAt(1e300), 0)
+    assert.equal(closedAt(-5), 0)
+    assert.equal(closedAt('soon'), 0)
+})
+
+test('nearSize: within a fifth both ways', () => {
+    assert.equal(engine.nearSize({ width: 660, height: 250 }, save({ width: 644, height: 235 })), true, 'a theme\'s borders')
+    assert.equal(engine.nearSize({ width: 644, height: 235 }, save({ width: 1324, height: 750 })), false, 'a splash and the app')
+    assert.equal(engine.nearSize({ width: 644, height: 600 }, save({ width: 644, height: 235 })), false, 'one way is enough')
+})
+
+test('undoLayout puts back what recordLayout replaced, unless the layout changed since', () => {
+    const state = engine.newState()
+    const first = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 5)
+    const recorded = engine.layoutFor(state, 'app', 'desk')
+    assert.equal(engine.undoLayout(state, 'app', 'desk', recorded, first), true)
+    assert.equal(state.apps.app, undefined, 'nothing was saved before: the app is gone')
+
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Main' })], 5)
+    engine.recordLayout(state, 'app', 'other', [save({ caption: 'Elsewhere' })], 6)
+    const main = engine.layoutFor(state, 'app', 'desk')
+    const before = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 7)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', engine.layoutFor(state, 'app', 'desk'), before), true)
+    assert.equal(engine.layoutFor(state, 'app', 'desk'), main, 'the layout from before')
+    assert.equal(state.apps.app.saves[0].caption, 'Elsewhere', 'and the latest layout for older versions')
+    assert.equal(state.apps.app.lastAccess, 6)
+    assert.equal(engine.layoutFor(state, 'app', 'other').saves[0].caption, 'Elsewhere', 'other desktops untouched')
+
+    const stale = engine.layoutBefore(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 8)
+    const splash = engine.layoutFor(state, 'app', 'desk')
+    engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Later' })], 9)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', splash, stale), false, 'saved again since: left')
+    assert.equal(engine.layoutFor(state, 'app', 'desk').saves[0].caption, 'Later')
+
+    // Another desktop saved after: its latest layout and use stay.
+    const beforeSplash = engine.layoutBefore(state, 'app', 'desk')
+    const splashed = engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 10)
+    engine.recordLayout(state, 'app', 'other', [save({ caption: 'Other desktop' })], 11)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', splashed, beforeSplash), true)
+    assert.equal(engine.layoutFor(state, 'app', 'desk').saves[0].caption, 'Later')
+    assert.equal(state.apps.app.saves[0].caption, 'Other desktop')
+    assert.equal(state.apps.app.lastAccess, 11)
 })

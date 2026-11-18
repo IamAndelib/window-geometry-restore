@@ -8,10 +8,13 @@ declare var restoreTiles: boolean
 declare var excluded: ExclusionList
 declare var reported: Record<string, boolean>
 declare var lastWritten: string
+declare var lastClosedAt: number
+declare var closeOffset: number
 declare var store: State
 declare var live: Record<string, Group>
 declare var tracked: Record<string, Entry>
 declare var retries: Retry[]
+declare var handoffs: Handoff[]
 
 /** QML's console: console.warn goes to KWin's log (the journal). */
 declare var console: { warn(...args: unknown[]): void }
@@ -24,7 +27,6 @@ interface QSettingsObject {
     value(key: string, defaultValue?: unknown): any
     setValue(key: string, value: unknown): void
     sync(): void
-    destroy(): void
 }
 declare var settings: QSettingsObject
 

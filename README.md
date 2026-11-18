@@ -41,6 +41,7 @@ When upgrading, log out and back in afterwards — KWin keeps running the old ve
   - **Each desktop is independent.** Konsole closed on desktop 2 comes back the way you left it on desktop 2, whether or not Konsole is open on desktop 1. An app opening on a desktop where you never closed it opens where it opens. Windows set to show on all desktops share one layout of their own.
 - **Which app a window belongs to.** Windows are told apart by their desktop file name, or by their window class when that names the same app. So a browser's web apps (a WhatsApp or Calendar web app) are apps of their own, as in the taskbar: each keeps its own layout and is restored while the browser is open. A Flatpak browser's web apps only get their own desktop file name from a KWin rule (*Desktop file name*, Force) or the web app's `StartupWMClass`, as Web App Hub sets up. A rule that matches the web app by its title works too. The browser shows the window under a placeholder title first and the rule names it a moment later; the script learns which placeholder each web app opens with, so from the second launch on the web app opens straight at its place, like any app.
 - **Matching.** Windows are matched to their remembered slots by caption and size. A clear match applies at once; otherwise the window gets one within a few seconds. If you move a window yourself first, your placement wins.
+- **Splash screens and startup prompts.** On Wayland, KWin can't tell a splash screen (LibreOffice's) or a prompt shown before the app's window (a profile chooser) from the app's window. Such a window doesn't become the app's layout: if the app's window opens within 3 seconds of it closing, its save is undone, provided it was the app's only window, you didn't move, resize, maximize or tile it, and it came from the same process as the app's window or couldn't be resized, as splash screens can't. A window that can't be resized is restored only from a save that matches its title or size, or one of about its size, so a splash screen stays where it opens.
 - **Tiles.**
   - **Back in its tile:** a window that was tiled when it closed (a quick tile or a custom Meta+T tile) reopens in the same tile. Dragging it out gives back the size it had before you tiled it.
   - **Resized quick tiles** come back at their size.
@@ -80,7 +81,30 @@ Three settings (⚙ next to the script in KWin Scripts):
 
 ## Troubleshooting
 
-**A dialog opened before the app's window.** On Wayland, a dialog an app shows without a parent (Thunderbird's password prompt at startup) looks to KWin like an app window. The script leaves a window alone, and doesn't save it, if it opens at its minimum width and is under half the size of the app's saved windows both ways. A dialog that is bigger than that, compared with a small saved window, can still be given the window's layout. With nothing saved yet (the app's first launch, or its first on a virtual desktop), there is nothing to compare with: the prompt's place can be saved, and the main window opens there once; its next close puts things right.
+**A dialog opened before the app's window.** On Wayland, a dialog an app shows without a parent (Thunderbird's password prompt at startup) looks to KWin like an app window. The script leaves a window alone, and doesn't save it, if it opens at its minimum width and is under half the size of the app's saved windows both ways. A dialog that is bigger than that, compared with a small saved window, can still be given the window's layout. With nothing saved yet (the app's first launch, or its first on a virtual desktop), there is nothing to compare with, and the prompt's place is saved; once the main window opens from the same process, that save is undone (see *Splash screens and startup prompts* above).
+
+**LibreOffice from Flathub: Writer, Calc and the others share one layout.** The Flatpak gives every LibreOffice window the same app id, `org.libreoffice.LibreOffice`, so neither the taskbar nor the script can tell Writer from Calc: one opens where the other closed. KWin rules can give each component its own name, as distribution packages do. This adds one per component (Writer, Calc, Impress, Draw, Math, Base) to `~/.config/kwinrulesrc` and reloads them; the Start Center and the splash screen keep the suite's name:
+
+```sh
+for app in Writer Calc Impress Draw Math Base; do
+  id=libreoffice-${app,,}
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key Description "LibreOffice $app: its own app"
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key wmclass org.libreoffice.LibreOffice
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key wmclassmatch 1
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key title "LibreOffice $app"
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key titlematch 2
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key desktopfile "org.libreoffice.LibreOffice.${app,,}"
+  kwriteconfig6 --file kwinrulesrc --group "$id" --key desktopfilerule 2
+  order=$(kreadconfig6 --file kwinrulesrc --group General --key Order)
+  case ",$order," in
+    *",$id,"*) ;;
+    *) kwriteconfig6 --file kwinrulesrc --group General --key Order "${order:+$order,}$id" ;;
+  esac
+done
+qdbus6 org.kde.KWin /KWin reconfigure
+```
+
+The same rules can be made in *System Settings → Window Management → Window Rules*: window class `org.libreoffice.LibreOffice` (exact match), window title containing `LibreOffice Writer`, and the property *Desktop file name* set to Force `org.libreoffice.LibreOffice.writer`; likewise for the others. Each component then keeps its own layout from its next close on.
 
 ```
 journalctl --user -f | grep -i windowgeometryrestore

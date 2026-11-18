@@ -40,15 +40,15 @@ const extracted = extractFunctions(qml)
 // from main.qml must be listed here too.
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'logOnce', 'removeFromArray', 'connectSignal', 'disconnectSignal',
-    'loadConfig', 'loadPersisted', 'persist',
-    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
+    'loadConfig', 'loadPersisted', 'persist', 'followSavedCloses', 'nextCloseTime',
+    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'pruneHandoffs', 'isAppOf', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
     'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
     'resolveOutput', 'monitorOf', 'sameMonitor', 'hasWindowOn', 'currentDesktopOn', 'workArea', 'outputUnderCursor', 'isOnScreen',
     'startSessionFor', 'startSession', 'extendSession', 'closeSession', 'joinSession', 'watchCaption', 'unwatchCaption',
     'onUserMoveResize', 'dialogSizeOf', 'matchFor', 'tryAssign', 'assignSave', 'endSession',
-    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'applySave', 'applyMaximized', 'reapplyProvisional',
+    'canPlace', 'fitLength', 'targetFor', 'rectEquals', 'dropRetries', 'setGeometry', 'notePlacement', 'applySave', 'applyMaximized', 'reapplyProvisional',
     'percentText', 'rootTileFor', 'isTileAt', 'findCustomTile', 'quickRootFor', 'planTile', 'startTile', 'quickTileWhenActive',
     'restoreQuickSplit', 'cancelPendingTile',
     'sweepRetries', 'sweepSessions', 'sweepPredictions', 'isIdle', 'ensureTick', 'onTick',
@@ -430,10 +430,13 @@ function buildRuntime(initialBlob = '{}', config = {}, rules = null) {
         var excluded = Engine.parseList('');
         var reported = {};
         var lastWritten = '';
+        var lastClosedAt = 0;
+        var closeOffset = 0;
         var store = Engine.newState();
         var live = {};
         var tracked = {};
         var retries = [];
+        var handoffs = [];
         var root = {};
         ${Object.keys(extracted).map((name) => {
             const fn = extracted[name]
@@ -2106,6 +2109,51 @@ test('a monitor the app opened no window on this time keeps its part of the layo
     assert.deepEqual(saved.map((s) => [s.c, s.o.n]).sort(), [['Left', 'DP-1'], ['Right', 'HDMI-A-1']])
 })
 
+test('one window of an app saved alike on two monitors reopens where it was closed last, every time', () => {
+    const rt = buildRuntime()
+    const left = onMonitor(rt, 'dolphin', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Home')
+    const right = onMonitor(rt, 'dolphin', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'Home')
+    left.emitClosed()
+    advanceClock(rt, 5000)
+    right.emitClosed()
+    for (let i = 0; i < 3; i++) {
+        advanceClock(rt, 5000)
+        const w = onMonitor(rt, 'dolphin', 0, { x: 400, y: 300, width: 960, height: 635 }, 'Home')
+        assert.deepEqual([w.x, w.y], [2100, 150], `opening ${i + 1}: back on HDMI-A-1, where it was closed`)
+        w._output = outputs[1] // KWin follows the move
+        advanceClock(rt, 2000)
+        w.emitClosed()
+    }
+    const saved = savedApp(rt, 'dolphin').d['desk-uuid-1'].w
+    assert.deepEqual(saved.map((s) => [s.o.n, s.x, s.y]).sort(), [['DP-1', 100, 100], ['HDMI-A-1', 2100, 150]],
+        'a second window still has DP-1\'s own save to go to')
+    assert.equal(saved[saved.length - 1].o.n, 'HDMI-A-1', 'the save closed last is last in the layout')
+})
+
+// The order bestMatch's tie-break relies on: a layout lists its saves in close order, the save
+// closed last at the end (finalizeMonitor appends the closing monitor's part after the others').
+test('a layout keeps its saves in close order, across monitors and closes', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'A')
+    const b = onMonitor(rt, 'files', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'B')
+    const c = onMonitor(rt, 'files', 0, { x: 300, y: 200, width: 960, height: 635 }, 'C')
+    closeAll(a, c) // DP-1's part: A then C, one burst
+    advanceClock(rt, 5000)
+    b.emitClosed() // then HDMI-A-1's
+    const order = () => savedApp(rt, 'files').d['desk-uuid-1'].w.map((s) => s.c)
+    assert.deepEqual(order(), ['A', 'C', 'B'])
+    const again = onMonitor(rt, 'files', 0, { x: 0, y: 0, width: 500, height: 400 }, 'D')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    again._output = outputs[0]
+    again._setFrame({ x: 50, y: 60, width: 500, height: 400 })
+    again.emitClosed() // DP-1's part rewritten: it moves to the end, after HDMI-A-1's
+    assert.deepEqual(order(), ['B', 'D'])
+    const reloaded = buildRuntime(rt.blobRef())
+    reloaded.persist()
+    assert.deepEqual(JSON.parse(reloaded.blobRef()).apps.files.d['desk-uuid-1'].w.map((s) => s.c), ['B', 'D'], 'kept through saving and loading')
+})
+
 test('one of two windows moved to another monitor takes only its own save along', () => {
     const rt = buildRuntime()
     const one = onMonitor(rt, 'konsole', 1, { x: 2100, y: 150, width: 900, height: 600 }, 'Doc')
@@ -3630,4 +3678,316 @@ test('a web app\'s prompt is judged only against the saves its fallback could gi
     rt.trackWindow(w)
     assert.equal(w.maximizeMode, 0, 'not given the web app\'s maximized save')
     assert.ok(rt.trackedRef()[w.internalId].dialog)
+})
+
+// --- Alike windows across logouts: closed together, they keep their places (1.4.5 review) ---
+
+// Logs out (the script saves the open windows) and in, then opens `count` alike windows in the
+// same order on `monitors` (output index per window); returns where each came back.
+function logoutCycles(placesOf, monitors, cycles) {
+    let rt = buildRuntime()
+    let windows = monitors.map((m, i) => onMonitor(rt, 'term', m, placesOf[i], 'Term ' + (i + 1)))
+    const seen = []
+    for (let c = 0; c < cycles; c++) {
+        rt.shutdown()
+        rt = buildRuntime(rt.blobRef())
+        windows = monitors.map((m, i) => onMonitor(rt, 'term', m, { x: 0, y: 0, width: placesOf[i].width, height: placesOf[i].height }, 'Term ' + (i + 1)))
+        advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+        rt.tick()
+        seen.push(windows.map((w) => [w.x, w.y]))
+    }
+    return seen
+}
+
+test('alike windows keep their places across logouts, on one monitor and on two', () => {
+    const one = [{ x: 100, y: 100, width: 960, height: 635 }, { x: 500, y: 300, width: 960, height: 635 }]
+    for (const s of logoutCycles(one, [0, 0], 4)) assert.deepEqual(s, [[100, 100], [500, 300]], 'one monitor')
+    const two = [{ x: 100, y: 100, width: 960, height: 635 }, { x: 2100, y: 150, width: 960, height: 635 }]
+    for (const s of logoutCycles(two, [0, 1], 4)) assert.deepEqual(s, [[100, 100], [2100, 150]], 'two monitors')
+    const three = [two[0], two[1], { x: 600, y: 300, width: 960, height: 635 }]
+    for (const s of logoutCycles(three, [0, 1, 0], 4)) assert.deepEqual(s, [[100, 100], [2100, 150], [600, 300]], 'three windows')
+})
+
+test('after a clock that ran ahead, close times still count real time: separate closes stay separate bursts', () => {
+    const future = 1000000000 + 7200000
+    const rt = buildRuntime(savedLayouts({ files: [{ c: 'Home', x: 2100, y: 150, w: 960, h: 635, o: null, ct: future }] }))
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    const first = makeWindow({ cls: 'other', caption: 'One' })
+    rt.trackWindow(first)
+    first.emitClosed()
+    const ct = () => savedApp(rt, 'other').d['desk-uuid-1'].w[0].ct
+    const one = ct()
+    assert.ok(one > future, 'after the saved close')
+    advanceClock(rt, 60000)
+    const second = makeWindow({ cls: 'other', caption: 'Two' })
+    rt.trackWindow(second)
+    second.emitClosed()
+    assert.equal(ct() - one, 60000, 'a minute apart, as they closed')
+})
+
+test('a fixed-size window asking for fullscreen still takes the one save left', () => {
+    const rt = buildRuntime(savedLayouts({ player: [{ c: 'Library', x: 300, y: 200, w: 900, h: 600, o: null }] }))
+    const w = makeWindow({ cls: 'player', caption: 'Movie', x: 0, y: 0, width: 1920, height: 1080 })
+    w.resizeable = false
+    w.fullScreen = true
+    rt.trackWindow(w)
+    assert.ok(rt.getLogs().some((l) => /restored window to saved state/.test(l)), rt.getLogs().join('\n'))
+})
+
+test('close times keep increasing across sessions, whatever the clock did', () => {
+    // A save from a session whose clock ran ahead (before NTP corrected it).
+    const future = 1000000000 + 7200000
+    const rt = buildRuntime(savedLayouts({ files: [{ c: 'Home', x: 2100, y: 150, w: 960, h: 635, o: null, ct: future }] }))
+    const w = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Doc')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    w.emitClosed()
+    const saves = savedApp(rt, 'files').d['desk-uuid-1'].w
+    assert.ok(Math.max(...saves.filter((s) => s.c === 'Doc').map((s) => s.ct)) > future, 'closed later, so ranked later')
+})
+
+// ---- splash screens and startup prompts: a window handing over to the app's is not saved ----
+
+const LO = 'org.libreoffice.LibreOffice'
+// LibreOffice's splash: a fixed size, from another process than the app's window on a first start.
+const splashWindow = (rt, fields = {}) => {
+    const w = makeWindow({ cls: LO, caption: 'LibreOffice 26.8', x: 638, y: 422, width: 644, height: 235, ...fields })
+    w.resizeable = false
+    w.pid = fields.pid ?? 401431
+    rt.trackWindow(w)
+    return w
+}
+const appWindow = (rt, fields = {}) => {
+    const w = makeWindow({ cls: LO, caption: 'Untitled 1 — LibreOffice Writer', x: 298, y: 165, width: 1324, height: 750, ...fields })
+    w.pid = fields.pid ?? 401486
+    rt.trackWindow(w)
+    return w
+}
+const frameOf = (w) => [w.x, w.y, w.width, w.height]
+// The splash's short life, then the app's window.
+const handOver = (rt, from, open) => {
+    advanceClock(rt, 120)
+    from.emitClosed()
+    advanceClock(rt, 700)
+    return open()
+}
+
+test('a splash screen handing over to the app\'s window is not saved: the window opens at its own size', () => {
+    const rt = buildRuntime()
+    const writer = handOver(rt, splashWindow(rt), () => appWindow(rt))
+    assert.equal(savedApp(rt, LO), undefined, 'the splash\'s save is undone')
+    assert.ok(rt.getLogs().some((l) => /"LibreOffice 26\.8" handed over to a new window of the app/.test(l)))
+    assert.deepEqual(frameOf(writer), [298, 165, 1324, 750])
+
+    // The user places the window; next launch, the splash stays where it opens, and the window
+    // is restored.
+    advanceClock(rt, 60000)
+    writer.emitMoveResizeStarted()
+    writer._setFrame({ x: 100, y: 80, width: 1500, height: 900 })
+    writer.emitClosed()
+    advanceClock(rt, 60000)
+    const splash = splashWindow(rt)
+    assert.deepEqual(frameOf(splash), [638, 422, 644, 235], 'a fixed-size window takes no save by elimination')
+    const again = handOver(rt, splash, () => appWindow(rt))
+    assert.deepEqual(frameOf(again), [100, 80, 1500, 900])
+    assert.deepEqual(savedApp(rt, LO).d['desk-uuid-1'].w.map((s) => [s.c, s.w]), [['Untitled 1 — LibreOffice Writer', 1500]])
+})
+
+test('a splash screen shared with LibreOffice\'s components (a rule names them) hands over by window class', () => {
+    const rt = buildRuntime()
+    handOver(rt, splashWindow(rt), () => appWindow(rt, { df: LO + '.writer' }))
+    assert.equal(savedApp(rt, LO), undefined)
+})
+
+test('a startup prompt hands over to a window of its own process, not to the app opened again', () => {
+    const prompt = (rt, pid) => {
+        const w = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 520, height: 400 })
+        w.pid = pid
+        rt.trackWindow(w)
+        return w
+    }
+    const main = (rt, pid) => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 200, y: 100, width: 1400, height: 900 })
+        w.pid = pid
+        rt.trackWindow(w)
+        return w
+    }
+    let rt = buildRuntime()
+    handOver(rt, prompt(rt, 42), () => main(rt, 42))
+    assert.equal(savedApp(rt, 'mail'), undefined, 'the same process: a hand-off')
+
+    rt = buildRuntime()
+    handOver(rt, prompt(rt, 42), () => main(rt, 43))
+    assert.equal(savedApp(rt, 'mail').d['desk-uuid-1'].w[0].c, 'Choose User Profile', 'another process: the app opened again, kept')
+
+    rt = buildRuntime()
+    handOver(rt, prompt(rt, 0), () => main(rt, 0))
+    assert.ok(savedApp(rt, 'mail'), 'a resizable window of an unknown process: kept')
+})
+
+test('a hand-off needs an untouched lone window, closed just before', () => {
+    // Moved by the user.
+    let rt = buildRuntime()
+    let splash = splashWindow(rt)
+    splash.emitMoveResizeStarted()
+    splash._setFrame({ x: 10, y: 10, width: 644, height: 235 })
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO), 'moved: kept')
+
+    // Too late.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    advanceClock(rt, 120)
+    splash.emitClosed()
+    advanceClock(rt, Engine.HANDOFF_MS + 1)
+    appWindow(rt)
+    assert.ok(savedApp(rt, LO), 'too late: kept')
+
+    // Closed with another window: the app quitting, not a hand-off.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    const other = appWindow(rt, { caption: 'Other' })
+    advanceClock(rt, 120)
+    other.emitClosed()
+    handOver(rt, splash, () => appWindow(rt))
+    assert.equal(savedApp(rt, LO).d['desk-uuid-1'].w.length, 2, 'closed together: kept')
+
+    // On another desktop.
+    rt = buildRuntime()
+    handOver(rt, splashWindow(rt), () => appWindow(rt, { desktop: 2 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'another desktop: kept')
+
+    // Maximized by the user (no move or resize).
+    rt = buildRuntime()
+    const prompt = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 520, height: 400 })
+    prompt.pid = 42
+    rt.trackWindow(prompt)
+    prompt.setMaximize(true, true)
+    handOver(rt, prompt, () => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 200, y: 100, width: 1400, height: 900 })
+        w.pid = 42
+        rt.trackWindow(w)
+        return w
+    })
+    assert.equal(savedApp(rt, 'mail').d['desk-uuid-1'].w[0].max, 3, 'maximized: kept')
+
+    // Moved without a drag (a shortcut, another script): not where it opened.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    splash._setFrame({ x: 10, y: 10, width: 644, height: 235 })
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO), 'moved by a shortcut: kept')
+
+    // A window opened before the close (moved here from another desktop): not handed over to.
+    rt = buildRuntime()
+    const earlier = appWindow(rt, { desktop: 2 })
+    advanceClock(rt, 1000)
+    splash = splashWindow(rt)
+    advanceClock(rt, 120)
+    splash.emitClosed()
+    earlier._moveToDesktop(1)
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'an earlier window: kept')
+
+    // Restored, then sent to another desktop and closed there.
+    rt = buildRuntime(savedLayouts({ [LO]: [{ c: 'Untitled 1 — LibreOffice Writer', x: 100, y: 80, w: 1500, h: 900, o: null }] }))
+    const sent = appWindow(rt)
+    assert.deepEqual(frameOf(sent), [100, 80, 1500, 900], 'precondition: restored')
+    sent._moveToDesktop(2)
+    handOver(rt, sent, () => appWindow(rt, { desktop: 2 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-2'], 'sent to another desktop: kept')
+
+    // The app has a window open on another desktop: it is running, not starting.
+    rt = buildRuntime()
+    appWindow(rt, { caption: 'Elsewhere', desktop: 2 })
+    handOver(rt, splashWindow(rt), () => appWindow(rt))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'running on another desktop: kept')
+
+    // Closed after another window on its monitor, outside the burst: not the app's only window.
+    rt = buildRuntime()
+    const main = appWindow(rt, { caption: 'Main' })
+    splash = splashWindow(rt)
+    main.emitClosed()
+    advanceClock(rt, 2000)
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'after another window: kept')
+
+    // The app still has a window on another monitor: it is running, not starting.
+    rt = buildRuntime()
+    appWindow(rt, { caption: 'Left', x: 100, y: 100, outputIndex: 0 })
+    handOver(rt, splashWindow(rt, { x: 2600, y: 400, outputIndex: 1 }), () => appWindow(rt, { x: 2200, y: 100, outputIndex: 1 }))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'].w.some((s) => s.c === 'LibreOffice 26.8'), 'app running: kept')
+})
+
+test('a startup prompt restored to the app\'s save hands over, and the app\'s layout comes back', () => {
+    const W = { c: 'Inbox - Mail', x: 200, y: 100, w: 1400, h: 900, o: null }
+    const rt = buildRuntime(savedLayouts({ mail: [W] }))
+    const prompt = makeWindow({ cls: 'mail', caption: 'Choose User Profile', x: 700, y: 300, width: 800, height: 600 })
+    prompt.pid = 42
+    rt.trackWindow(prompt)
+    assert.deepEqual(frameOf(prompt), [200, 100, 1400, 900], 'the only save, restored to the prompt (not dialog-sized)')
+    const main = handOver(rt, prompt, () => {
+        const w = makeWindow({ cls: 'mail', caption: 'Inbox - Mail', x: 0, y: 0, width: 1000, height: 700 })
+        w.pid = 42
+        rt.trackWindow(w)
+        return w
+    })
+    assert.deepEqual(savedApp(rt, 'mail').d['desk-uuid-1'].w.map((s) => s.c), ['Inbox - Mail'], 'the layout from before')
+    assert.deepEqual(frameOf(main), [200, 100, 1400, 900])
+})
+
+test('a fixed-size window near its save\'s size takes it as the one save left: its frame grew, not another window', () => {
+    const rt = buildRuntime(savedLayouts({ calc: [{ c: 'Calculator', x: 300, y: 200, w: 400, h: 500, o: null }] }))
+    const w = makeWindow({ cls: 'calc', caption: '12 + 30 = 42', x: 0, y: 0, width: 410, height: 530 })
+    w.resizeable = false
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [300, 200])
+})
+
+// One window of an app reopened after its windows closed a minute apart on two monitors: it goes
+// where the last one closed (#14), as long as close times count real time.
+const reopenAfterTwoCloses = (rt) => {
+    const right = onMonitor(rt, 'files', 1, { x: 2100, y: 150, width: 960, height: 635 }, 'Home 2')
+    const left = onMonitor(rt, 'files', 0, { x: 100, y: 100, width: 960, height: 635 }, 'Home 1')
+    advanceClock(rt, 60000)
+    right.emitClosed()
+    advanceClock(rt, 60000)
+    left.emitClosed()
+    advanceClock(rt, 60000)
+    const again = onMonitor(rt, 'files', 0, { x: 0, y: 0, width: 960, height: 635 }, 'Home 3')
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    return [again.x, again.y]
+}
+
+test('a clock set back during the session starts a new burst: the window closed last still wins', () => {
+    assert.deepEqual(reopenAfterTwoCloses(buildRuntime()), [100, 100], 'control')
+    const rt = buildRuntime()
+    const start = rt.nowRef()
+    rt.setNow(start + 2 * 3600 * 1000) // ahead at login
+    onMonitor(rt, 'other', 0, { x: 0, y: 0, width: 500, height: 500 }, 'X').emitClosed()
+    rt.setNow(start + 60000) // NTP sets it back
+    assert.deepEqual(reopenAfterTwoCloses(rt), [100, 100])
+})
+
+test('a window dragged out of its tile and back in is not untouched: no hand-off undoes its save', () => {
+    const rt = buildRuntime()
+    const layout = makeCustomRoot(outputs[0])
+    fakeWorkspace._customRoots.set(outputs[0], layout)
+    saveTiled(rt, 'doc', layout.tiles[1].tiles[0])
+    advanceClock(rt, 60000)
+    const w = reopen(rt, 'doc')
+    w.pid = 7
+    rt.tick()
+    w._dragOut(600, 400)
+    w._setFrame({ x: 600, y: 400, width: 1200, height: 800 })
+    w._tileTo(layout.tiles[1].tiles[0])
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    advanceClock(rt, 500)
+    const next = makeWindow({ cls: 'doc', caption: 'Other', x: 40, y: 40, width: 960, height: 1080 })
+    next.pid = 7
+    rt.trackWindow(next)
+    const f = savedApp(rt, 'doc').d['desk-uuid-1'].w[0].f
+    assert.deepEqual([f.x, f.y, f.w, f.h], [600, 400, 1200, 800])
 })
