@@ -2,6 +2,23 @@
 
 Notable changes to Window Geometry Restore. Each release's GitHub notes are published from its section here.
 
+## [1.4.6] - 2026-11-18
+
+**Fixes**
+- **Splash and welcome screens without a title bar no longer take the main window's place** (QGIS, Kdenlive). They opened first and got the main window's saved size and place, or came back maximized; the main window, opening while they were still open, counted as a second window of a running app and opened in the middle of the screen. Saves now record whether KWin drew a title bar on the window, and a window is never given the layout of a window framed otherwise: a splash or welcome screen without a title bar stays as it opens and isn't saved, and the main window is restored. Saves made before this version don't record it: against those, a smaller window without a title bar that has nothing else in common with the save isn't given it either, so the first launch is right too (an app drawing its own title bars may miss one restore, then its save records it). A window set aside this way that closes as the app's only window is the app's window, and is saved, so an app that switched to drawing its own title bar isn't left unrestored. A title bar KWin removes itself (borderless maximized windows, a no-titlebar rule), or one seen while a window fills the screen (KWin changes the frame before it confirms fullscreen or maximized), doesn't count.
+- **Windows closed maximized fill the screen again when their app also maximizes them** (Kdenlive). An app that asks to be maximized as it shows came back maximized at its normal size, not filling the screen: KWin hadn't confirmed the app's request yet when the script restored the window, so the script's own maximize changed nothing and its normal size stayed. Restoring a window that isn't saved maximized now also overrides such a request, instead of leaving it maximized at its saved size.
+- **More precise restores** (found by a precision review, each with a test):
+  - A window's own title beats a save that only has its size. Apps open a new window at the size of the last one closed, so reopening one document took the place of another document's window.
+  - A window stays on its own monitor when that monitor got smaller since (another resolution or scale, another monitor on the same connector), instead of landing on the next one; a maximized window moved to a smaller monitor reopens maximized there. A title bar no longer lands under a panel moved to the top since.
+  - A window maximized only vertically or horizontally keeps your moves and resizes along the other direction.
+  - Windows with a maximum size come back at their saved size (KWin's limits are the client's, without the title bar).
+
+**Under the hood**
+- Faster restores of many alike windows: the close ranks are computed once per restore, not for every match (a deadline with 32 alike windows: 125 ms of compositor time down to 16 ms, measured in Qt's JS engine).
+- README: windows Plasma's session restore placed were said to be left alone; the script can't tell them apart, and the line is corrected.
+- Saved data: a save may carry `fr`, whether KWin drew a title bar on the window (optional; older versions ignore it).
+- Found and verified with real Kdenlive 26.08.3 in the headless KWin test bed, and with a read-only probe of QGIS 3.28.9 (Flatpak) on Plasma 6.8.2. New real-KWin scenarios (each fails with 1.4.5): a welcome screen beside the main window, a splash before it (with new and with older saves), an app maximizing itself as it shows; and a window going fullscreen and back, which an earlier build of this change set aside (found by a debugging pass). The test window can open without a title bar (`frameless`) and ask to be maximized just after showing (`maximize-late`).
+
 ## [1.4.5] - 2026-11-18
 
 **Fixes**

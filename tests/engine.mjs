@@ -132,6 +132,27 @@ test('isDialog: at its minimum width and under half of every save it could take'
     assert.equal(engine.isDialog(win(426, 183, 425), saves, [true, true]), false, 'none free')
 })
 
+test('framedUnlike / isFramedUnlike: a title bar on one and not the other, both known', () => {
+    const framed = save({ framed: true })
+    assert.equal(engine.framedUnlike(framed, false), true, 'no title bar against one')
+    assert.equal(engine.framedUnlike(framed, true), false)
+    assert.equal(engine.framedUnlike(save({ framed: false }), false), false, 'both drawn by the app')
+    assert.equal(engine.framedUnlike(save(), false), false, 'an older save: unknown')
+    assert.equal(engine.framedUnlike(framed, null), false, 'the window maximized: unknown')
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: true })], []), true)
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: false })], []), false, 'against every save')
+    assert.equal(engine.isFramedUnlike(false, [framed, save({ framed: false })], [false, true]), true, 'only free saves count')
+    assert.equal(engine.isFramedUnlike(false, [framed], [true]), false, 'none free')
+})
+
+test('bestMatch: a save framed unlike the window is never its own, not even as the only save left', () => {
+    const main = save({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: true })
+    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: false }), []), null)
+    assert.equal(engine.bestMatch([main], live({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: false }), []), null, 'whatever its title and size')
+    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: true }), []).tier, 5, 'framed alike: the only save left')
+    assert.equal(engine.bestMatch([save({ framed: true }), save({ caption: 'Splash', framed: false })], live({ caption: 'Window', framed: false }), []).index, 1)
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)
@@ -150,11 +171,12 @@ test('parseList/isListed: exact, wildcard, no false positives', () => {
     assert.equal(engine.isListed('aXbXc', special), false)
 })
 
-test('bestMatch: tier 1 caption+size, tier 2 size, tier 3 caption, no match', () => {
+test('bestMatch: tier 1 caption+size, tier 2 caption, tier 3 size, tier 4 caption alike, no match', () => {
     const saves = [save(), save({ caption: 'Second window', width: 800, height: 600 })]
     assert.equal(engine.bestMatch(saves, live(), []).tier, 1)
-    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' }), []).tier, 2)
-    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 }), []).tier, 3)
+    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 }), []).tier, 2)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' }), []).tier, 3)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Windows', width: 1280, height: 720 }), []).tier, 4)
     assert.equal(engine.bestMatch(saves, live({ caption: 'Unrelated', width: 1280, height: 720 }), []), null,
         'no match with several unmatched saves and neither caption nor size fitting')
 })
@@ -165,17 +187,25 @@ test('bestMatch: skips taken saves without mutating them', () => {
     const m = engine.bestMatch(saves, live(), [true])
     assert.equal(JSON.stringify(saves), before)
     assert.equal(m.index, 1)
-    assert.equal(m.tier, 2)
+    assert.equal(m.tier, 3)
 })
 
-test('bestMatch: prefers higher tier, then dims, then score', () => {
+test('bestMatch: prefers higher tier, then dims, then score; the window\'s own title over a size it may reuse', () => {
     const saves = [
         save({ caption: 'Unrelated', width: 800, height: 600 }),
         save({ caption: 'Window', width: 799, height: 599 })
     ]
     const m = engine.bestMatch(saves, live(), [])
-    assert.equal(m.index, 0)
+    assert.equal(m.index, 1, 'its title, 1 px off')
     assert.equal(m.tier, 2)
+    const loose = [save({ caption: 'Unrelated', width: 800, height: 600 }), save({ caption: 'Window 2b', width: 799, height: 599 })]
+    assert.equal(engine.bestMatch(loose, live(), []).index, 0, 'a title only alike: the size wins')
+})
+
+test('bestMatch: titles differing only in digits are alike, and the close rank picks between them', () => {
+    // Apps number new windows: "Untitled 1" reopened alone goes where one closed last (#14).
+    const saves = [save({ caption: 'Untitled 1 — Writer', closedAt: 10000 }), save({ caption: 'Untitled 2 — Writer', closedAt: 20000 })]
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Untitled 1 — Writer' }), []).index, 1)
 })
 
 test('closeRanks: the newest burst first, the first closed first within a burst, as a strict order', () => {
@@ -220,7 +250,7 @@ test('bestMatch: equal matches go to a save closed clearly later, else to the on
         'only between equal matches: a better caption wins, closed earlier or not')
 })
 
-test('isBetterMatch: tier, then dims, then score', () => {
+test('isBetterMatch: tier, then dims, then score, then the close rank', () => {
     assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, rank: 1 }, { tier: 2, dims: 2, score: 100, rank: 0 }), true)
     assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 0, score: 99, rank: 0 }), true)
     assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80, rank: 1 }), true)
@@ -229,10 +259,10 @@ test('isBetterMatch: tier, then dims, then score', () => {
     assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 1 }, { tier: 1, dims: 2, score: 100, rank: 0 }), false)
 })
 
-test('single-save fallback: the lone save always applies to the next window (tier 4)', () => {
+test('single-save fallback: the lone save always applies to the next window (tier 5)', () => {
     const saves = [save({ caption: 'Unrelated', width: 640, height: 480 })]
     const m = engine.bestMatch(saves, live({ caption: 'WhatsApp', width: 1200, height: 900 }), [])
-    assert.equal(m.tier, 4)
+    assert.equal(m.tier, 5)
     assert.equal(m.index, 0)
     assert.equal(engine.bestMatch(saves, live(), [true]), null, 'no fallback once the single save is taken')
     const two = [save({ caption: 'A', width: 1, height: 1 }), save({ caption: 'B', width: 2, height: 2 })]
@@ -269,7 +299,7 @@ test('encode/decode round-trip preserves geometry fields, drops runtime flags', 
     assert.equal(a.width, 800)
     assert.deepEqual(a.output, { x: 30, y: 40, serial: 'SER9', name: 'HDMI-1' })
     assert.equal(b.output, null)
-    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
+    assert.deepEqual(Object.keys(a).sort(), ['caption', 'closedAt', 'framed', 'free', 'height', 'maximized', 'output', 'tile', 'width', 'x', 'y'])
     assert.equal(a.tile, null)
     assert.equal(a.free, null)
     const blob = JSON.parse(engine.encodeState(state))

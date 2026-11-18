@@ -21,9 +21,11 @@
 //           f: { x, y, w, h, o }  pre-tile (floating) geometry, same shape as the save's own,
 //           max: KWin's maximize mode (1 vertical, 2 horizontal, 3 both; only when maximized
 //                at close; x/y/w/h are then the normal geometry to return to),
-//           ct: close time (ms, increasing in close order; closeRanks) }
+//           ct: close time (ms, increasing in close order; closeRanks),
+//           fr: 1 if KWin drew a title bar on it, 0 if not (unknown when missing; framedUnlike) }
 // Runtime saves (makeSave) use long names, never mutated: caption, x, y, width, height,
-// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt.
+// output { x, y, serial, name }, tile { kind, index | path, rel }, free, maximized (0-3), closedAt,
+// framed (true, false or null).
 // v1 blobs (which also stored desktop/activities/state flags) decode fine; those fields are
 // ignored.
 
@@ -195,7 +197,8 @@ function captionScore(a, b) {
 // Ranking shared by single-window matching and the deadline sweep:
 // lower tier first, then more matching dimensions, then higher caption score, then the save's
 // close rank (closeRanks): equal matches are alike windows, which only their saves' close times
-// tell apart.
+// tell apart. Titles differing only in digits are alike: apps number new windows ("Untitled 1"),
+// and a window reopened alone goes where one closed last (#14), not by its number.
 /**
  * @param {Match} a
  * @param {Match} b
@@ -241,11 +244,13 @@ function closeRanks(saves) {
 
 // Deterministic slot matching: pick the best save not yet taken for one live window.
 // Tier 1: caption 100% (numbers stripped) and same size
-// Tier 2: same size
-// Tier 3: caption >= CAPTION_FALLBACK
-// Tier 4: the only save left, whatever it is - the "app never remembers anything" case
+// Tier 2: caption 100%: the window's own title; its size may be one the app reuses (KDE apps open
+//         a window at the size of the last one closed)
+// Tier 3: same size
+// Tier 4: caption >= CAPTION_FALLBACK
+// Tier 5: the only save left, whatever it is - the "app never remembers anything" case
 // Equal matches (alike windows: the same title once digits are dropped, the same size) go by
-// closeRanks.
+// closeRanks. A save framed unlike the window (framedUnlike) is never its own.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
 // callers that match the same window again.
 /**
@@ -253,21 +258,22 @@ function closeRanks(saves) {
  * @param {LiveWindow} live
  * @param {boolean[]} taken
  * @param {number[]} [scores]
+ * @param {number[]} [ranks] closeRanks(saves), kept by a caller that matches against the same saves again
  * @returns {Match | null}
  */
-function bestMatch(saves, live, taken, scores) {
+function bestMatch(saves, live, taken, scores, ranks) {
     /** @param {number} i */
     var score = function (i) {
         if (!scores) return captionScore(saves[i].caption, live.caption)
         if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
         return scores[i]
     }
-    var ranks = closeRanks(saves)
+    ranks = ranks || closeRanks(saves)
     var best = null
     var free = -1
     var freeCount = 0
     for (var i = 0; i < saves.length; i++) {
-        if (taken[i]) continue
+        if (taken[i] || framedUnlike(saves[i], live.framed)) continue
         free = i
         freeCount++
         var s = saves[i]
@@ -275,14 +281,15 @@ function bestMatch(saves, live, taken, scores) {
         var caption = score(i)
         var tier
         if (caption === 100 && dims === 2) tier = 1
-        else if (dims === 2) tier = 2
-        else if (caption >= CAPTION_FALLBACK) tier = 3
+        else if (caption === 100) tier = 2
+        else if (dims === 2) tier = 3
+        else if (caption >= CAPTION_FALLBACK) tier = 4
         else continue
         var candidate = { index: i, tier: tier, dims: dims, score: caption, rank: ranks[i] }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: score(free), rank: ranks[free] }
+        return { index: free, tier: 5, dims: 0, score: score(free), rank: ranks[free] }
     }
     return best
 }
@@ -321,6 +328,47 @@ function isDialog(win, saves, taken) {
     return free > 0
 }
 
+// Whether a window and a save were framed differently: KWin draws a title bar on one and not on
+// the other (each known only when recorded, see Save.framed). Never the same window: a splash or
+// welcome screen without a title bar (QGIS's, Kdenlive's) isn't the app's framed window, whatever
+// its title or size. An app that draws its own title bar has KWin draw none on any of its windows.
+/**
+ * @param {Save} save
+ * @param {boolean | null | undefined} framed
+ * @returns {boolean}
+ */
+function framedUnlike(save, framed) {
+    return typeof framed === 'boolean' && typeof save.framed === 'boolean' && save.framed !== framed
+}
+
+// A save that doesn't record its title bar, larger both ways than a window (main.qml matchFor).
+/**
+ * @param {{ width: number, height: number }} size
+ * @param {Save} save
+ * @returns {boolean}
+ */
+function smallerUnframed(size, save) {
+    return save.framed === null && size.width < save.width && size.height < save.height
+}
+
+// A window framed unlike every save it could take (framedUnlike): not one of the app's windows
+// these saves came from, but one shown before or beside them (a splash or welcome screen).
+/**
+ * @param {boolean | null} framed
+ * @param {Save[]} saves
+ * @param {boolean[]} taken
+ * @returns {boolean}
+ */
+function isFramedUnlike(framed, saves, taken) {
+    var free = 0
+    for (var i = 0; i < saves.length; i++) {
+        if (taken[i]) continue
+        if (!framedUnlike(saves[i], framed)) return false
+        free++
+    }
+    return free > 0
+}
+
 /**
  * @param {SaveFields} fields
  * @returns {Save}
@@ -336,7 +384,8 @@ function makeSave(fields) {
         tile: fields.tile || null,
         free: fields.free || null,
         maximized: fields.maximized || 0,
-        closedAt: fields.closedAt || 0
+        closedAt: fields.closedAt || 0,
+        framed: typeof fields.framed === 'boolean' ? fields.framed : null
     }
 }
 
@@ -467,6 +516,7 @@ function encodeSave(s) {
     if (s.free) out.f = { x: s.free.x, y: s.free.y, w: s.free.width, h: s.free.height, o: encodeOutput(s.free.output) }
     if (s.maximized) out.max = s.maximized
     if (s.closedAt) out.ct = s.closedAt
+    if (s.framed !== null) out.fr = s.framed ? 1 : 0
     return out
 }
 
@@ -487,6 +537,7 @@ function decodeSave(s) {
     // A time a Date can hold, so later closes still count up from it (main.qml followSavedCloses).
     var ct = numberOr(s.ct, 0)
     fields.closedAt = ct > 0 && ct <= MAX_TIME ? Math.floor(ct) : 0
+    fields.framed = s.fr === 1 ? true : s.fr === 0 ? false : null
     return makeSave(fields)
 }
 

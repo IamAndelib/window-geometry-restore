@@ -838,6 +838,109 @@ def s_dialog_before_maximized_main_window():
         check(sb.window("Inbox")["maximized"] == 3, "the main window maximized again: %s" % sb.window("Inbox"))
 
 
+def place_main(sb, app, main):
+    """Open the app's framed main window, drag it to 300,150 and close it; returns its size."""
+    a = sb.open_app(app, main, size=(1200, 700))
+    w = sb.window(main)
+    size = rect(w)[2:]
+    x, y = titlebar(w)
+    sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+    sb.wait(lambda: rect(sb.window(main))[:2] == (300, 150), 3, "the drag")
+    a.close()
+    return size
+
+
+def s_welcome_screen_beside_main_window():
+    """Kdenlive 26.08: a welcome screen without a title bar opens first, and the framed main
+    window opens beside it. The welcome screen stays as it opens and isn't saved; the main
+    window, the app's first, is restored (with 1.4.5 it was left where KWin put it, the welcome
+    screen at its place)."""
+    app, main = "org.example.studio", "Untitled - Studio"
+    with sandbox(outputs=1) as sb:
+        size = place_main(sb, app, main)
+        welcome = sb.open_app(app, "Studio", size=(612, 648), frameless=True)
+        check(rect(sb.window("Studio"))[2:] == (612, 648), "the welcome screen keeps its size: %s" % (rect(sb.window("Studio")),))
+        check(logged(sb.script_log(), '"Studio" has no title bar, unlike the app\'s saved windows'), "logged")
+        m = sb.open_app(app, main, size=(1200, 700))
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
+        welcome.close()
+        m.close()
+        saved = [s["c"] for s in sb.saved()["apps"][app]["w"]]
+        check(saved == [main], "only the main window saved: %s" % saved)
+
+
+def s_splash_without_title_bar_before_main_window():
+    """QGIS 3.28: a splash without a title bar (resizable, at no minimum size) shows while the
+    app loads; the framed main window opens and the splash closes right after. The splash keeps
+    its size (with 1.4.5 it took the main window's), and the main window is restored."""
+    app, main = "org.example.maps", "Untitled Project - Maps"
+    with sandbox(outputs=1) as sb:
+        size = place_main(sb, app, main)
+        splash = sb.open_app(app, "Maps3", size=(640, 306), frameless=True, settle=1.5)
+        check(rect(sb.window("Maps3"))[2:] == (640, 306), "the splash keeps its size: %s" % (rect(sb.window("Maps3")),))
+        sb.open_app(app, main, size=(1200, 700), settle=0.2)
+        splash.close()
+        sb.settle(0.8)
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
+
+
+def s_splash_without_title_bar_older_save():
+    """The same splash on the first launch with a save from an older version, which doesn't
+    record its title bar: smaller, without one, and matching it on neither title nor size, the
+    splash isn't given it. The main window, opening within the restore, is."""
+    app, main = "org.example.maps", "Untitled Project - Maps"
+    with sandbox(outputs=1) as sb:
+        size = place_main(sb, app, main)
+        blob = sb.saved()
+        for saves in [blob["apps"][app]["w"]] + [d["w"] for d in blob["apps"][app]["d"].values()]:
+            for save in saves:
+                save.pop("fr", None)
+        sb.restart_kwin(store=json.dumps(blob))
+        splash = sb.open_app(app, "Maps3", size=(640, 306), frameless=True, settle=1.5)
+        check(rect(sb.window("Maps3"))[2:] == (640, 306), "the splash keeps its size: %s" % (rect(sb.window("Maps3")),))
+        sb.open_app(app, main, size=(1200, 700), settle=0.2)
+        splash.close()
+        sb.settle(0.8)
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
+
+
+def s_fullscreen_round_trip_keeps_title_bar():
+    """A window that went fullscreen and back: KWin drops its title bar and changes its frame
+    before it confirms fullscreen, so the title bar must not be read from that frame. Saved as
+    framed, it is restored next time, not set aside as unlike its own save."""
+    app, title = "org.example.viewer", "Viewer"
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app(app, title, size=(1000, 650))
+        w = sb.window(title)
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window(title))[:2] == (300, 150), 3, "the drag")
+        size = rect(sb.window(title))[2:]
+        for full in ("true", "false"):
+            sb.probe("win(%r).fullScreen = %s; return 1" % (title, full))
+            sb.settle(0.8)
+        check(rect(sb.window(title)) == (300, 150) + size, "precondition: back from fullscreen: %s" % (rect(sb.window(title)),))
+        a.close()
+        sb.open_app(app, title, size=(1000, 650))
+        check(rect(sb.window(title)) == (300, 150) + size, "restored: %s; log: %s" % (rect(sb.window(title)), [l for l in sb.script_log() if "title bar" in l]))
+
+
+def s_maximized_by_app_as_it_shows():
+    """An app that asks to be maximized as it shows, before KWin confirms it (Kdenlive): the
+    window shows as not maximized, and maximizing it again changed nothing, so the normal
+    geometry the restore wrote stayed: maximized at its normal size. It fills the screen."""
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app("org.example.late", "Late", size=(1000, 650))
+        sb.probe("win('Late').setMaximize(true, true); return 1")
+        sb.settle(0.5)
+        full = rect(sb.window("Late"))
+        check(sb.window("Late")["maximized"] == 3, "precondition: maximized")
+        a.close()
+        sb.open_app("org.example.late", "Late", size=(1000, 650), maximize_late=True, settle=1.2)
+        w = sb.window("Late")
+        check(w["maximized"] == 3 and rect(w) == full, "maximized, filling the screen: %s" % (w,))
+
+
 def s_dialog_before_tiled_main_window():
     """The main window saved in the left quick tile; the prompt opens first and gets focus:
     not tiled. The main window, opened while the prompt is still up, gets its tile."""
@@ -1021,7 +1124,9 @@ def s_single_window_reopens_where_closed_last():
     """Two alike windows (same title once digits are ignored, same size), one on each monitor,
     closed one after the other. One window opened again, three times: it comes back on the
     monitor where it was closed last each time, instead of alternating (PR #14). The other
-    monitor keeps its save, for a second window."""
+    monitor keeps its save, for a second window. It opens as "Home 3": alike to both, the title
+    of neither (an exact title would pick that window's own save; the sandbox finds windows by
+    title, so the two need different ones)."""
     with sandbox(outputs=2) as sb:
         a = sb.open_app("org.example.files", "Home 1")
         move_to(sb, "Home 1", 200, 150)
@@ -1033,8 +1138,8 @@ def s_single_window_reopens_where_closed_last():
         b.close()
         for i in range(3):
             sb.pointer.move(400, 400)  # KWin opens it on monitor 1
-            c = sb.open_app("org.example.files", "Home 1")
-            w = sb.window("Home 1")
+            c = sb.open_app("org.example.files", "Home 3")
+            w = sb.window("Home 3")
             check(w["output"] == "Virtual-1" and rect(w)[:2] == (2300, 250),
                   "opening %d: back on monitor 2, where it was closed: %s on %s" % (i + 1, rect(w), w["output"]))
             c.close()
@@ -1255,6 +1360,11 @@ SCENARIOS = [
     s_slow_rename_confirmed,
     s_dialog_before_maximized_main_window,
     s_dialog_before_tiled_main_window,
+    s_welcome_screen_beside_main_window,
+    s_splash_without_title_bar_before_main_window,
+    s_splash_without_title_bar_older_save,
+    s_maximized_by_app_as_it_shows,
+    s_fullscreen_round_trip_keeps_title_bar,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,
