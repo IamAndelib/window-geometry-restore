@@ -213,7 +213,7 @@ logging out:
 ```bash
 # once: disable the installed copy, so the two don't both act on windows
 kwriteconfig6 --file kwinrc --group Plugins --key windowgeometryrestoreEnabled false
-qdbus6 org.kde.KWin /KWin reconfigure
+dbus-send --session --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure
 
 make reload    # (re)load the working tree as the script "windowgeometryrestore-test"
 make logs      # follow its log (and QML errors from its files)
