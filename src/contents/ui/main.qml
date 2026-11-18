@@ -764,7 +764,21 @@ Item {
                 // being dragged out (its size shrinks only once the app has followed).
                 // Nor while a quick tile waits: the window waits at the tile's rect, and its pre-tile
                 // geometry is the one written just before tiling (see quickTileWhenActive).
-                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w) && !entry.pendingTile) entry.free = frame
+                if (!w.fullScreen && w.width >= 1 && w.height >= 1 && !isMaximized(w) && !isMaximizedLike(w) && !entry.pendingTile) {
+                    entry.free = frame
+                } else if (!w.fullScreen && (w.maximizeMode === 1 || w.maximizeMode === 2) && entry.free) {
+                    // Maximized one way only: moves and resizes along the other one stay the
+                    // user's, as KWin keeps them for its own restore geometry.
+                    var free = copyGeometry(entry.free)
+                    if (w.maximizeMode === 1) {
+                        free.x = frame.x
+                        free.width = frame.width
+                    } else {
+                        free.y = frame.y
+                        free.height = frame.height
+                    }
+                    entry.free = geometryOf(w.output, free.x, free.y, free.width, free.height)
+                }
             }
         } catch (e) {
             logOnce('geometry', 'reading window geometry failed: ' + e)
@@ -1140,7 +1154,7 @@ Item {
         }
         if (!legacy) saved.lastAccess = store.apps[group.cls].lastAccess = Date.now()
         group.session = {
-            saves: saves, monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0,
+            saves: saves, ranks: Engine.closeRanks(saves), monitor: monitor, taken: [], remaining: saves.length, pending: [], deadline: 0,
             captionOnly: legacy && Engine.isSubApp(group.cls, group.legacyCls)
         }
         dbg(group.label + ': restore session started - ' + saves.length + ' saved window(s)' +
@@ -1288,12 +1302,12 @@ Item {
             entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }), framedUnlike: true }
             return null
         }
-        var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height, framed: entry.framed }, taken, scores)
+        var match = Engine.bestMatch(session.saves, { caption: caption, width: size.width, height: size.height, framed: entry.framed }, taken, scores, session.ranks)
         // A window that can't be resized (other than by asking for fullscreen) always opens at its
         // size, which its own saves have. Matched by neither title nor size, only as the save
         // left, and far from its size, it is another window: a splash screen (LibreOffice's) took
         // the app window's place, off centre.
-        if (match && match.tier === 4 && !w.resizeable && !w.fullScreen && !Engine.nearSize(size, session.saves[match.index])) {
+        if (match && match.tier === 5 && !w.resizeable && !w.fullScreen && !Engine.nearSize(size, session.saves[match.index])) {
             dbg(entry.label + ': "' + caption + '" can\'t be resized and matches no save by title or size: left as it is')
             return null
         }
@@ -1302,7 +1316,7 @@ Item {
         // smaller both ways, taking it on neither title nor size, is likely one (QGIS's, the first
         // launch with older saves): left as it is. Still counted and saved, so the window of an
         // app drawing its own title bar misses one restore, and its save then records it.
-        if (match && match.tier === 4 && entry.framed === false && Engine.smallerUnframed(size, session.saves[match.index])) {
+        if (match && match.tier === 5 && entry.framed === false && Engine.smallerUnframed(size, session.saves[match.index])) {
             dbg(entry.label + ': "' + caption + '" has no title bar and is smaller than the save, which records none: left as it is')
             return null
         }
@@ -1443,10 +1457,31 @@ Item {
             }
         }
         var bounds = (provisional && output && workArea(output)) || virtual
-        var width = w.resizeable ? fitLength(save.width, w.minSize && w.minSize.width, w.maxSize && w.maxSize.width, bounds.width) : w.width
-        var height = w.resizeable ? fitLength(save.height, w.minSize && w.minSize.height, w.maxSize && w.maxSize.height, bounds.height) : w.height
+        // KWin's minSize and maxSize are the client's: the frame adds the title bar and borders.
+        var padW = w.clientGeometry ? Math.max(0, w.width - w.clientGeometry.width) : 0
+        var padH = w.clientGeometry ? Math.max(0, w.height - w.clientGeometry.height) : 0
+        var width = w.resizeable ? fitLength(save.width, w.minSize && w.minSize.width + padW, w.maxSize && w.maxSize.width + padW, bounds.width) : w.width
+        var height = w.resizeable ? fitLength(save.height, w.minSize && w.minSize.height + padH, w.maxSize && w.maxSize.height + padH, bounds.height) : w.height
         x = Math.max(virtual.x, Math.min(x, virtual.x + virtual.width - width))
         y = Math.max(virtual.y, Math.min(y, virtual.y + virtual.height - height))
+        // On its own monitor: if that got smaller since (resolution, scale, another monitor on the
+        // connector), the window is fitted to it rather than pushed onto the next one; KWin also
+        // maximizes a window on the monitor under the centre of the geometry written. And its
+        // title bar not under a panel moved to the top since.
+        if (output && !provisional) {
+            var g = output.geometry
+            var own = workArea(output) || g
+            var cx = x + width / 2
+            var cy = y + height / 2
+            if (cx < g.x || cx >= g.x + g.width || cy < g.y || cy >= g.y + g.height) {
+                width = Math.min(width, own.width)
+                height = Math.min(height, own.height)
+                x = Math.max(own.x, Math.min(x, own.x + own.width - width))
+                y = Math.max(own.y, Math.min(y, own.y + own.height - height))
+            } else if (y < own.y) {
+                y = own.y
+            }
+        }
         // The virtual bounding box has gaps between unequal screens: keep the title bar reachable.
         var area = !isOnScreen(x + width / 2, y) && workArea(output || outputUnderCursor())
         if (area) {

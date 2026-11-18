@@ -92,11 +92,13 @@ interface EncodedState { version: number; apps: Record<string, EncodedApp> }
 
 interface Match {
     index: number
-    /** 1 caption and size, 2 size, 3 caption, 4 the only save left. */
+    /** 1 caption 100% and size, 2 caption 100%, 3 size, 4 caption alike, 5 the only save left. */
     tier: number
     /** Dimensions that match (0-2). */
     dims: number
     score: number
+    /** The save's title is the window's exactly (score 100 also takes titles differing in digits). */
+    exact: boolean
     /** The save's close rank (Engine.closeRanks): equal matches go to the lower. */
     rank: number
     /** A web app's one-time fallback: the only save with its caption. */
@@ -151,6 +153,8 @@ interface Target { rect: PixelRect; provisional: boolean; output: KOutput | null
 /** A restore of an app's layout on one desktop (and, if `monitor`, one monitor). */
 interface Session {
     saves: Save[]
+    /** Engine.closeRanks(saves), computed once: the saves don't change while the session runs. */
+    ranks: number[]
     monitor: MonitorRef | null
     /** By save index. */
     taken: boolean[]

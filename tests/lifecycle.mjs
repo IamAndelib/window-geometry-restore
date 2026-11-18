@@ -541,7 +541,7 @@ test('ambiguous caption in a multi-save set is deferred, then best-effort assign
 
     const reopened = makeWindow({ cls: 'konsole', caption: 'Window On', x: 500, y: 500, width: 640, height: 480 })
     rt.trackWindow(reopened)
-    assert.equal(reopened._geometryWrites, 0, 'tier-3 match in a multi-save set must not apply instantly')
+    assert.equal(reopened._geometryWrites, 0, 'a title-alike match in a multi-save set must not apply instantly')
 
     advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1000)
     rt.tick()
@@ -942,13 +942,13 @@ test('deadline sweep assigns the best pair overall, whatever order windows arriv
         rt.trackWindow(s3)
         closeAll(s1, s2, s3)
 
-        // Both windows want save 1: one only by caption (tier 3), the other by size (tier 2).
+        // Both windows want save 1: one only by a title alike (tier 4), the other by size (tier 3).
         const sized = makeWindow({ cls: 'app', caption: 'Untitled', x: 0, y: 0, width: 500, height: 400 })
         const loose = makeWindow({ cls: 'app', caption: 'Alpha doc', x: 0, y: 0, width: 640, height: 480 })
         for (const w of sizedFirst ? [sized, loose] : [loose, sized]) rt.trackWindow(w)
         advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
         rt.tick()
-        assert.deepEqual([sized.x, sized.y], [10, 10], 'size match (tier 2) gets slot 1')
+        assert.deepEqual([sized.x, sized.y], [10, 10], 'size match (tier 3) gets slot 1')
         assert.notDeepEqual([loose.x, loose.y], [10, 10])
     }
 })
@@ -4174,4 +4174,144 @@ test('a window closed maximized keeps the title bar seen before, though KWin hid
     w.emitClosed()
     const save = savedApp(rt, 'framedapp').d['desk-uuid-1'].w[0]
     assert.deepEqual([save.max, save.fr], [3, 1])
+})
+
+// --- Precision (review): where a restored window lands ---
+
+// Runs `fn` with another screen setup, putting the shared fake back afterwards.
+function withScreens(screens, fn) {
+    const saved = { screens: fakeWorkspace.screens, virtual: fakeWorkspace.virtualScreenGeometry }
+    const set = (list) => {
+        fakeWorkspace.screens = list
+        const x0 = Math.min(...list.map((o) => o.x)), y0 = Math.min(...list.map((o) => o.y))
+        const x1 = Math.max(...list.map((o) => o.x + o.width)), y1 = Math.max(...list.map((o) => o.y + o.height))
+        fakeWorkspace.virtualScreenGeometry = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+    }
+    try {
+        set(screens)
+        return fn(set)
+    } finally {
+        fakeWorkspace.screens = saved.screens
+        fakeWorkspace.virtualScreenGeometry = saved.virtual
+    }
+}
+const outputAt = (x, y) => fakeWorkspace.screens.find((o) => x >= o.x && x < o.x + o.width && y >= o.y && y < o.y + o.height) || null
+
+test('a window takes the save with its exact title over one alike only once digits are dropped', () => {
+    const rt = buildRuntime()
+    onMonitor(rt, 'okular', 0, { x: 100, y: 100, width: 900, height: 700 }, 'chapter1.pdf — Okular')
+    onMonitor(rt, 'okular', 1, { x: 2100, y: 100, width: 900, height: 700 }, 'chapter2.pdf — Okular')
+    rt.shutdown() // logout: both saved in one burst, chapter1 first
+    const rt2 = buildRuntime(rt.blobRef())
+    // The user opens chapter2 alone (or session restore opens it first).
+    const w = onMonitor(rt2, 'okular', 0, { x: 0, y: 0, width: 900, height: 700 }, 'chapter2.pdf — Okular')
+    assert.deepEqual([w.x, w.y], [2100, 100], 'chapter2 back on HDMI-A-1 where it was')
+})
+
+test('at the deadline, a save with the window\'s exact title beats one with only its size', () => {
+    const rt = buildRuntime()
+    const a = onMonitor(rt, 'okular', 0, { x: 100, y: 50, width: 900, height: 1000 }, 'Thesis.pdf — Okular')
+    const b = onMonitor(rt, 'okular', 1, { x: 2050, y: 0, width: 1200, height: 1000 }, 'Invoice.pdf — Okular')
+    a.emitClosed()
+    b.emitClosed()
+    const rt2 = buildRuntime(rt.blobRef())
+    // The app opens every window at the size of its last closed one (KConfig "last window size").
+    const w = onMonitor(rt2, 'okular', 0, { x: 0, y: 0, width: 1200, height: 1000 }, 'Thesis.pdf — Okular')
+    advanceClock(rt2, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt2.tick()
+    assert.deepEqual([w.x, w.y, w.width, w.height], [100, 50, 900, 1000], 'Thesis back at its own place and size')
+})
+
+test('a window maximized one way keeps the user\'s moves and resizes the other way', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 200, width: 800, height: 600 })
+    rt.trackWindow(w)
+    w.setMaximize(true, false)
+    w._setFrame({ x: 100, y: 0, width: 800, height: 1080 })
+    // KWin keeps vertical maximize through a horizontal move or resize (Window::updateInteractiveMoveResize).
+    w.emitMoveResizeStarted()
+    w._setFrame({ x: 1000, y: 0, width: 700, height: 1080 })
+    w.emitClosed()
+    const [s] = savedApp(rt, 'app').w
+    assert.deepEqual([s.x, s.w, s.max], [1000, 700, 1])
+})
+
+test('a monitor that got smaller (resolution, scale) keeps its window on it', () => {
+    const big = makeOutput('DP-1', 'SER-1', 0, 0, 2560, 1440)
+    const right = makeOutput('HDMI-A-1', 'SER-2', 2560, 0, 1920, 1080)
+    withScreens([big, right], (set) => {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 1800, y: 200, width: 700, height: 800 })
+        w._output = big
+        rt.trackWindow(w)
+        w.emitClosed()
+        // Same monitor, now at 125%: 2048 logical; KWin keeps the outputs adjacent.
+        const small = makeOutput('DP-1', 'SER-1', 0, 0, 2048, 1152)
+        const right2 = makeOutput('HDMI-A-1', 'SER-2', 2048, 0, 1920, 1080)
+        set([small, right2])
+        const rt2 = buildRuntime(rt.blobRef())
+        const w2 = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 1000, height: 800 })
+        w2._output = small
+        rt2.trackWindow(w2)
+        const center = outputAt(w2.x + w2.width / 2, w2.y + w2.height / 2)
+        assert.equal(center && center.name, 'DP-1', 'restored at ' + [w2.x, w2.y, w2.width, w2.height] + ': not on its saved monitor')
+    })
+})
+
+test('a maximized window KWin sent to a smaller monitor reopens maximized on that monitor', () => {
+    const small = makeOutput('HDMI-A-1', 'SER-2', 0, 0, 1280, 1024)
+    const big = makeOutput('DP-1', 'SER-1', 1280, 0, 2560, 1440)
+    withScreens([small, big], () => {
+        const rt = buildRuntime()
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 1280 + 1500, y: 200, width: 1000, height: 800 })
+        w._output = big
+        rt.trackWindow(w)
+        w.setMaximize(true, true)
+        // Meta+Shift+Left: KWin keeps it maximized on the other monitor.
+        w._moveToOutput(small, { x: 0, y: 0, width: 1280, height: 1024 })
+        w.emitClosed()
+        const rt2 = buildRuntime(rt.blobRef())
+        const w2 = makeWindow({ cls: 'app', caption: 'App', x: 10, y: 10, width: 1000, height: 800 })
+        w2._output = small
+        rt2.trackWindow(w2)
+        assert.equal(w2.maximizeMode, 3)
+        // KWin maximizes on moveResizeOutput: the output under the centre of the rect just written.
+        const r = w2._maxRestore
+        const on = outputAt(r.x + r.width / 2, r.y + r.height / 2)
+        assert.equal(on && on.name, 'HDMI-A-1', 'normal geometry ' + [r.x, r.y, r.width, r.height] + ' is centred on ' + (on && on.name))
+    })
+})
+
+test('a window with a maximum client size comes back at its saved frame size', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'App', x: 100, y: 50, width: 700, height: 630 })
+    a.maxSize = { width: 2000, height: 600 } // client size (KWin's maxSize); frame = client + 30 px title bar
+    rt.trackWindow(a)
+    a.emitClosed()
+    const rt2 = buildRuntime(rt.blobRef())
+    const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 300, width: 500, height: 400 })
+    w.maxSize = { width: 2000, height: 600 }
+    rt2.trackWindow(w)
+    assert.equal(w.height, 630, 'frame height written: ' + w.height)
+})
+
+test('a window saved at the top of a monitor that now has a top panel keeps its title bar reachable', () => {
+    const rt = buildRuntime()
+    const a = makeWindow({ cls: 'app', caption: 'App', x: 200, y: 0, width: 900, height: 700 })
+    rt.trackWindow(a)
+    a.emitClosed()
+    const clientArea = fakeWorkspace.clientArea
+    // The user moved the panel from the bottom to the top (44 px).
+    fakeWorkspace.clientArea = function (option, target) {
+        const r = clientArea.call(this, option, target)
+        return r.x === 0 ? { x: r.x, y: r.y + 44, width: r.width, height: r.height - 44 } : r
+    }
+    try {
+        const rt2 = buildRuntime(rt.blobRef())
+        const w = makeWindow({ cls: 'app', caption: 'App', x: 300, y: 300, width: 900, height: 700 })
+        rt2.trackWindow(w)
+        assert.ok(w.y >= 44, 'title bar under the panel at y=' + w.y)
+    } finally {
+        fakeWorkspace.clientArea = clientArea
+    }
 })

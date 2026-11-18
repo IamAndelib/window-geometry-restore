@@ -149,7 +149,7 @@ test('bestMatch: a save framed unlike the window is never its own, not even as t
     const main = save({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: true })
     assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: false }), []), null)
     assert.equal(engine.bestMatch([main], live({ caption: 'Untitled Project — QGIS', width: 911, height: 741, framed: false }), []), null, 'whatever its title and size')
-    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: true }), []).tier, 4, 'framed alike: the only save left')
+    assert.equal(engine.bestMatch([main], live({ caption: 'QGIS3', width: 640, height: 306, framed: true }), []).tier, 5, 'framed alike: the only save left')
     assert.equal(engine.bestMatch([save({ framed: true }), save({ caption: 'Splash', framed: false })], live({ caption: 'Window', framed: false }), []).index, 1)
 })
 
@@ -171,11 +171,12 @@ test('parseList/isListed: exact, wildcard, no false positives', () => {
     assert.equal(engine.isListed('aXbXc', special), false)
 })
 
-test('bestMatch: tier 1 caption+size, tier 2 size, tier 3 caption, no match', () => {
+test('bestMatch: tier 1 caption+size, tier 2 caption, tier 3 size, tier 4 caption alike, no match', () => {
     const saves = [save(), save({ caption: 'Second window', width: 800, height: 600 })]
     assert.equal(engine.bestMatch(saves, live(), []).tier, 1)
-    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' }), []).tier, 2)
-    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 }), []).tier, 3)
+    assert.equal(engine.bestMatch(saves, live({ width: 1280, height: 720 }), []).tier, 2)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Totally Other' }), []).tier, 3)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'Windows', width: 1280, height: 720 }), []).tier, 4)
     assert.equal(engine.bestMatch(saves, live({ caption: 'Unrelated', width: 1280, height: 720 }), []), null,
         'no match with several unmatched saves and neither caption nor size fitting')
 })
@@ -186,17 +187,25 @@ test('bestMatch: skips taken saves without mutating them', () => {
     const m = engine.bestMatch(saves, live(), [true])
     assert.equal(JSON.stringify(saves), before)
     assert.equal(m.index, 1)
-    assert.equal(m.tier, 2)
+    assert.equal(m.tier, 3)
 })
 
-test('bestMatch: prefers higher tier, then dims, then score', () => {
+test('bestMatch: prefers higher tier, then dims, then score; the window\'s own title over a size it may reuse', () => {
     const saves = [
         save({ caption: 'Unrelated', width: 800, height: 600 }),
         save({ caption: 'Window', width: 799, height: 599 })
     ]
     const m = engine.bestMatch(saves, live(), [])
-    assert.equal(m.index, 0)
+    assert.equal(m.index, 1, 'its title, 1 px off')
     assert.equal(m.tier, 2)
+    const loose = [save({ caption: 'Unrelated', width: 800, height: 600 }), save({ caption: 'Window 2b', width: 799, height: 599 })]
+    assert.equal(engine.bestMatch(loose, live(), []).index, 0, 'a title only alike: the size wins')
+})
+
+test('bestMatch: between titles alike once digits are dropped, the exact one wins', () => {
+    const saves = [save({ caption: 'chapter1.pdf — Okular' }), save({ caption: 'chapter2.pdf — Okular' })]
+    assert.equal(engine.bestMatch(saves, live({ caption: 'chapter2.pdf — Okular' }), []).index, 1)
+    assert.equal(engine.bestMatch(saves, live({ caption: 'chapter1.pdf — Okular' }), []).index, 0)
 })
 
 test('closeRanks: the newest burst first, the first closed first within a burst, as a strict order', () => {
@@ -242,18 +251,19 @@ test('bestMatch: equal matches go to a save closed clearly later, else to the on
 })
 
 test('isBetterMatch: tier, then dims, then score', () => {
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, rank: 1 }, { tier: 2, dims: 2, score: 100, rank: 0 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 0, score: 99, rank: 0 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81 }, { tier: 3, dims: 1, score: 80, rank: 1 }), true)
-    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, rank: 1 }, { tier: 3, dims: 1, score: 80, rank: 1 }), false)
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 0 }, { tier: 1, dims: 2, score: 100, rank: 1 }), true, 'then the close rank')
-    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, rank: 1 }, { tier: 1, dims: 2, score: 100, rank: 0 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 0, score: 0, exact: false, rank: 1 }, { tier: 2, dims: 2, score: 100, exact: false, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, exact: false, rank: 1 }, { tier: 3, dims: 0, score: 99, exact: false, rank: 0 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 81, exact: false }, { tier: 3, dims: 1, score: 80, exact: false, rank: 1 }), true)
+    assert.equal(engine.isBetterMatch({ tier: 3, dims: 1, score: 80, exact: false, rank: 1 }, { tier: 3, dims: 1, score: 80, exact: false, rank: 1 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: false, rank: 0 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 1 }), true, 'then the close rank')
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: false, rank: 1 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 0 }), false)
+    assert.equal(engine.isBetterMatch({ tier: 1, dims: 2, score: 100, exact: true, rank: 1 }, { tier: 1, dims: 2, score: 100, exact: false, rank: 0 }), true, 'then the exact title')
 })
 
-test('single-save fallback: the lone save always applies to the next window (tier 4)', () => {
+test('single-save fallback: the lone save always applies to the next window (tier 5)', () => {
     const saves = [save({ caption: 'Unrelated', width: 640, height: 480 })]
     const m = engine.bestMatch(saves, live({ caption: 'WhatsApp', width: 1200, height: 900 }), [])
-    assert.equal(m.tier, 4)
+    assert.equal(m.tier, 5)
     assert.equal(m.index, 0)
     assert.equal(engine.bestMatch(saves, live(), [true]), null, 'no fallback once the single save is taken')
     const two = [save({ caption: 'A', width: 1, height: 1 }), save({ caption: 'B', width: 2, height: 2 })]

@@ -70,7 +70,10 @@ on, and how to test a change before it reaches anyone's desktop.
     touched, and never from a title the old app's own windows have. KWin's name confirms the
     guess; without it within 10 s the window becomes its old app's again, where it is. An
     opening two apps share is not guessed.
-  - Windows are matched to saves by caption and size. Unambiguous matches apply at once; the
+  - Windows are matched to saves by caption and size (`Engine.bestMatch`): the same title and
+    size first, then the same title (apps reopen windows at the size of the last one closed),
+    then the same size, then a title alike, then the only save left. Titles are compared with
+    digits dropped, and the exact title breaks ties. Unambiguous matches apply at once; the
     rest wait up to 10 s for the set to arrive. Equal matches (alike windows) are ranked by when
     their saves closed: one closed clearly later, on its own, wins (a single window reopens where
     it was closed last); saves closed together (a logout, an app quitting) go in close order, so
@@ -142,6 +145,11 @@ on, and how to test a change before it reaches anyone's desktop.
   frame taller than `clientGeometry` has a title bar. An app drawing its own (GTK, Chrome) has
   none from KWin; Breeze can hide it on maximized windows. QGIS 3.28's splash and Kdenlive 26.08's
   welcome screen have none (frame = client), their main windows one.
+- **Placement** (6.8.3): KWin maximizes a window on its `moveResizeOutput()`, the output under
+  the centre of the geometry last written (`XdgToplevelWindow::maximize`, `Window`), so a restore
+  keeps that centre on the save's monitor (`targetFor`). `minSize`/`maxSize` are the client's
+  (`constrainFrameSize`); the frame adds the decoration. A window maximized one way keeps moves
+  and resizes along the other in its restore geometry, and the script follows (`noteGeometry`).
 - **Maximize requested, not yet confirmed** (6.8.3, `XdgToplevelWindow::maximize`,
   `handleMaximizeRequested`): `maximizeMode` is the mode the app confirmed; KWin compares a new
   request with the requested one (`m_requestedMaximizeMode`), which scripts can't read. An app

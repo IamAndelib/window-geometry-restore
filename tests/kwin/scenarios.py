@@ -1103,7 +1103,9 @@ def s_single_window_reopens_where_closed_last():
     """Two alike windows (same title once digits are ignored, same size), one on each monitor,
     closed one after the other. One window opened again, three times: it comes back on the
     monitor where it was closed last each time, instead of alternating (PR #14). The other
-    monitor keeps its save, for a second window."""
+    monitor keeps its save, for a second window. It opens as "Home 3": alike to both, the title
+    of neither (an exact title would pick that window's own save; the sandbox finds windows by
+    title, so the two need different ones)."""
     with sandbox(outputs=2) as sb:
         a = sb.open_app("org.example.files", "Home 1")
         move_to(sb, "Home 1", 200, 150)
@@ -1115,8 +1117,8 @@ def s_single_window_reopens_where_closed_last():
         b.close()
         for i in range(3):
             sb.pointer.move(400, 400)  # KWin opens it on monitor 1
-            c = sb.open_app("org.example.files", "Home 1")
-            w = sb.window("Home 1")
+            c = sb.open_app("org.example.files", "Home 3")
+            w = sb.window("Home 3")
             check(w["output"] == "Virtual-1" and rect(w)[:2] == (2300, 250),
                   "opening %d: back on monitor 2, where it was closed: %s on %s" % (i + 1, rect(w), w["output"]))
             c.close()

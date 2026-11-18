@@ -195,7 +195,8 @@ function captionScore(a, b) {
 }
 
 // Ranking shared by single-window matching and the deadline sweep:
-// lower tier first, then more matching dimensions, then higher caption score, then the save's
+// lower tier first, then more matching dimensions, then higher caption score, then the exact
+// title (titles alike once digits are dropped: chapter1.pdf and chapter2.pdf), then the save's
 // close rank (closeRanks): equal matches are alike windows, which only their saves' close times
 // tell apart.
 /**
@@ -207,6 +208,7 @@ function isBetterMatch(a, b) {
     if (a.tier !== b.tier) return a.tier < b.tier
     if (a.dims !== b.dims) return a.dims > b.dims
     if (a.score !== b.score) return a.score > b.score
+    if (a.exact !== b.exact) return a.exact
     return a.rank < b.rank
 }
 
@@ -243,9 +245,11 @@ function closeRanks(saves) {
 
 // Deterministic slot matching: pick the best save not yet taken for one live window.
 // Tier 1: caption 100% (numbers stripped) and same size
-// Tier 2: same size
-// Tier 3: caption >= CAPTION_FALLBACK
-// Tier 4: the only save left, whatever it is - the "app never remembers anything" case
+// Tier 2: caption 100%: the window's own title; its size may be one the app reuses (KDE apps open
+//         a window at the size of the last one closed)
+// Tier 3: same size
+// Tier 4: caption >= CAPTION_FALLBACK
+// Tier 5: the only save left, whatever it is - the "app never remembers anything" case
 // Equal matches (alike windows: the same title once digits are dropped, the same size) go by
 // closeRanks. A save framed unlike the window (framedUnlike) is never its own.
 // `scores` (optional): caption scores of this window against the saves, filled as computed, for
@@ -255,16 +259,17 @@ function closeRanks(saves) {
  * @param {LiveWindow} live
  * @param {boolean[]} taken
  * @param {number[]} [scores]
+ * @param {number[]} [ranks] closeRanks(saves), kept by a caller that matches against the same saves again
  * @returns {Match | null}
  */
-function bestMatch(saves, live, taken, scores) {
+function bestMatch(saves, live, taken, scores, ranks) {
     /** @param {number} i */
     var score = function (i) {
         if (!scores) return captionScore(saves[i].caption, live.caption)
         if (scores[i] === undefined) scores[i] = captionScore(saves[i].caption, live.caption)
         return scores[i]
     }
-    var ranks = closeRanks(saves)
+    ranks = ranks || closeRanks(saves)
     var best = null
     var free = -1
     var freeCount = 0
@@ -277,14 +282,15 @@ function bestMatch(saves, live, taken, scores) {
         var caption = score(i)
         var tier
         if (caption === 100 && dims === 2) tier = 1
-        else if (dims === 2) tier = 2
-        else if (caption >= CAPTION_FALLBACK) tier = 3
+        else if (caption === 100) tier = 2
+        else if (dims === 2) tier = 3
+        else if (caption >= CAPTION_FALLBACK) tier = 4
         else continue
-        var candidate = { index: i, tier: tier, dims: dims, score: caption, rank: ranks[i] }
+        var candidate = { index: i, tier: tier, dims: dims, score: caption, exact: s.caption === live.caption, rank: ranks[i] }
         if (!best || isBetterMatch(candidate, best)) best = candidate
     }
     if (!best && freeCount === 1) {
-        return { index: free, tier: 4, dims: 0, score: score(free), rank: ranks[free] }
+        return { index: free, tier: 5, dims: 0, score: score(free), exact: saves[free].caption === live.caption, rank: ranks[free] }
     }
     return best
 }
