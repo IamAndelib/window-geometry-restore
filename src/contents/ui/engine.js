@@ -724,25 +724,43 @@ function latestClose(state) {
     return latest
 }
 
-// Whether a closing window is as the script left it: in the maximize mode and tile of the save it
-// was placed from, or of none if it wasn't placed. Its size and place aren't compared: the app
-// sizes its own windows, and a window the user moved or resized is userPlaced (main.qml).
+// Whether a closing window is as the script left it: where, and in the maximize mode and tile,
+// the save it was placed from put it, or where it `opened` if it wasn't placed (null: unknown,
+// so it may have been moved). A window moved by any means, a shortcut or another script too,
+// or resized by the app, isn't.
 /**
  * @param {Save} snap
  * @param {Save | null} from
+ * @param {PixelRect | null} opened
  * @returns {boolean}
  */
-function keepsPlacement(snap, from) {
-    return snap.maximized === (from ? from.maximized : 0) && tileKey(snap.tile) === tileKey(from ? from.tile : null)
+function keepsPlacement(snap, from, opened) {
+    var at = from ? { x: from.x, y: from.y, w: from.width, h: from.height } : opened
+    return !!at && snap.x === at.x && snap.y === at.y && snap.width === at.w && snap.height === at.h &&
+        snap.maximized === (from ? from.maximized : 0) && sameTile(snap.tile, from ? from.tile : null)
 }
 
 /**
- * @param {TileRef | null} tile
- * @returns {string}
+ * @param {TileRef | null} a
+ * @param {TileRef | null} b
+ * @returns {boolean}
  */
-function tileKey(tile) {
-    if (!tile) return ''
-    return tile.kind === 'quick' ? 'quick ' + tile.index : 'custom ' + tile.path.join(',')
+function sameTile(a, b) {
+    if (!a || !b) return !a && !b
+    if (a.kind === 'quick') return b.kind === 'quick' && a.index === b.index
+    if (b.kind === 'quick') return false
+    return a.path.length === b.path.length && a.path.every(function (step, i) { return step === b.path[i] })
+}
+
+// Whether a window's size is near a save's: within a fifth both ways (a frame grown with a theme's
+// borders, a title bar), not another window's (a splash screen and the app's window).
+/**
+ * @param {{ width: number, height: number }} size
+ * @param {Save} save
+ * @returns {boolean}
+ */
+function nearSize(size, save) {
+    return Math.abs(size.width - save.width) <= save.width / 5 && Math.abs(size.height - save.height) <= save.height / 5
 }
 
 // What recordLayout replaces for an app on one desktop, to put back with undoLayout.
@@ -772,8 +790,9 @@ function undoLayout(state, cls, key, recorded, before) {
     if (!app || layoutFor(state, cls, key) !== recorded) return false
     if (before.layout) app.desktops[key] = before.layout
     else delete app.desktops[key]
-    app.saves = before.saves
-    app.lastAccess = before.lastAccess || app.lastAccess
+    // The app's latest layout and use: only if no other desktop's close has set them since.
+    if (app.saves === recorded.saves) app.saves = before.saves
+    if (app.lastAccess === recorded.lastAccess && before.lastAccess) app.lastAccess = before.lastAccess
     if (!hasData(app)) delete state.apps[cls]
     return true
 }
@@ -796,15 +815,17 @@ function layoutFor(state, cls, key) {
  * @param {string} key
  * @param {Save[]} saves
  * @param {number} now
+ * @returns {Layout}
  */
 function recordLayout(state, cls, key, saves, now) {
     var app = state.apps[cls]
     if (!app) app = state.apps[cls] = { lastAccess: now, saves: [], desktops: newMap() }
     if (!isObject(app.desktops)) app.desktops = newMap()
     saves = saves.slice(-MAX_SAVES)
-    app.desktops[key] = { lastAccess: now, saves: saves }
+    var layout = app.desktops[key] = { lastAccess: now, saves: saves }
     app.saves = saves
     app.lastAccess = now
+    return layout
 }
 
 /**

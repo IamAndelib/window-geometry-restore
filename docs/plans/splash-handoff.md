@@ -15,21 +15,26 @@ doesn't start with the sandbox's the sandbox's id (`XdgToplevelWindow::handleApp
 the splash, Writer and Calc are one app to the script.
 
 ## Decisions
-- **A fixed-size window needs evidence** (`matchFor`): only a title or size match restores it,
-  never "the only save left". Its own saves always match it by size.
+- **A fixed-size window needs evidence** (`matchFor`): a title or size match, or a save near its
+  size (`Engine.nearSize`: its frame grew with a theme), never just "the only save left". Its
+  own saves match it by size.
 - **Undo, don't hold** (`handOff`): the close is saved at once, as every close; if the window
   hands over, the save is undone (`Engine.undoLayout`, only if nothing was saved since).
   Rejected: holding an untouched last close for a few seconds before saving. It delays every
   such save, breaks "written the moment a window closes", and takes a user's quick close and
   reopen for a hand-off.
-- **What a hand-off is:** the closed window was the app's only window, untouched (no user move
-  or resize; the maximize mode and tile it was placed in), and a window of the same app (app key
-  or window class: rules name LibreOffice's components, not its splash) opens on that desktop
-  within `HANDOFF_MS` (3 s; LibreOffice: ~0.8 s), and:
-  - comes from the same process (`pid`): prompts, profile choosers; a user reopening an app
-    starts a new process, so that close stands;
+- **What a hand-off is:** a window of the same app (app key, or window class: rules name
+  LibreOffice's components, not its splash) opens on that desktop after the close, within
+  `HANDOFF_MS` (3 s; LibreOffice: ~0.8 s), while no other window of the app is open (it is
+  starting); the closed window was the only close on its monitor, and untouched: where, and in
+  the maximize mode and tile, it was placed, or where it opened (`Engine.keepsPlacement`; a move
+  by a shortcut or another script counts, not only a drag); and:
+  - the new window comes from the same process (`pid`): prompts, profile choosers;
   - or the closed window couldn't be resized: LibreOffice's first-start splash comes from
     another process than its windows.
+
+  An untouched window is where its save (or KWin) put it, so a mistaken hand-off loses nothing:
+  the layout from before puts the next window there again.
 - **LibreOffice components** are told apart by KWin rules (README), not by the script: telling
   apps apart by title would split apps whose titles change.
 
@@ -39,4 +44,5 @@ the splash, Writer and Calc are one app to the script.
 - A prompt restored to the app's save (the only one left, resizable) still shows at the app's
   size; only its save is undone.
 - A fixed-size app closed untouched and reopened within 3 s gets the layout from before its
-  close, which it was placed from anyway.
+  close, which it was placed from anyway; one never saved before opens where KWin puts it, as
+  it did.

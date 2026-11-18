@@ -164,21 +164,23 @@ interface Close {
     monitor: SavedScreen | null
     /** The save the script placed the window at: replaced by this close (issue #8). */
     from: Save | null
-    /** The app's last window, closed as the script left it: how a window opening next could be
-     *  the one it handed over to (main.qml handOff). Null if it can't be. */
-    handoff: { resourceClass: string; pid: number; fixedSize: boolean } | null
+    /** The app's last window, closed as the script left it: it may have handed over to a window
+     *  opening next (main.qml handOff). */
+    handoff: HandoffSource | null
 }
 
+/** A closed window that may have handed over: its window class, process (0 unknown), and
+ *  whether it couldn't be resized. */
+interface HandoffSource { resourceClass: string; pid: number; fixedSize: boolean }
+
 /** A layout saved from a window that may have been a splash screen or startup prompt: undone if
- *  the window it handed over to opens by `until` (main.qml handOff). */
+ *  the window it handed over to opens after `closedAt`, by `until` (main.qml handOff). */
 interface Handoff {
+    from: HandoffSource
     cls: string
     desktopKey: string
-    resourceClass: string
-    /** The closed window's process (0 unknown), and whether it couldn't be resized. */
-    pid: number
-    fixedSize: boolean
     caption: string
+    closedAt: number
     until: number
     recorded: Layout
     before: LayoutBefore
@@ -242,6 +244,8 @@ interface Entry {
     userPlaced: boolean
     provisional: { save: Save; until: number } | null
     openedAt: number
+    /** Where it opened (null if adopted): untouched while it is still there (Engine.keepsPlacement). */
+    opened: PixelRect | null
     restoredFrom: RestoredFrom | null
     placedFrom: Save | null
     /** A dialog without a parent (Engine.isDialog), and the saves it was judged against. */

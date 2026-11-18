@@ -79,16 +79,20 @@ on, and how to test a change before it reaches anyone's desktop.
     `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
     isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
     start), until it grows out of it (noteGeometry) (issue #3).
-  - A window that can't be resized is restored only from a save matching its title or size,
-    never as the one save left: a splash screen opens before the app's window and would take its
-    place (`matchFor`).
+  - A window that can't be resized takes the one save left only if its size is near the save's
+    (`Engine.nearSize`), otherwise only a save matching its title or size: a splash screen opens
+    before the app's window and would take its place (`matchFor`).
   - **Hand-offs** (`handOff`). A splash screen or startup prompt shown alone before the app's
-    window is saved when it closes, as any window. If a window of the same app (app key or window
-    class) opens on that desktop within `HANDOFF_MS`, and the closed window was the app's only
-    one, untouched (not moved or resized by the user, in the maximize mode and tile it was placed
-    in: `Engine.keepsPlacement`), and either from the same process (`pid`) or of a fixed size,
-    that save is undone (`Engine.undoLayout`), unless the layout was saved again since. Saves are
-    still written at once; a user closing and reopening an app starts a new process.
+    window is saved when it closes, as any window. That save is undone (`Engine.undoLayout`,
+    unless the layout was saved again since) when a window of the same app (app key or window
+    class) opens after the close, within `HANDOFF_MS`, on that desktop, while no other window of
+    the app is open, and:
+    - the closed window was the only one closed there (its monitor's buffer) and untouched: where,
+      and in the maximize mode and tile, it was placed, or where it opened
+      (`Engine.keepsPlacement`), so undoing its save loses nothing the user did;
+    - it came from the same process (`pid`), or couldn't be resized.
+
+    Saves are still written at once. See docs/plans/splash-handoff.md.
   - A tiled save first goes to its pre-tile geometry and is then tiled, so KWin keeps that
     geometry for a drag out of the tile. A quick tile that waits for the window to become
     active waits at the tile's rect instead; the pre-tile geometry is written just before the

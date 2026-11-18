@@ -677,16 +677,31 @@ test('System Settings is not excluded by default: it is an ordinary app window',
     assert.ok(!engine.isListed('systemsettings', engine.parseList(list.replace(/['\s]/g, '').split(',').join('\n'))))
 })
 
-test('keepsPlacement: the maximize mode and tile of the save a window was placed from, or none', () => {
+test('keepsPlacement: where, and as, the save a window was placed from put it, or where it opened', () => {
     const quick = (index) => ({ kind: 'quick', index, rel: null })
-    assert.equal(engine.keepsPlacement(save(), null), true, 'not placed, as it opened')
-    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), null), false, 'maximized since')
-    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), null), false, 'tiled since')
-    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 })), true, 'maximized as restored')
-    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 })), false, 'unmaximized since')
-    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) })), true, 'in the tile it was restored to')
-    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) })), false, 'another tile')
-    assert.equal(engine.keepsPlacement(save({ x: 999, width: 10 }), save()), true, 'size and place aren\'t compared')
+    const custom = (...path) => ({ kind: 'custom', path, rel: { x: 0, y: 0, width: 1, height: 1 } })
+    const at = { x: 100, y: 50, w: 800, h: 600 }
+    assert.equal(engine.keepsPlacement(save(), null, at), true, 'not placed, where it opened')
+    assert.equal(engine.keepsPlacement(save({ x: 140 }), null, at), false, 'moved since, by any means')
+    assert.equal(engine.keepsPlacement(save({ width: 900 }), null, at), false, 'resized since')
+    assert.equal(engine.keepsPlacement(save(), null, null), false, 'where it opened unknown')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), null, at), false, 'maximized since')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), null, at), false, 'tiled since')
+    assert.equal(engine.keepsPlacement(save({ maximized: 3 }), save({ maximized: 3 }), null), true, 'maximized as restored')
+    assert.equal(engine.keepsPlacement(save(), save({ maximized: 3 }), null), false, 'unmaximized since')
+    assert.equal(engine.keepsPlacement(save({ x: 5 }), save(), at), false, 'moved from the save')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(1) }), save({ tile: quick(1) }), null), true, 'in its quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: quick(0) }), save({ tile: quick(1) }), null), false, 'another quick tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 1) }), null), true, 'in its custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0, 1) }), save({ tile: custom(0, 2) }), null), false, 'another custom tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: custom(0, 1) }), null), false, 'a parent tile')
+    assert.equal(engine.keepsPlacement(save({ tile: custom(0) }), save({ tile: quick(0) }), null), false, 'another kind')
+})
+
+test('nearSize: within a fifth both ways', () => {
+    assert.equal(engine.nearSize({ width: 660, height: 250 }, save({ width: 644, height: 235 })), true, 'a theme\'s borders')
+    assert.equal(engine.nearSize({ width: 644, height: 235 }, save({ width: 1324, height: 750 })), false, 'a splash and the app')
+    assert.equal(engine.nearSize({ width: 644, height: 600 }, save({ width: 644, height: 235 })), false, 'one way is enough')
 })
 
 test('undoLayout puts back what recordLayout replaced, unless the layout changed since', () => {
@@ -714,4 +729,13 @@ test('undoLayout puts back what recordLayout replaced, unless the layout changed
     engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Later' })], 9)
     assert.equal(engine.undoLayout(state, 'app', 'desk', splash, stale), false, 'saved again since: left')
     assert.equal(engine.layoutFor(state, 'app', 'desk').saves[0].caption, 'Later')
+
+    // Another desktop saved after: its latest layout and use stay.
+    const beforeSplash = engine.layoutBefore(state, 'app', 'desk')
+    const splashed = engine.recordLayout(state, 'app', 'desk', [save({ caption: 'Splash' })], 10)
+    engine.recordLayout(state, 'app', 'other', [save({ caption: 'Other desktop' })], 11)
+    assert.equal(engine.undoLayout(state, 'app', 'desk', splashed, beforeSplash), true)
+    assert.equal(engine.layoutFor(state, 'app', 'desk').saves[0].caption, 'Later')
+    assert.equal(state.apps.app.saves[0].caption, 'Other desktop')
+    assert.equal(state.apps.app.lastAccess, 11)
 })

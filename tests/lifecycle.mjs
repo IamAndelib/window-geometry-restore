@@ -41,7 +41,7 @@ const extracted = extractFunctions(qml)
 const REQUIRED_FUNCTIONS = [
     'log', 'dbg', 'logOnce', 'removeFromArray', 'connectSignal', 'disconnectSignal',
     'loadConfig', 'loadPersisted', 'persist',
-    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
+    'isValidWindow', 'desktopKeyOf', 'joinGroup', 'handOff', 'isAppOf', 'leaveGroup', 'trackWindow', 'placeNewWindow', 'geometryRuleOf', 'onDesktopsChanged',
     'onOutputChanged', 'untrack', 'onAppKeyChanged', 'isOwnTitle', 'undoRestore',
     'geometryOf', 'copyGeometry', 'describeTile', 'isAway', 'isMaximized', 'isMaximizedLike', 'noteTile', 'noteGeometry',
     'onCurrentMonitor', 'waitingQuickTile', 'snapshotWindow', 'releaseWindow', 'finalizeLeftMonitors', 'finalizeMonitor',
@@ -3844,6 +3844,38 @@ test('a hand-off needs an untouched lone window, closed just before', () => {
     })
     assert.equal(savedApp(rt, 'mail').d['desk-uuid-1'].w[0].max, 3, 'maximized: kept')
 
+    // Moved without a drag (a shortcut, another script): not where it opened.
+    rt = buildRuntime()
+    splash = splashWindow(rt)
+    splash._setFrame({ x: 10, y: 10, width: 644, height: 235 })
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO), 'moved by a shortcut: kept')
+
+    // A window opened before the close (moved here from another desktop): not handed over to.
+    rt = buildRuntime()
+    const earlier = appWindow(rt, { desktop: 2 })
+    advanceClock(rt, 1000)
+    splash = splashWindow(rt)
+    advanceClock(rt, 120)
+    splash.emitClosed()
+    earlier._moveToDesktop(1)
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'an earlier window: kept')
+
+    // The app has a window open on another desktop: it is running, not starting.
+    rt = buildRuntime()
+    appWindow(rt, { caption: 'Elsewhere', desktop: 2 })
+    handOver(rt, splashWindow(rt), () => appWindow(rt))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'running on another desktop: kept')
+
+    // Closed after another window on its monitor, outside the burst: not the app's only window.
+    rt = buildRuntime()
+    const main = appWindow(rt, { caption: 'Main' })
+    splash = splashWindow(rt)
+    main.emitClosed()
+    advanceClock(rt, 2000)
+    handOver(rt, splash, () => appWindow(rt))
+    assert.ok(savedApp(rt, LO).d['desk-uuid-1'], 'after another window: kept')
+
     // The app still has a window on another monitor: it is running, not starting.
     rt = buildRuntime()
     appWindow(rt, { caption: 'Left', x: 100, y: 100, outputIndex: 0 })
@@ -3866,4 +3898,12 @@ test('a startup prompt restored to the app\'s save hands over, and the app\'s la
     })
     assert.deepEqual(savedApp(rt, 'mail').d['desk-uuid-1'].w.map((s) => s.c), ['Inbox - Mail'], 'the layout from before')
     assert.deepEqual(frameOf(main), [200, 100, 1400, 900])
+})
+
+test('a fixed-size window near its save\'s size takes it as the one save left: its frame grew, not another window', () => {
+    const rt = buildRuntime(savedLayouts({ calc: [{ c: 'Calculator', x: 300, y: 200, w: 400, h: 500, o: null }] }))
+    const w = makeWindow({ cls: 'calc', caption: '12 + 30 = 42', x: 0, y: 0, width: 410, height: 530 })
+    w.resizeable = false
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [300, 200])
 })

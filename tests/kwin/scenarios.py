@@ -115,13 +115,8 @@ def s_fixed_size_window():
     """A non-resizable window gets its position back and keeps its size."""
     with sandbox(outputs=1) as sb:
         a = sb.open_app("org.example.fixed", "Fixed", size=(600, 400), fixed=True)
-        w = sb.window("Fixed")
-        size = rect(w)[2:]
-        # Dragged, as the user moves it: a fixed-size window closed untouched and reopened at once
-        # reads as a splash screen handing over (s_splash_hands_over).
-        x, y = titlebar(w)
-        sb.drag((x, y), (x + 100 - rect(w)[0], y + 120 - rect(w)[1]))
-        sb.wait(lambda: rect(sb.window("Fixed"))[:2] == (100, 120), 3, "the drag")
+        size = rect(sb.window("Fixed"))[2:]
+        sb.set_geometry("Fixed", 100, 120, size[0], size[1])
         a.close()
         sb.open_app("org.example.fixed", "Fixed", size=(600, 400), fixed=True)
         w = sb.window("Fixed")
@@ -328,12 +323,7 @@ def s_window_rule_size_only():
     """A forced size rule: the window is left to KWin entirely."""
     with sandbox(outputs=1, rules=[rule("org.example.sized", size="700,450", sizerule=2)]) as sb:
         a = sb.open_app("org.example.sized", "Sized")
-        # Dragged: a forced size makes the window fixed-size to KWin, and one moved by a script
-        # and reopened at once reads as a splash screen handing over (s_splash_hands_over).
-        w = sb.window("Sized")
-        x, y = titlebar(w)
-        sb.drag((x, y), (x + 900 - rect(w)[0], y + 400 - rect(w)[1]))
-        sb.wait(lambda: rect(sb.window("Sized"))[:2] == (900, 400), 3, "the drag")
+        move_to(sb, "Sized", 900, 400)
         a.close()
         sb.script_log()
         sb.open_app("org.example.sized", "Sized")
