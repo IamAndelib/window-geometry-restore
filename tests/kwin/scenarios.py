@@ -904,6 +904,27 @@ def s_splash_without_title_bar_older_save():
         check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
 
 
+def s_fullscreen_round_trip_keeps_title_bar():
+    """A window that went fullscreen and back: KWin drops its title bar and changes its frame
+    before it confirms fullscreen, so the title bar must not be read from that frame. Saved as
+    framed, it is restored next time, not set aside as unlike its own save."""
+    app, title = "org.example.viewer", "Viewer"
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app(app, title, size=(1000, 650))
+        w = sb.window(title)
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window(title))[:2] == (300, 150), 3, "the drag")
+        size = rect(sb.window(title))[2:]
+        for full in ("true", "false"):
+            sb.probe("win(%r).fullScreen = %s; return 1" % (title, full))
+            sb.settle(0.8)
+        check(rect(sb.window(title)) == (300, 150) + size, "precondition: back from fullscreen: %s" % (rect(sb.window(title)),))
+        a.close()
+        sb.open_app(app, title, size=(1000, 650))
+        check(rect(sb.window(title)) == (300, 150) + size, "restored: %s; log: %s" % (rect(sb.window(title)), [l for l in sb.script_log() if "title bar" in l]))
+
+
 def s_maximized_by_app_as_it_shows():
     """An app that asks to be maximized as it shows, before KWin confirms it (Kdenlive): the
     window shows as not maximized, and maximizing it again changed nothing, so the normal
@@ -1343,6 +1364,7 @@ SCENARIOS = [
     s_splash_without_title_bar_before_main_window,
     s_splash_without_title_bar_older_save,
     s_maximized_by_app_as_it_shows,
+    s_fullscreen_round_trip_keeps_title_bar,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

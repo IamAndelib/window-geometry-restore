@@ -91,9 +91,11 @@ on, and how to test a change before it reaches anyone's desktop.
     window framed unlike every save it could take is set aside like a dialog
     (`Engine.isFramedUnlike`): a splash or welcome screen without a title bar (QGIS's, Kdenlive's)
     shown before or beside the framed main window. The main window is then the app's first and
-    restored. Set aside until the user moves or resizes it, or until it closes as the app's only
-    window: then it is the app's, its title bar changed, and saved (`releaseWindow`). A title bar
-    KWin turned off itself (`noBorder`) is unknown.
+    restored. Judged against every save of the restore, taken or not. Set aside until it closes
+    as the app's only window: then it is the app's, its title bar changed, and saved
+    (`releaseWindow`). A title bar KWin turned off itself (`noBorder`) is unknown, and so is one
+    seen while the window fills the work area (KWin changes the frame before it confirms
+    fullscreen or maximized).
     A save that doesn't record it (older versions, or only seen maximized) isn't given as the
     only save left to a smaller window without a title bar (`Engine.smallerUnframed`); that one
     is still counted and saved, so an app drawing its own title bar misses one restore at most.

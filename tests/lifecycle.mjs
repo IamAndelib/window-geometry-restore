@@ -4127,7 +4127,7 @@ test('a window without a title bar not smaller than an older save still takes it
     assert.deepEqual([w.x, w.y, w.width, w.height], [100, 100, 900, 700])
 })
 
-test('a window framed unlike the app\'s saves that the user places is the app\'s window: saved', () => {
+test('a window framed unlike the app\'s saves, placed by the user and closed alone, is the app\'s window: saved', () => {
     // Firefox after switching its title bar setting: its saves have one, the window none.
     const rt = buildRuntime(savedLayouts({ firefox: [{ c: 'Mozilla Firefox', x: 100, y: 100, w: 1200, h: 800, o: null, fr: 1 }] }))
     const w = makeWindow({ cls: 'firefox', caption: 'Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800, titleBar: 0 })
@@ -4390,4 +4390,99 @@ test('a window maximized one way and moved to another monitor keeps a free geome
         const [s] = savedApp(rt, 'app').w
         assert.ok(s.o.y >= 0, 'not above its monitor: ' + s.o.y)
     })
+})
+
+// --- Title bars and KWin's event order (debugging pass): the frame changes before the state ---
+
+test('a window that went fullscreen and back keeps its title bar recorded, and is restored', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'gwenview', caption: 'Gwenview', x: 200, y: 150, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    advanceClock(rt, 5000)
+    // F11: decoration None (preferredDecorationMode: requested fullscreen), frame = screen, then state.
+    w._titleBar = 0
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w.fullScreen = true
+    advanceClock(rt, 5000)
+    // F11 again: decoration back with the normal frame while fullScreen is still true, then state.
+    w._titleBar = 30
+    w._setFrame({ x: 200, y: 150, width: 1000, height: 700 })
+    w.fullScreen = false
+    advanceClock(rt, 5000)
+    w.emitClosed()
+    const save = savedApp(rt, 'gwenview').d['desk-uuid-1'].w[0]
+    const rt2 = buildRuntime(rt.blobRef())
+    const w2 = makeWindow({ cls: 'gwenview', caption: 'Gwenview', x: 500, y: 300, width: 1000, height: 700 })
+    rt2.trackWindow(w2)
+    assert.deepEqual(frameOf(w2), [200, 150, 1000, 700], 'not restored; save fr=' + save.fr + '; ' + rt2.getLogs().filter((l) => l.includes('title bar')).join(' | '))
+})
+
+test('a window closed maximized with borderless maximized windows comes back maximized', () => {
+    const rt = buildRuntime()
+    const w = makeWindow({ cls: 'kate', caption: 'Kate', x: 200, y: 150, width: 1000, height: 700 })
+    rt.trackWindow(w)
+    advanceClock(rt, 5000)
+    // Maximize button: setNoBorder(true) at request; the commit applies no decoration and the full
+    // frame, then the maximized state is acknowledged.
+    w._titleBar = 0
+    w._setFrame({ x: 0, y: 0, width: 1920, height: 1080 })
+    w.maximizeMode = 3
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    const save = savedApp(rt, 'kate').d['desk-uuid-1'].w[0]
+    const rt2 = buildRuntime(rt.blobRef())
+    const w2 = makeWindow({ cls: 'kate', caption: 'Kate', x: 500, y: 300, width: 1000, height: 700 })
+    rt2.trackWindow(w2)
+    assert.equal(w2.maximizeMode, 3, 'not maximized; save fr=' + save.fr + ' max=' + save.max)
+})
+
+test('a second framed window, beyond the layout\'s framed saves, is saved when it closes', () => {
+    // Layout: the main window (title bar) and a frameless one closed with it (a PiP, a welcome
+    // screen the user had moved).
+    const rt = buildRuntime(savedLayouts({ firefox: [
+        { c: 'Inbox — Mozilla Firefox', x: 100, y: 100, w: 1200, h: 800, o: null, fr: 1 },
+        { c: 'Picture-in-Picture', x: 1500, y: 700, w: 400, h: 225, o: null, fr: 0 }
+    ] }))
+    const a = makeWindow({ cls: 'firefox', caption: 'Inbox — Mozilla Firefox', x: 300, y: 200, width: 1200, height: 800 })
+    rt.trackWindow(a)
+    const b = makeWindow({ cls: 'firefox', caption: 'News — Mozilla Firefox', x: 350, y: 250, width: 1000, height: 700 })
+    rt.trackWindow(b)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    advanceClock(rt, 60000)
+    b.emitClosed() // the app quitting: the second window first, beside the first
+    advanceClock(rt, 100)
+    a.emitClosed()
+    const saves = savedApp(rt, 'firefox').d['desk-uuid-1'].w
+    assert.ok(saves.some((s) => s.c === 'News — Mozilla Firefox'), 'second window not saved: ' + JSON.stringify(saves.map((s) => s.c)) +
+        ' | ' + rt.getLogs().filter((l) => l.includes('title bar')).join(' | '))
+})
+
+test('a welcome screen the user moved stays aside: the main window opened after the deadline is restored', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    const welcome = welcomeScreen(rt)
+    advanceClock(rt, 2000)
+    welcome.emitMoveResizeStarted() // Alt+drag, or the app's own drag area (startSystemMove)
+    welcome._setFrame({ x: 100, y: 100, width: 612, height: 648 })
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 5000) // browsing recent projects
+    rt.tick()
+    const main = kdenliveMain(rt)
+    assert.deepEqual(frameOf(main), [150, 90, 1280, 756])
+})
+
+test('an app given a "no titlebar" rule keeps where the user put its window', () => {
+    const rt = buildRuntime(savedLayouts({ konsole: [{ c: 'Konsole', x: 100, y: 100, w: 900, h: 600, o: null, fr: 1 }] }))
+    const w = makeWindow({ cls: 'konsole', caption: 'Konsole', x: 300, y: 200, width: 900, height: 600, titleBar: 0 })
+    w.noBorder = true // the rule: KWin's decoration policy None
+    rt.trackWindow(w)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 1)
+    rt.tick()
+    w._moveToOutput(outputs[1], { x: 2100, y: 200, width: 900, height: 600 }) // Window to Next Screen
+    advanceClock(rt, 60000)
+    w.emitClosed()
+    const rt2 = buildRuntime(rt.blobRef())
+    const w2 = makeWindow({ cls: 'konsole', caption: 'Konsole', x: 300, y: 200, width: 900, height: 600, titleBar: 0 })
+    w2.noBorder = true
+    rt2.trackWindow(w2)
+    assert.deepEqual(frameOf(w2), [2100, 200, 900, 600])
 })

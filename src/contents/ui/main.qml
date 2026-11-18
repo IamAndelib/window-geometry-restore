@@ -1218,12 +1218,6 @@ Item {
         var entry = tracked[id]
         if (!entry || entry.userPlaced) return
         entry.userPlaced = true
-        // Framed unlike the app's saves, but the user places it: one of the app's windows (an app
-        // whose title bar changed, Firefox's setting): saved, and counted.
-        if (entry.dialog && entry.dialog.framedUnlike) {
-            entry.dialog = null
-            dbg(entry.label + ': placed by the user, the app\'s window after all')
-        }
         entry.provisional = null
         entry.home = null
         cancelPendingTile(entry)
@@ -1250,15 +1244,17 @@ Item {
     }
 
     // Whether KWin draws a title bar on the window: its frame is taller than its client area.
-    // Unknown (null) while it is maximized or fullscreen, and when KWin itself turned it off
-    // (noBorder: a rule, "No titlebar", or borderless maximized windows, which it sets before the
-    // app confirms the maximize): only an app's own choice tells its windows apart.
+    // Unknown (null) when KWin itself turned it off (noBorder: a rule, "No titlebar", borderless
+    // maximized windows): only an app's own choice tells its windows apart. And while the window
+    // is maximized or fullscreen, or fills the work area: KWin drops the title bar of a window
+    // going fullscreen (or maximized, with some decorations) and changes its frame before it
+    // confirms the state (XdgToplevelWindow::handleRoleCommit).
     /**
      * @param {KWindow} w
      * @returns {boolean | null}
      */
     function framedOf(w) {
-        if (w.maximizeMode || w.fullScreen || w.noBorder || !w.clientGeometry) return null
+        if (w.maximizeMode || w.fullScreen || w.noBorder || !w.clientGeometry || isMaximizedLike(w)) return null
         return w.height - w.clientGeometry.height >= 1
     }
 
@@ -1298,10 +1294,11 @@ Item {
             entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }), framedUnlike: false }
             return null
         }
-        // Framed unlike every save it could take (a splash or welcome screen without a title bar,
+        // Framed unlike every save of the restore (a splash or welcome screen without a title bar,
         // QGIS's or Kdenlive's, before the framed main window): not restored, not saved, and the
-        // main window, opening beside it, is the app's first.
-        if (Engine.isFramedUnlike(entry.framed, session.saves, taken)) {
+        // main window, opening beside it, is the app's first. Every save, taken or not: a second
+        // window framed like one the first took only finds no save of its own.
+        if (Engine.isFramedUnlike(entry.framed, session.saves, [])) {
             if (!entry.dialog) log(entry.label + ': "' + caption + '" has ' + (entry.framed ? 'a' : 'no') + ' title bar, unlike ' +
                 'the app\'s saved windows (a splash or welcome screen): left as it is, not saved')
             entry.dialog = { saves: [], framedUnlike: true }
