@@ -101,7 +101,7 @@ for app in Writer Calc Impress Draw Math Base; do
     *) kwriteconfig6 --file kwinrulesrc --group General --key Order "${order:+$order,}$id" ;;
   esac
 done
-qdbus6 org.kde.KWin /KWin reconfigure
+dbus-send --session --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure
 ```
 
 The same rules can be made in *System Settings → Window Management → Window Rules*: window class `org.libreoffice.LibreOffice` (exact match), window title containing `LibreOffice Writer`, and the property *Desktop file name* set to Force `org.libreoffice.LibreOffice.writer`; likewise for the others. Each component then keeps its own layout from its next close on.
@@ -116,7 +116,7 @@ Every save and restore is logged with the app's name, the same name you'd put in
 
 ```
 kwriteconfig6 --file kwinrc --group Plugins --key windowgeometryrestoreEnabled false
-qdbus6 org.kde.KWin /KWin reconfigure
+dbus-send --session --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure
 ```
 
 **Where the data lives:** saved layouts are in `~/.config/kde.org/kwin.conf` under `windowgeometryrestore_windows`. Unreadable data is moved aside to `windowgeometryrestore_windows_corrupt`, and data from a newer version to `windowgeometryrestore_windows_v<N>`.
