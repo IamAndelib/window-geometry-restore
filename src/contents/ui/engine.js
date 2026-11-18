@@ -298,12 +298,16 @@ function isDialogSized(width, height, save) {
     return width < save.width / 2 && height < save.height / 2
 }
 
-// A dialog the app shows without a parent (a password prompt or profile chooser at startup):
-// on Wayland KWin can't tell it from the app's window (issue #3). Taken for one: a window at its
-// minimum width (sized to its content, as dialogs open; an app's window opens at its default
-// size) and under half the size of every save it could take. `win`: { width, height (the
-// frame, as saves are), clientWidth, minWidth (KWin's minSize is the client's: no borders) }.
-var DIALOG_MIN_WIDTH_SLACK = 32
+// A dialog the app shows without a parent (a password prompt or profile chooser at startup, a
+// welcome screen): on Wayland KWin can't tell it from the app's window (issue #3). Taken for one:
+// a window at its minimum width (sized to its content, as dialogs open; an app's window opens at
+// its default size), and against every save it could take, either
+// - under half its size both ways (Thunderbird's password prompt), or
+// - at its minimum height too (wholly sized to its content), smaller both ways, and with a title
+//   unlike the save's (Kdenlive's welcome screen, which the main window opens beside).
+// `win`: the frame (width, height, as saves are) and the client size with KWin's minSize (the
+// client's: no borders), and the title.
+var DIALOG_MIN_SIZE_SLACK = 32
 /**
  * @param {DialogSize} win
  * @param {Save[]} saves
@@ -311,11 +315,15 @@ var DIALOG_MIN_WIDTH_SLACK = 32
  * @returns {boolean}
  */
 function isDialog(win, saves, taken) {
-    if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_WIDTH_SLACK) return false
+    if (!(win.minWidth > 0) || win.clientWidth > win.minWidth + DIALOG_MIN_SIZE_SLACK) return false
+    var fitted = win.clientHeight <= win.minHeight + DIALOG_MIN_SIZE_SLACK
     var free = 0
     for (var i = 0; i < saves.length; i++) {
         if (taken[i]) continue
-        if (!isDialogSized(win.width, win.height, saves[i])) return false
+        var save = saves[i]
+        var smaller = fitted && win.width < save.width && win.height < save.height &&
+            captionScore(save.caption, win.caption) < CAPTION_FALLBACK
+        if (!smaller && !isDialogSized(win.width, win.height, save)) return false
         free++
     }
     return free > 0

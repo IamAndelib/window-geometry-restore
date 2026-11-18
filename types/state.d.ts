@@ -108,7 +108,10 @@ interface DialogSize {
     height: number
     /** Without decoration borders, as KWin's minSize is. */
     clientWidth: number
+    clientHeight: number
     minWidth: number
+    minHeight: number
+    caption: string
 }
 
 /** The exclusion list: exact names, and wildcard patterns split at their stars. */

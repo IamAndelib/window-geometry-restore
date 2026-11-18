@@ -1207,7 +1207,7 @@ Item {
         log(entry.label + ': window placed by the user, not restoring it')
     }
 
-    // A window's size as Engine.isDialog reads it.
+    // A window's size and title as Engine.isDialog reads them.
     /**
      * @param {KWindow} w
      * @returns {DialogSize}
@@ -1217,7 +1217,10 @@ Item {
             width: Math.round(w.width),
             height: Math.round(w.height),
             clientWidth: Math.round(w.clientGeometry ? w.clientGeometry.width : w.width),
-            minWidth: w.minSize ? Math.round(w.minSize.width) : 0
+            clientHeight: Math.round(w.clientGeometry ? w.clientGeometry.height : w.height),
+            minWidth: w.minSize ? Math.round(w.minSize.width) : 0,
+            minHeight: w.minSize ? Math.round(w.minSize.height) : 0,
+            caption: Engine.openingTitle(w.caption)
         }
     }
 
@@ -1248,12 +1251,14 @@ Item {
         }
         // Not the app's window but a dialog shown without a parent (Engine.isDialog): Gecko's
         // primary-password prompt opens that way before the main window, and took the main
-        // window's maximized or tiled state, then saved it as the app's layout. Judged against
-        // the saves this window could take; noteGeometry looks again when its size changes.
+        // window's maximized or tiled state, then saved it as the app's layout; Kdenlive's welcome
+        // screen took the main window's place, and the main window, opened beside it, wasn't
+        // restored. Judged against the saves this window could take; noteGeometry looks again
+        // when its size changes.
         var size = dialogSizeOf(w)
         if (Engine.isDialog(size, session.saves, taken)) {
-            if (!entry.dialog) log(entry.label + ': "' + caption + '" is a dialog-sized window (much smaller than the ' +
-                'app\'s saved windows, at its minimum width): left as it is, not saved')
+            if (!entry.dialog) log(entry.label + ': "' + caption + '" is a dialog-sized window (sized to its content, smaller ' +
+                'than the app\'s saved windows): left as it is, not saved')
             entry.dialog = { saves: session.saves.filter(function (s, i) { return !taken[i] }) }
             return null
         }

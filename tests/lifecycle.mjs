@@ -3991,3 +3991,63 @@ test('a window dragged out of its tile and back in is not untouched: no hand-off
     const f = savedApp(rt, 'doc').d['desk-uuid-1'].w[0].f
     assert.deepEqual([f.x, f.y, f.w, f.h], [600, 400, 1200, 800])
 })
+
+// --- A welcome screen the main window opens beside (Kdenlive 26.08) ---
+// Measured on KWin 6.8.2: "Kdenlive", 612x648 at its minimum size both ways, resizable; "New
+// Project…" opens the main window, titled "Kdenlive" too, while the welcome screen stays open.
+
+const KDENLIVE = 'org.kde.kdenlive'
+const MAIN_SAVE = { c: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 150, y: 90, w: 1280, h: 756, o: null }
+const welcomeScreen = (rt) => {
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 654, y: 216, width: 612, height: 648 })
+    w.minSize = { width: 612, height: 648 }
+    rt.trackWindow(w)
+    return w
+}
+const kdenliveMain = (rt) => {
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Kdenlive', x: 320, y: 162, width: 1280, height: 756 })
+    w.minSize = { width: 960, height: 699 }
+    rt.trackWindow(w)
+    return w
+}
+
+test('a welcome screen sized to its content stays as it opens, and the main window opened beside it is restored', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    const welcome = welcomeScreen(rt)
+    assert.deepEqual(frameOf(welcome), [654, 216, 612, 648], 'left as it opened')
+    assert.ok(rt.getLogs().some((l) => l.includes('"Kdenlive" is a dialog-sized window')))
+    advanceClock(rt, 3000)
+    const main = kdenliveMain(rt)
+    assert.deepEqual(frameOf(main), [150, 90, 1280, 756], 'the main window restored')
+    welcome.emitClosed()
+    advanceClock(rt, 60000)
+    main.emitMoveResizeStarted()
+    main._setFrame({ x: 200, y: 120, width: 1300, height: 760 })
+    main.emitClosed()
+    assert.deepEqual(savedApp(rt, KDENLIVE).d['desk-uuid-1'].w.map((s) => [s.c, s.x, s.w]), [['Kdenlive', 200, 1300]], 'only the main window saved')
+})
+
+test('a main window opened after the welcome screen\'s restore deadline is restored too: the welcome screen isn\'t the app', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    welcomeScreen(rt)
+    advanceClock(rt, Engine.RESTORE_TIMEOUT_MS + 5000)
+    rt.tick()
+    const main = kdenliveMain(rt)
+    assert.deepEqual(frameOf(main), [150, 90, 1280, 756])
+})
+
+test('a welcome screen doesn\'t take the main window\'s maximized state; the main window does', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [{ ...MAIN_SAVE, max: 3 }] }))
+    const welcome = welcomeScreen(rt)
+    assert.equal(welcome.maximizeMode, 0)
+    const main = kdenliveMain(rt)
+    assert.equal(main.maximizeMode, 3)
+})
+
+test('a window at its minimum size with the save\'s title is the app\'s window, and is restored', () => {
+    const rt = buildRuntime(savedLayouts({ [KDENLIVE]: [MAIN_SAVE] }))
+    const w = makeWindow({ cls: KDENLIVE, caption: 'Untitled / HD 1080p 25 fps — Kdenlive', x: 654, y: 216, width: 612, height: 648 })
+    w.minSize = { width: 612, height: 648 }
+    rt.trackWindow(w)
+    assert.deepEqual([w.x, w.y], [150, 90])
+})

@@ -78,11 +78,13 @@ on, and how to test a change before it reaches anyone's desktop.
     bursts chained as `finalizeMonitor` chains closes). Close times count real time, after every
     saved one (`followSavedCloses`, `nextCloseTime`): a clock that ran ahead, or was set back,
     doesn't chain later closes into one burst.
-  - A window at its minimum width (sized to its content) and under half the width and height of
-    every save it could take is a dialog shown without a parent (a startup password prompt,
-    `Engine.isDialog`; the client width, as KWin's `minSize` is the client's): it isn't restored,
-    isn't saved, and doesn't count as the app being open (on its monitor, or at all for a fresh
-    start), until it grows out of it (noteGeometry) (issue #3).
+  - A window at its minimum width (sized to its content) is a dialog shown without a parent if,
+    against every save it could take, it is under half the width and height (a startup password
+    prompt, issue #3), or it is also at its minimum height, smaller both ways, and titled unlike
+    the save (Kdenlive's welcome screen, which the main window opens beside) (`Engine.isDialog`;
+    client sizes, as KWin's `minSize` is the client's). It isn't restored, isn't saved, and
+    doesn't count as the app being open (on its monitor, or at all for a fresh start), until it
+    grows out of it (noteGeometry).
   - A window that can't be resized takes the one save left only if its size is near the save's
     (`Engine.nearSize`), otherwise only a save matching its title or size: a splash screen opens
     before the app's window and would take its place (`matchFor`).

@@ -838,6 +838,31 @@ def s_dialog_before_maximized_main_window():
         check(sb.window("Inbox")["maximized"] == 3, "the main window maximized again: %s" % sb.window("Inbox"))
 
 
+def s_welcome_screen_beside_main_window():
+    """Kdenlive 26.08: a welcome screen at its minimum size both ways opens first, and its main
+    window opens beside it. The welcome screen stays as it opens and isn't saved; the main
+    window, the app's first, is restored (it was left where KWin put it, the welcome screen at
+    its place)."""
+    app, main = "org.example.studio", "Untitled - Studio"
+    with sandbox(outputs=1) as sb:
+        a = sb.open_app(app, main, size=(1200, 700))
+        w = sb.window(main)
+        size = rect(w)[2:]
+        x, y = titlebar(w)
+        sb.drag((x, y), (x + 300 - rect(w)[0], y + 150 - rect(w)[1]))
+        sb.wait(lambda: rect(sb.window(main))[:2] == (300, 150), 3, "the drag")
+        a.close()
+        welcome = sb.open_app(app, "Studio", size=(612, 648), fitted=True)
+        check(rect(sb.window("Studio"))[2] < 700, "the welcome screen keeps its size: %s" % (rect(sb.window("Studio")),))
+        check(logged(sb.script_log(), '"Studio" is a dialog-sized window'), "logged")
+        m = sb.open_app(app, main, size=(1200, 700))
+        check(rect(sb.window(main)) == (300, 150) + size, "the main window restored: %s" % (rect(sb.window(main)),))
+        welcome.close()
+        m.close()
+        saved = [s["c"] for s in sb.saved()["apps"][app]["w"]]
+        check(saved == [main], "only the main window saved: %s" % saved)
+
+
 def s_dialog_before_tiled_main_window():
     """The main window saved in the left quick tile; the prompt opens first and gets focus:
     not tiled. The main window, opened while the prompt is still up, gets its tile."""
@@ -1255,6 +1280,7 @@ SCENARIOS = [
     s_slow_rename_confirmed,
     s_dialog_before_maximized_main_window,
     s_dialog_before_tiled_main_window,
+    s_welcome_screen_beside_main_window,
     s_late_monitor,
     s_unplugged_monitor_then_close,
     s_monitors_independent_while_running,

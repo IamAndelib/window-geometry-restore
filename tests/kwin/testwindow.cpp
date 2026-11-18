@@ -1,11 +1,12 @@
 // A test window for the KWin sandbox (tests/kwin/sandbox.py builds it).
 //
-//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [dialog] [maximized] [retitle=NEW] [retitle-ms=MS]
+//   testwindow APP_ID TITLE [WIDTHxHEIGHT] [fixed] [dialog] [fitted] [maximized] [retitle=NEW] [retitle-ms=MS]
 //
 // The app id becomes the window's resourceClass in KWin, so scenarios can run
 // several apps side by side. "fixed" makes the window non-resizable; "maximized"
 // opens it maximized, as apps that remember being maximized do. "dialog" makes its minimum
-// width its width, as a dialog sized to its content (Thunderbird's password prompt). "retitle=NEW"
+// width its width, as a dialog sized to its content (Thunderbird's password prompt); "fitted" its
+// minimum size its size, still resizable (Kdenlive's welcome screen). "retitle=NEW"
 // changes the title to NEW shortly after the window is shown (300 ms, or MS), as browsers do.
 #include <QColor>
 #include <QGuiApplication>
@@ -40,6 +41,9 @@ int main(int argc, char **argv)
     window.resize(size);
     if (args.contains(QStringLiteral("dialog"))) {
         window.setMinimumWidth(size.width());
+    }
+    if (args.contains(QStringLiteral("fitted"))) {
+        window.setMinimumSize(size);
     }
     if (args.contains(QStringLiteral("fixed"))) {
         window.setMinimumSize(size);

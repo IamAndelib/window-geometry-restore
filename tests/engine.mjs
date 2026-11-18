@@ -132,6 +132,20 @@ test('isDialog: at its minimum width and under half of every save it could take'
     assert.equal(engine.isDialog(win(426, 183, 425), saves, [true, true]), false, 'none free')
 })
 
+test('isDialog: at its minimum size both ways, smaller than every save it could take, with an unlike title', () => {
+    // Kdenlive 26.08's welcome screen, and the main window's save it would take.
+    const main = save({ caption: 'Untitled / HD 1080p 25 fps — Kdenlive', width: 1280, height: 756 })
+    const win = (fields = {}) => ({ width: 612, height: 648, clientWidth: 612, clientHeight: 648, minWidth: 612, minHeight: 648, caption: 'Kdenlive', ...fields })
+    assert.equal(engine.isDialog(win(), [main], []), true, 'the welcome screen')
+    assert.equal(engine.isDialog(win({ minHeight: 300 }), [main], []), false, 'taller than its minimum: an app\'s window')
+    assert.equal(engine.isDialog(win({ minHeight: 0 }), [main], []), false, 'minimum height unknown')
+    assert.equal(engine.isDialog(win({ height: 800, clientHeight: 800, minHeight: 800 }), [main], []), false, 'taller than the save')
+    assert.equal(engine.isDialog(win(), [save({ caption: 'Narrow', width: 600, height: 1000 })], []), false, 'wider than the save')
+    assert.equal(engine.isDialog(win({ caption: 'Untitled / HD 1080p 25 fps — Kdenlive' }), [main], []), false, 'the save\'s title: the app\'s window')
+    assert.equal(engine.isDialog(win(), [main, save({ caption: 'Small', width: 500, height: 400 })], []), false, 'against every save')
+    assert.equal(engine.isDialog(win({ clientWidth: 700 }), [main], []), false, 'wider than its minimum')
+})
+
 test('parseList/isListed: exact, wildcard, no false positives', () => {
     const parsed = engine.parseList('org.kde.spectacle\n\nsteam*\nmid*game\nChrome-ABC-Default')
     assert.equal(engine.isListed('org.kde.spectacle', parsed), true)
